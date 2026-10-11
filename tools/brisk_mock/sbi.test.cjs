@@ -604,6 +604,11 @@ test('the ping loop runs through the real decoder: pings are forwarded, echoes b
     emit: async b => batches.push(b) });
   const settled = done.then(() => 'ended', error => error);
   try {
+    // Time the loop from the socket, not from live(): loading the decoder and snapshot can take
+    // most of a second on a busy CI runner.
+    for (const deadline = Date.now() + 30000; !pingingSocket.last && Date.now() < deadline;) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
     await new Promise(resolve => setTimeout(resolve, 900));            // more than two heartbeat windows
     const socket = pingingSocket.last;
     const pings = socket.sent.filter(f => f[0] === 0xf0);
