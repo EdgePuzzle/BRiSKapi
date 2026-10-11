@@ -395,8 +395,10 @@ test('a missing user ID box is reported and nothing is pressed', e2e, async () =
   await site.listen();
   try {
     const passkey = (await enrollOn(site)).credentials.at(-1);
+    // The passkey wait starts before the page loads, the box search after it: leave the search (1.5 s)
+    // room to finish and be reported even when a slow runner takes seconds to load the page.
     const run = await runHelper('login', { ...baseOptions(site, { loginUrl: `${site.mainOrigin}/eshiten/login`, passkeyButton: 'パスキーを使う',
-      userField: 'input[name="nope"]', userId: 'abc123', clickWaitMs: 1500, assertTimeoutMs: 6000 }), credential: passkey });
+      userField: 'input[name="nope"]', userId: 'abc123', clickWaitMs: 1500, assertTimeoutMs: 15_000 }), credential: passkey });
     assert.equal(run.result.ok, false);
     assert.match(run.result.error, /never asked for the passkey; the passkey button text, the user ID box or the login URL/);
     assert.match(run.stderr, /No user ID box found on the login page/);
