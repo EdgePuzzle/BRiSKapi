@@ -152,7 +152,10 @@ bundle) and in pybrisk's SBI research (`engineio.cjs` and `sbi.cjs`):
    option wins; 18000 if the server says nothing). The master is checked as soon as
    it is read (below). The boot response's `exceptional_sq` and `base_prices` are
    pushed into the WASM after that and before the snapshot, as the vendor client does, and the master's
-   limits are re-read after every frame in case the decoder changes them.
+   limits are re-read after every frame in case the decoder changes them (for 18000 the boot's own
+   values are used and later changes are counted, see below). A special quote for a code with a
+   letter (`167A`) is not sent: how the decoder takes such a code is not known, so it is listed in
+   `boot_applied.skipped_exceptional_sq`.
 
 The ping loop is the WASM's own. In the real decoder, market and sync frames never
 trigger a ping; each heartbeat frame (`0xF0` and an 8-byte little-endian clock)
@@ -164,10 +167,30 @@ The stock view and the master are read at version-specific positions. Protocol
 16000 (the demo) is the vendor client's own layout. For 18000 (SBI) the stock
 view has the same fields in the same order with the leading word dropped, so every
 index is one lower; this comes from a single independent parser of SBI's current
-build and is not confirmed against SBI itself. The master's 18000 layout has no
-independent source at all, so a master that does not look like a market (numeric
-codes, base prices inside their limits, plausible lot sizes) is refused. Any other
-protocol version is refused rather than read at guessed offsets.
+build and is not confirmed against SBI itself. Any other protocol version is refused
+rather than read at guessed offsets.
+
+The decoder's own master records are known only for 16000, so for 18000 the master is
+read from the master file it was loaded from (`parseMasterFile` in `decoder.cjs`):
+fixed 180-byte records, one per issue in issue order. pybrisk's research documents the
+record size, the binary header (a word of unknown use, then base price, upper and lower
+limit in tenths of a yen), the code's position and that the issue index is the record
+index; its March 2026 SBI capture holds a real 18000 master file (4,445 records). The
+2021 demo's master file has the same records after a 444-byte preamble. Read this way,
+it equals the vendor decoder's own master for every one of its 4,131 issues (tested),
+which places the other fields: issue type at byte 40, code at 50 (five wide, for some
+preferred shares), name at 74 (Shift-JIS, less a market prefix such as `Ｍ－`, which the
+decoder drops), lot size right-aligned up to 139 and a flag at 141 the decoder reports
+as tick type 3 (exactly 100 issues carry it in SBI's file: TOPIX 100). SBI's file passes
+the same reading: every code valid and distinct (350 have a letter), lot sizes of 1, 10,
+100 and 1,000. Records are counted back from the end of the file with the decoder's own
+issue count, so the demo's preamble is skipped; an 18000 file must hold exactly that many
+records (SBI's has no preamble), or the session stops rather than pair quotes with the
+wrong codes. Changes to base prices the boot response names
+are applied from its values; a change the decoder makes itself can't be read back, so it
+is counted (`unread_base_prices` in the bootstrap's transport). The master is still
+refused if it does not look like a market (security codes, base prices inside their
+limits, plausible lot sizes, names).
 
 What is verified: the decoder SBI served in pybrisk's March 2026 capture exports
 the demo's interface apart from `_getPortfolio` (so SBI quotes have no
@@ -176,7 +199,7 @@ decoder is tested against the vendor client's own indices on real data, and its
 heartbeat, ping reply and callbacks through its function table; the ping loop and
 the whole flow run offline against fake servers (plain, Engine.IO 3 and 4) using it.
 What is not verified against a live session: any of the above on SBI itself, the
-18000 master layout (now known to differ from the demo's; see below), and three wire details that are not public: the Socket.IO
+18000 master read from the file (built on a March 2026 file, not today's), and three wire details that are not public: the Socket.IO
 connect parameters, the `startLive` payload and the catch-up request body. They live in a profile
 (`BRISK_SBI_PROFILE`, or `sbi.connect(profile=...)`); the defaults are labelled
 unverified, and the catch-up request is used only when the profile names a format.
@@ -194,17 +217,18 @@ e-shiten's BRiSK Next (`next.e-shiten.brisk.jp`) is the same app. In sessions on
 (`fita.35e38ad5…`), reached only through the template path above. On both, cookie
 sign-in, every REST endpoint and the decoder, master and snapshot downloads worked.
 Both stopped while reading the master with the demo's 144-byte records (a lot size
-beyond 2^53), so the WebSocket was never reached: the 18000 master layout is not the
-demo's. Lot sizes are now read without failing and the master check runs before boot
-base prices are matched to it, so this ends in `stock master layout not recognised`
-with the failed checks instead. e-shiten enforces one BRiSK session per user: opening
+beyond 2^53), so the WebSocket was never reached: the decoder's 18000 master records are
+not the demo's. That is why an 18000 master is now read from the file (above); their
+master file was about 800 KB for 4,443 issues, which fits the same 180-byte records.
+e-shiten enforces one BRiSK session per user: opening
 it in a second tab stopped the first (message 10011).
 
 `site="e-shiten"` selects it (`BRISK_SBI_SITE` for the host; saved cookies in
 `e-shiten-cookies.json`, `BRISK_ESHITEN_COOKIES`). Its batches say
 `source=eshiten_live` and `kind=eshiten_websocket`. Its sessions are never offered
 for contribution, neither market data nor timing, and the archive accepts neither
-label. There is no passkey site entry for it: Tachibana's sign-in has not been mapped.
+label. `brisk login` can sign in to it with a passkey (site `e-shiten`; see
+[Tachibana e-shiten's sign-in](#tachibana-e-shitens-sign-in)).
 
 ## Passkey sign-in
 
@@ -213,8 +237,10 @@ signing in with a passkey, in place of copying them from a browser. It is not ti
 a *site* (`briskapi/sites.py`) says where the login page is, what its passkey button says and which host
 the BRiSK cookies belong to. SBI, Matsui, Monex and SMBC Nikko are built in (each runs BRiSK on its own
 `<broker>.brisk.jp`, found by checking the hosts and the brokers' own pages; none is verified against a
-live account), and `~/.config/brisk/sites.json` adds or edits entries. A person normally has one
+live account), and so is Tachibana e-shiten (BRiSK Next on `next.e-shiten.brisk.jp`, its sign-in mapped
+from its public login page). `~/.config/brisk/sites.json` adds or edits entries. A person normally has one
 brokerage, so the saved login is a single record, `{site, credential}`, and `login` needs no site argument.
+A site with a `user_field` (e-shiten) also keeps the `user_id` that `enroll` asked for.
 
 ### How a passkey sign-in works, and why Chrome can stand in
 
@@ -239,7 +265,7 @@ Windows itself, using Windows' Chrome, Node and Python; WSL is Linux and would n
 ### The helper
 
 `decoder/passkey.cjs` runs under Node and drives a Chrome it starts itself. It holds no site of its own:
-the login URL, button text and cookie host come in the request.
+the login URL, button text, cookie host and any user ID box and user ID come in the request.
 
 1. **Private pipe, no port.** Chrome is started with `--remote-debugging-pipe` and talked to
    over file descriptors 3 and 4 (NUL-framed JSON). A loopback debugging port would let any
@@ -257,21 +283,28 @@ the login URL, button text and cookie host come in the request.
    hide this. The default is a visible window, which lets a person take over where a guess
    about a broker's pages is wrong or the broker refuses the automation.
 3. **A virtual authenticator on every page**, including popups and new tabs
-   (`Target.setAutoAttach`). It is a CTAP2.1 platform authenticator with resident keys that
-   approves presence and verification itself.
-4. **Enrolling** attaches an empty authenticator, opens the login page and waits for
+   (`Target.setAutoAttach`, with new pages held until it is in place). It is a CTAP2.1 platform
+   authenticator with resident keys that approves presence and verification itself. A page gets
+   the latest copy of the passkey, so a popup that opens after a sign-in in the same run signs
+   with the advanced counter rather than the one Chrome started with, which the site would
+   refuse as a clone.
+4. **Enrolling** attaches an empty authenticator, opens the site's `enroll_url` (or its login page) and waits for
    `WebAuthn.credentialAdded` while the person registers a passkey. The captured credential is
    kept in memory and saved, with the chosen site, only after the person confirms, so a failed
    enrollment never replaces a passkey that still works. `enroll` refuses to overwrite without
    `--replace`, and with no `--site` it asks which broker (or fails, without a terminal).
-5. **Signing in** imports the saved credential, opens the login page, clicks the control whose
+5. **Signing in** imports the saved credential, opens the login page, types the saved user ID into
+   the site's `user_field` when it has one (`Input.insertText`, falling back to the value setter and
+   `input`/`change` events; without the box nothing is pressed), clicks the control whose
    text contains the site's `passkey_button` (trusted `Input` mouse events; the shortest matching
-   label wins, so a "can't sign in?" link does not) and waits for `credentialAsserted`. Then it
+   label wins, so a "can't sign in?" link does not; a control drawn as an image is labelled by its
+   `alt`) and waits for `credentialAsserted` from any page, so a ceremony in a popup counts. Then it
    opens `launch_url` when there is one, or waits for the person to open BRiSK, and polls for a
    cookie that starts with the site's `cookie_prefix` on exactly its BRiSK host. Only that host's
    cookies are returned, never those of the broker's main site, whose session is destroyed with
    the profile.
-6. **Delivery.** SBI is the one site with a data client, so its cookies go to `sbi.login()`; the
+6. **Delivery.** SBI and e-shiten have a data client (`briskapi.sbi`, with `site="e-shiten"` for the
+   latter), so their cookies go to `sbi.login()` and are saved as that site's cookies; the
    others are saved to `~/.config/brisk/cookies/<site>.json` (owner-only) for the person's own use.
    A data client sends its cookies to one host, so a site bound to a client whose cookie host is not
    that client's host is refused before Chrome starts (a `sites.json` entry can never claim a client).
@@ -309,7 +342,9 @@ Tests run Chrome against a fake broker (`tools/brisk_mock/fake_sbi_passkey.cjs`)
 what a real site verifies: the ES256 signature, the relying-party hash, user presence and
 verification, and a counter that must increase. They cover enroll, sign-in, a stale passkey
 being refused as a clone, `launch_url`, a missing passkey control, delivery to a data client and to a
-file, and that nothing secret is logged. They skip when Chrome is absent. They were run on macOS, on native Windows 11 (Windows' own Node,
+file, and that nothing secret is logged. A page shaped like e-shiten's (user ID box, image-only
+control, ceremony in a named popup that reports to its opener) covers typing the user ID, a missing
+box, and a second ceremony in a popup after a first one. They skip when Chrome is absent. They were run on macOS, on native Windows 11 (Windows' own Node,
 Python and Chrome; the full suite including the real Credential Manager) and, in CI, on Linux.
 
 What is not verified against any real broker: each site's login URL (SBI's redirected to a
@@ -318,7 +353,8 @@ text, how BRiSK is launched from the main site, the name of the BRiSK session co
 known, so the other sites accept any cookie on their BRiSK host once it appears), whether a broker
 accepts a virtual authenticator at registration or asks for more identity checks, whether it refuses
 an automated Chrome (see above), and how long the cookie lasts. Each is an overridable default or a
-manual step, and a wrong guess ends in an explicit error. The automated runs on Windows are headless; the
+manual step, and a wrong guess ends in an explicit error. e-shiten's login page is the one whose markup was
+read (below); the rest of that list applies to it too. The automated runs on Windows are headless; the
 visible Chrome window of `enroll` and `login` was also tried by hand on Windows 11 (the real console
 prompt, Credential Manager) and on macOS. The DevTools `WebAuthn` domain is marked experimental.
 
@@ -328,6 +364,34 @@ loading the page): registration through the virtual authenticator, `brisk login`
 advancing sign counter, on macOS and by hand on Windows. A `sites.json` entry for it needs only
 `login_url` `https://webauthn.io/`, `cookie_host` `webauthn.io`, `passkey_button` `Authenticate` and
 `cookie_prefix` `sessionid`.
+
+### Tachibana e-shiten's sign-in
+
+Mapped on 2026-10-11 from e-shiten's public pages, without an account. Its PC login
+(`www.e-shiten.jp/passkeylogin.html`) offers 「パスキーでログイン」, a link to
+`tr2.e-shiten.jp/e-shiten?auth=passkey`, and 「電話番号認証でログイン」, a link to the same address without
+the query. The passkey form (Shift_JIS, jQuery) asks for the user ID (`kokyakuUserId`, letters and
+digits) before the passkey. Its control, 「パスキーを使う」, is an `<a href="#">` around an `<img alt>`,
+with no text of its own. Its handler checks the ID, opens `window.open('about:blank', 'passkey')`
+and submits the form into it. The ceremony runs in that popup, which `postMessage`s the result
+(cookies, SID) to the opener, and the opener submits it to finish signing in. So the
+site entry is `login_url` the passkey form, `user_field` `input[name="kokyakuUserId"]` and
+`passkey_button` 「パスキーを使う」. Enter in the ID box also presses it.
+
+Registering needs a sign-in first: user ID, PIN and phone-number authentication at
+`tr2.e-shiten.jp/e-shiten` (the `enroll_url`). Tachibana says the registration screen follows that
+sign-in, and that passkeys are managed under お客様情報 › 設定情報 › パスキー認証. It also says
+passkeys are required for trading and withdrawals from 2026-12-12, and that a withdrawal asks for
+the passkey again (in the same kind of popup).
+
+Not verified: whether e-shiten accepts a virtual authenticator at registration (it says Microsoft
+Password Manager cannot register one, which may mean it filters authenticators); how BRiSK Next is
+opened from the signed-in site (there is no `launch_url`, so it is opened by hand in the window); and
+the BRiSK Next session cookie's name. `cookie_prefix` is `session_` because the two sites serve the
+same build, and SBI's cookie is `session_…`. If it is wrong, `login` ends with "No
+next.e-shiten.brisk.jp session cookie appeared", and `cookie_prefix: ""` in `sites.json` accepts any
+cookie of that host. Because e-shiten allows one BRiSK session, the one opened during sign-in is the one
+the feed then uses: Chrome is closed by then.
 
 ## Reconstructing a recording
 

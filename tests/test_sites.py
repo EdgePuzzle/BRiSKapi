@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from briskapi import sites
+from briskapi import sbi, sites
 
 
 @pytest.fixture(autouse=True)
@@ -19,13 +19,37 @@ def write(tmp_path, document):
     return path
 
 
-def test_the_built_in_sites_are_four_brokers_and_only_sbi_has_a_data_client():
-    assert list(sites.BUILTIN) == ['sbi', 'matsui', 'monex', 'smbcnikko']
+def test_the_built_in_sites_are_five_brokers_and_sbi_and_e_shiten_have_a_data_client():
+    assert list(sites.BUILTIN) == ['sbi', 'matsui', 'monex', 'smbcnikko', 'e-shiten']
     for site in sites.BUILTIN.values():
-        assert site.cookie_host == f'{site.id}.brisk.jp'
+        assert site.cookie_host.endswith('.brisk.jp')
         assert urlsplit(site.login_url).scheme == 'https' and site.passkey_button and site.source == 'built in'
-    assert {site.id for site in sites.BUILTIN.values() if site.client} == {'sbi'}
-    assert sites.BUILTIN['sbi'].cookie_prefix == 'session_'
+    assert {site.id: site.client for site in sites.BUILTIN.values() if site.client} == {'sbi': 'sbi', 'e-shiten': 'e-shiten'}
+    for site in (sites.BUILTIN['sbi'], sites.BUILTIN['e-shiten']):
+        assert urlsplit(sbi.SITES[site.client].origin).hostname == site.cookie_host, 'cookies go only to the client of that host'
+        assert site.cookie_prefix == 'session_'
+    assert all(site.cookie_host == f'{site.id}.brisk.jp' for site in sites.BUILTIN.values() if not site.client)
+
+
+def test_e_shiten_starts_enrolling_at_its_phone_sign_in_and_types_the_user_id_before_the_passkey():
+    eshiten = sites.BUILTIN['e-shiten']
+    assert (eshiten.login_url, eshiten.enroll_url) == ('https://tr2.e-shiten.jp/e-shiten?auth=passkey', 'https://tr2.e-shiten.jp/e-shiten')
+    assert (eshiten.passkey_button, eshiten.user_field) == ('パスキーを使う', 'input[name="kokyakuUserId"]')
+    assert all(site.enroll_url is None and site.user_field is None for site in sites.BUILTIN.values() if site.id != 'e-shiten')
+
+
+def test_enroll_url_and_user_field_can_be_given_and_are_checked(tmp_path):
+    path = write(tmp_path, {'sites': [{'id': 'mine', 'login_url': 'https://m.example/passkey', 'cookie_host': 'mine.brisk.jp',
+                                       'enroll_url': 'https://m.example/first', 'user_field': '#user'}]})
+    mine = sites.load_sites(path)['mine']
+    assert (mine.enroll_url, mine.user_field) == ('https://m.example/first', '#user')
+    with pytest.raises(sites.SiteError, match=r'\(mine\): enroll_url must be an http\(s\) URL'):
+        sites.load_sites(write(tmp_path, {'sites': [{'id': 'mine', 'login_url': 'https://m.example/', 'cookie_host': 'm.example',
+                                                     'enroll_url': 'javascript:alert(1)'}]}))
+    for bad in ('', ' ', 7):
+        with pytest.raises(sites.SiteError, match='user_field must be non-empty text, or null for none'):
+            sites.load_sites(write(tmp_path, {'sites': [{'id': 'e-shiten', 'user_field': bad}]}))
+    assert sites.load_sites(write(tmp_path, {'sites': [{'id': 'e-shiten', 'user_field': None}]}))['e-shiten'].user_field is None
 
 
 def test_without_a_sites_file_the_built_ins_are_all_there_is(tmp_path):
@@ -109,6 +133,6 @@ def test_a_bad_sites_file_is_refused_with_a_clear_reason(tmp_path, document, mes
 
 
 def test_an_unknown_site_lists_the_choices():
-    with pytest.raises(sites.SiteError, match=r"Unknown site 'nope'. Choose one of: sbi, matsui, monex, smbcnikko \(see `brisk sites`\)"):
+    with pytest.raises(sites.SiteError, match=r"Unknown site 'nope'. Choose one of: sbi, matsui, monex, smbcnikko, e-shiten \(see `brisk sites`\)"):
         sites.get_site(sites.BUILTIN, 'nope')
     assert sites.get_site(sites.BUILTIN, 'monex').name == 'Monex Securities'

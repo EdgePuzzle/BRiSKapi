@@ -131,6 +131,18 @@ test('options take defaults, accept overrides and refuse bad values', () => {
   assert.equal(originOf('nope'), 'an invalid URL');
 });
 
+test('a user ID box comes with the user ID to type into it', () => {
+  const base = { loginUrl: 'https://a.example/', cookieHost: 'x.brisk.jp' };
+  assert.equal(DEFAULTS.userField, null);
+  assert.equal(DEFAULTS.userId, null);
+  const field = 'input[name="kokyakuUserId"]';
+  assert.equal(resolveOptions({ ...base, userField: field, userId: 'abc123' }, 'login').userId, 'abc123');
+  assert.throws(() => resolveOptions({ ...base, userField: field }, 'login'), /userId is required with userField/);
+  assert.throws(() => resolveOptions({ ...base, userField: field, userId: '' }, 'login'), /userId is required with userField/);
+  assert.throws(() => resolveOptions({ ...base, userField: ' ', userId: 'a' }, 'login'), /userField must be a CSS selector/);
+  assert.doesNotThrow(() => resolveOptions({ ...base, userField: field }, 'enroll'), 'enrolling is done by hand');
+});
+
 test('a profile left by a helper that was force-killed is removed at the next start, and live or young ones are not', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sweep-test-'));
   try {
@@ -340,6 +352,55 @@ test('a login page without the passkey control fails clearly instead of hanging'
     assert.equal(run.result.ok, false);
     assert.match(run.result.error, /never asked for the passkey.*button text or the login URL/);
     assert.match(run.stderr, /No "no such button" control found on the login page/);
+  } finally { site.close(); }
+});
+
+test('a site like e-shiten: the user ID is typed, an image-only control is pressed and the popup signs', e2e, async () => {
+  const site = new FakeSbi();
+  await site.listen();
+  try {
+    const first = (await enrollOn(site)).credentials.at(-1);
+    const eshiten = (credential) => ({ ...baseOptions(site, { loginUrl: `${site.mainOrigin}/eshiten/login`, passkeyButton: 'パスキーを使う',
+      userField: 'input[name="kokyakuUserId"]', userId: 'abc123' }), credential });
+    const run = await runHelper('login', eshiten(first));
+    assert.equal(run.result.ok, true, run.stderr);
+    assert.equal(run.result.cookies.session_fake, site.briskCookieValue);
+    assert.deepEqual(site.userIds, ['abc123'], 'the site must receive the saved user ID once');
+    const advanced = run.credentials.at(-1);
+    assert.equal(advanced.signCount, site.counter, 'the counter signed in the popup must be the one reported');
+    assert.match(run.stderr, /Typed the saved user ID/);
+    assert.ok(!run.stderr.includes('abc123'), 'the user ID must not be logged');
+
+    const again = await runHelper('login', eshiten(advanced));
+    assert.equal(again.result.ok, true, again.stderr);
+    assert.equal(site.accepted, 2);
+  } finally { site.close(); }
+});
+
+test('a popup that asks again after a sign-in signs with the advanced counter, not the one Chrome started with', e2e, async () => {
+  const site = new FakeSbi();
+  await site.listen();
+  try {
+    const passkey = (await enrollOn(site)).credentials.at(-1);
+    const run = await runHelper('login', { ...baseOptions(site, { loginUrl: `${site.mainOrigin}/twice` }), credential: passkey });
+    assert.equal(run.result.ok, true, run.stderr);
+    assert.deepEqual(site.refusals, [], 'the popup must not sign with a counter the site has already seen');
+    assert.equal(site.accepted, 2);
+    assert.equal(run.credentials.at(-1).signCount, site.counter);
+  } finally { site.close(); }
+});
+
+test('a missing user ID box is reported and nothing is pressed', e2e, async () => {
+  const site = new FakeSbi();
+  await site.listen();
+  try {
+    const passkey = (await enrollOn(site)).credentials.at(-1);
+    const run = await runHelper('login', { ...baseOptions(site, { loginUrl: `${site.mainOrigin}/eshiten/login`, passkeyButton: 'パスキーを使う',
+      userField: 'input[name="nope"]', userId: 'abc123', clickWaitMs: 1500, assertTimeoutMs: 6000 }), credential: passkey });
+    assert.equal(run.result.ok, false);
+    assert.match(run.result.error, /never asked for the passkey; the passkey button text, the user ID box or the login URL/);
+    assert.match(run.stderr, /No user ID box found on the login page/);
+    assert.deepEqual(site.userIds, [], 'without a user ID the passkey control must not be pressed');
   } finally { site.close(); }
 });
 

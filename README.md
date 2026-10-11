@@ -124,8 +124,10 @@ the `startLive` payload and the catch-up request body. Set them with
 `trace_protocol=True` (every token redacted); until they are right it stops with an
 explicit error rather than guessing. Please report what you see. Sessions on
 2026-10-08 got through sign-in, the data endpoints and the decoder download, then
-stopped at the stock master: the current build's record layout isn't known yet, so
-expect `stock master layout not recognised` there. Your cookies go only to sbi.brisk.jp. SBI market data is shared only after an explicit choice for
+stopped at the stock master. The master is now read from the file BRiSK serves, whose
+format is checked against the demo and a March 2026 SBI file; the steps after it
+(the stream and its first quotes) have not run against a live session yet. Your cookies
+go only to sbi.brisk.jp. SBI market data is shared only after an explicit choice for
 that capture; the Python API requires `share_market_data=True`. With contribution
 on, a timing summary is shared even when market-data sharing is declined.
 
@@ -133,7 +135,9 @@ on, a timing summary is shared even when market-data sharing is declined.
 
 e-shiten's BRiSK Next ([next.e-shiten.brisk.jp](https://next.e-shiten.brisk.jp)) is the
 same app, so the same client serves it. Log in there in your browser and pass its
-cookies with `site="e-shiten"`; `brisk login` (passkey) doesn't cover it.
+cookies with `site="e-shiten"`, or let `briskapi` sign in with your e-shiten passkey
+([below](#signing-in-with-a-passkey-experimental)): `brisk enroll --site e-shiten` once,
+then `brisk login` before `brisk live --site e-shiten`.
 
 ```python
 sbi.login(cookies={...}, site="e-shiten")   # or BRISK_ESHITEN_COOKIES; remember=True keeps them apart from SBI's
@@ -150,8 +154,8 @@ record, read what Tachibana's BRiSK Next terms say about storing and reusing its
 
 Many brokers now have you sign in with a passkey. If yours does, `briskapi` can do the
 sign-in for you and keep the BRiSK session cookies, instead of you copying them from a
-browser. It works with the BRiSK sites of SBI, Matsui, Monex and SMBC Nikko, or any broker you
-add. It needs Chrome, Node 22+ and a safe place for the passkey: the macOS Keychain or Windows
+browser. It works with the BRiSK sites of SBI, Matsui, Monex, SMBC Nikko and Tachibana e-shiten,
+or any broker you add. It needs Chrome, Node 22+ and a safe place for the passkey: the macOS Keychain or Windows
 Credential Manager (on Linux, an owner-only file you opt into). It runs on macOS and Windows (run it
 from PowerShell or `cmd` so it uses Windows' own Chrome and Node, not WSL's) and is also tested on Linux.
 
@@ -169,13 +173,17 @@ without asking. The broker's site cannot tell the difference.
    The virtual authenticator receives it. When the site says it is registered, press Enter in
    the terminal: `briskapi` saves the passkey and your broker choice in the macOS Keychain or Windows Credential
    Manager, and Chrome closes.
+   At e-shiten, `enroll` first asks for your user ID, because its passkey form wants the ID before
+   the passkey; it is saved with the passkey. The window opens at e-shiten's usual sign-in (user ID,
+   PIN and phone-number authentication), and the passkey is registered on the screen shown after
+   signing in or under お客様情報 › 設定情報 › パスキー認証.
 2. **Each session, `brisk login`.** The same Chrome opens with the saved passkey loaded, goes to the
    login page and presses the passkey button, and the virtual authenticator signs. Open BRiSK from
    the broker's site in that window (or pass `--launch-url` to have it opened for you).
    `briskapi` reads the BRiSK session cookies, saves them and closes Chrome.
-3. **Then use it.** For SBI, `brisk live --sbi` and the `briskapi.sbi` API use the saved cookies.
-   For the other brokers `briskapi` has no data client yet, so the cookies are only saved
-   (under `~/.config/brisk/cookies/`) for your own use.
+3. **Then use it.** For SBI and e-shiten, `brisk live --sbi` or `brisk live --site e-shiten` and the
+   `briskapi.sbi` API use the saved cookies. For the other brokers `briskapi` has no data client
+   yet, so the cookies are only saved (under `~/.config/brisk/cookies/`) for your own use.
 
 Your existing passkeys on your phone or in a password manager are not touched. The broker simply
 lists one more passkey, which you can delete in its security settings.
@@ -186,7 +194,8 @@ lists one more passkey, which you can delete in its security settings.
   further check. It is kept only in the Keychain or Credential Manager (`BRISK_PASSKEY_STORE=file` keeps it in an
   owner-only file instead, which is weaker; on Windows that file's privacy comes from your user
   profile folder, which only you and administrators can read), never leaves your machine and is never shown in a
-  log. `brisk forget` deletes it here; remove it at the broker too.
+  log. For e-shiten your user ID is kept with it, in the same place. `brisk forget` deletes it here; remove
+  it at the broker too.
 - **It is experimental.** Each broker's login page, passkey button text and BRiSK launch come from
   its public pages, and none has been tried against a live account. Override them with
   `--login-url`, `--passkey-button` and `--launch-url`, or in `sites.json` below, and please report
@@ -203,8 +212,9 @@ brisk login                    # each session; the broker is the one you enrolle
 brisk forget                   # delete the saved passkey
 ```
 
-From Python: `passkey.enroll(site="matsui")` and `signin = passkey.login()`, where
-`signin.cookies` are the BRiSK cookies and `signin.client` is the data client for sites that have one.
+From Python: `passkey.enroll(site="matsui")` (for e-shiten, `passkey.enroll(site="e-shiten", user_id="...")`)
+and `signin = passkey.login()`, where `signin.cookies` are the BRiSK cookies and `signin.client` is the data
+client for sites that have one.
 
 To add a broker, or correct a built-in one, edit `~/.config/brisk/sites.json`:
 
@@ -212,6 +222,10 @@ To add a broker, or correct a built-in one, edit `~/.config/brisk/sites.json`:
 {"sites": [{"id": "mybroker", "name": "My Broker", "login_url": "https://broker.example/login",
             "cookie_host": "mybroker.brisk.jp", "passkey_button": "Sign in with a passkey"}]}
 ```
+
+Other keys: `cookie_prefix`, `launch_url`, `enroll_url` (where `enroll` starts, if the first sign-in
+is on another page than the passkey one) and `user_field` (a CSS selector for a user ID box that must
+be filled before the passkey control works; `enroll` then asks for the ID).
 
 How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/main/ARCHITECTURE.md#passkey-sign-in).
 

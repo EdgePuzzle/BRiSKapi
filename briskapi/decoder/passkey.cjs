@@ -1,12 +1,13 @@
 'use strict';
-// Passkey sign-in to a BRiSK site (SBI, Matsui, Monex, SMBC Nikko, ...) through Chrome's virtual
-// authenticator.
+// Passkey sign-in to a BRiSK site (SBI, Matsui, Monex, SMBC Nikko, Tachibana e-shiten, ...) through
+// Chrome's virtual authenticator.
 //
 // A Chrome that this host starts and drives over a private DevTools *pipe* (never a TCP debugging
 // port, which any local process could attach to) carries a virtual authenticator holding the user's
 // passkey. The site's own passkey ceremony is answered without a touch, and the BRiSK session cookies
 // are handed back. It knows nothing about any particular site: the login URL, the passkey control's
-// text and the BRiSK cookie host all arrive in the request. Run it through `brisk enroll` /
+// text, the BRiSK cookie host and, for a site that wants it typed first, the user ID box and the user ID
+// all arrive in the request. Run it through `brisk enroll` /
 // `brisk login`, not by hand: the request arrives on stdin and the results (including the passkey's
 // private key) leave on stdout as JSON lines. Nothing secret is ever put on a command line or in a
 // log message.
@@ -32,6 +33,8 @@ const DEFAULTS = {
   cookieHost: null,
   cookiePrefix: '',
   passkeyButton: 'パスキー',
+  userField: null,
+  userId: null,
   headless: false,
   profileDir: null,
   chrome: null,
@@ -63,6 +66,12 @@ function resolveOptions(request, mode) {
   if (!options.loginUrl) throw new PasskeyError('loginUrl is required');
   if (mode === 'login' && !options.cookieHost) throw new PasskeyError('cookieHost is required');
   if (options.cookieHost !== null && !/^[a-z0-9.-]+$/i.test(options.cookieHost)) throw new PasskeyError('cookieHost must be a host name');
+  if (options.userField !== null && (typeof options.userField !== 'string' || !options.userField.trim())) {
+    throw new PasskeyError('userField must be a CSS selector');
+  }
+  if (mode === 'login' && options.userField !== null && (typeof options.userId !== 'string' || !options.userId)) {
+    throw new PasskeyError('userId is required with userField');
+  }
   for (const key of ['loginUrl', 'launchUrl']) {
     if (options[key] === null) continue;
     let url;
@@ -269,17 +278,46 @@ function pickCookies(cookies, host) {
   return mine;
 }
 
+// A control drawn as an image is labelled by its alt text (e-shiten's passkey control is a link around one).
 const FIND_BUTTON = (text) => `(() => {
   const want = ${JSON.stringify(text)};
-  const label = (e) => (e.innerText || e.value || e.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+  const label = (e) => (e.innerText || e.value || e.getAttribute('aria-label') || e.getAttribute('alt') || e.title
+    || [...e.querySelectorAll('img[alt]')].map((i) => i.alt).join(' ')).replace(/\\s+/g, ' ').trim();
   const visible = (e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
-  const hits = [...document.querySelectorAll('button, a, input[type=button], input[type=submit], [role=button]')]
+  const hits = [...document.querySelectorAll('button, a, input[type=button], input[type=submit], input[type=image], [role=button]')]
     .filter((e) => visible(e) && label(e).includes(want)).sort((a, b) => label(a).length - label(b).length);
   if (!hits.length) return null;
   hits[0].scrollIntoView({ block: 'center', inline: 'center' });
   const r = hits[0].getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`;
+
+// Empty and focus a visible, enabled text box, ready for typing.
+const FIND_FIELD = (selector) => `(() => {
+  const e = document.querySelector(${JSON.stringify(selector)});
+  if (!e || e.disabled || e.readOnly) return false;
+  const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
+  if (!(r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none')) return false;
+  e.scrollIntoView({ block: 'center', inline: 'center' });
+  e.value = '';
+  e.focus();
+  return true;
+})()`;
+
+// Whether the box holds the text; the text is only compared inside the page, never read back.
+const FIELD_HOLDS = (selector, text) => `(() => {
+  const e = document.querySelector(${JSON.stringify(selector)});
+  return !!e && e.value === ${JSON.stringify(text)};
+})()`;
+
+// The page did not take the typed text: set it as a script would, through the value setter pages watch.
+const SET_FIELD = (selector, text) => `(() => {
+  const e = document.querySelector(${JSON.stringify(selector)});
+  if (!e) return false;
+  Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e), 'value').set.call(e, ${JSON.stringify(text)});
+  for (const type of ['input', 'change']) e.dispatchEvent(new Event(type, { bubbles: true }));
+  return e.value === ${JSON.stringify(text)};
 })()`;
 
 // One Chrome with a virtual authenticator on every page it opens (popups and new tabs included).
@@ -329,13 +367,17 @@ class Browser {
     await cdp.send('Page.enable', {}, sessionId);
     await cdp.send('WebAuthn.enable', {}, sessionId);
     const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: AUTHENTICATOR }, sessionId);
-    if (this.credential) await cdp.send('WebAuthn.addCredential', { authenticatorId, credential: this.credential }, sessionId);
+    // The latest copy: a popup that opens after a sign-in (e-shiten runs the ceremony in one) must not
+    // sign with a counter the site has already seen.
+    if (this.latest) await cdp.send('WebAuthn.addCredential', { authenticatorId, credential: this.latest }, sessionId);
     this.authenticators.set(sessionId, authenticatorId);
     if (!this.primary) this.primary = sessionId;
   }
 
   #changed(credential) {
     if (!credential || typeof credential.credentialId !== 'string') return;
+    // An older page's authenticator may hold a lower counter; the highest one is what the site last saw.
+    if (this.latest && credential.credentialId === this.latest.credentialId && credential.signCount < this.latest.signCount) return;
     this.latest = credential;
     this.onCredential(credential);
   }
@@ -362,6 +404,19 @@ class Browser {
       const { result, exceptionDetails } = await this.cdp.send('Runtime.evaluate', { expression, returnByValue: true }, this.primary);
       return exceptionDetails ? null : result.value;
     } catch { return null; }
+  }
+
+  // Type `text` into the box `selector` finds, with real (trusted) input. Returns whether the box holds it.
+  async fillWhenPresent(selector, text, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (!this.stopped && Date.now() < deadline) {
+      if (await this.#evaluate(FIND_FIELD(selector))) {
+        try { await this.cdp.send('Input.insertText', { text }, this.primary); } catch { /* set below */ }
+        return (await this.#evaluate(FIELD_HOLDS(selector, text))) === true || (await this.#evaluate(SET_FIELD(selector, text))) === true;
+      }
+      await sleep(400);
+    }
+    return false;
   }
 
   // Click the first visible control whose text contains `text`, with real (trusted) mouse events.
@@ -428,15 +483,30 @@ async function login(request, ctx) {
     const asserted = browser.cdp.waitFor('WebAuthn.credentialAsserted', () => true, options.assertTimeoutMs);
     asserted.catch(() => {});
     await browser.navigate(options.loginUrl);
-    browser.clickWhenPresent(options.passkeyButton, options.clickWaitMs).then((clicked) => {
+    (async () => {
+      if (options.userField) {
+        if (!await browser.fillWhenPresent(options.userField, options.userId, options.clickWaitMs)) {
+          if (!browser.stopped) {
+            log(options.headless
+              ? 'No user ID box found on the login page'
+              : `No user ID box found; type your user ID and press "${options.passkeyButton}" in the Chrome window`);
+          }
+          return;
+        }
+        log('Typed the saved user ID');
+      }
+      const clicked = await browser.clickWhenPresent(options.passkeyButton, options.clickWaitMs);
       if (!clicked && !browser.stopped) {
         log(options.headless
           ? `No "${options.passkeyButton}" control found on the login page`
           : `No "${options.passkeyButton}" control found; click the passkey login in the Chrome window`);
       }
-    }, () => {});
+    })().catch(() => {});
     try { await asserted; } catch (error) {
-      if (error.message.startsWith('Timed out')) throw new PasskeyError('The site never asked for the passkey; the passkey button text or the login URL may need changing');
+      if (error.message.startsWith('Timed out')) {
+        throw new PasskeyError(`The site never asked for the passkey; the passkey button text${options.userField ? ', the user ID box' : ''}`
+          + ' or the login URL may need changing');
+      }
       throw error;
     }
     log('The site asked for the passkey and it was signed');

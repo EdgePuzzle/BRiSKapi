@@ -370,7 +370,7 @@ def _main(argv):
                        help='Live SBI BRiSK (experimental); cookies from BRISK_SBI_COOKIES, saved with sbi.login(remember=True) or by `brisk login`')
     group.add_argument('--site', choices=('sbi', 'e-shiten'),
                        help='Live BRiSK of this broker (experimental); --site e-shiten for Tachibana e-shiten BRiSK Next, '
-                            "cookies from BRISK_ESHITEN_COOKIES or saved with sbi.login(site='e-shiten', remember=True); "
+                            "cookies from BRISK_ESHITEN_COOKIES, saved with sbi.login(site='e-shiten', remember=True) or by `brisk login`; "
                             'its sessions stay local')
     p.add_argument('--trace-protocol', action='store_true',
                    help='With --sbi or --site: print the connection steps to stderr, every token redacted (wire details in BRISK_SBI_PROFILE)')
@@ -391,7 +391,7 @@ def _main(argv):
             p.add_argument('--passkey-button', help='Text of the passkey sign-in control on the login page')
             p.add_argument('--headless', action='store_true', help='No Chrome window: needs --launch-url and a login page that works unattended')
             p.add_argument('--remember', action=argparse.BooleanOptionalAction, default=True,
-                           help='Save the cookies (default: yes; owner-only file); SBI\'s feed `brisk live --sbi` reads them')
+                           help='Save the cookies (default: yes; owner-only file); `brisk live --sbi` and `--site e-shiten` read them')
     sub.add_parser('forget', help='Delete the saved passkey (it stays registered at your broker until you remove it there)')
     p = sub.add_parser('upload', help='Contribute a prepared package'); p.add_argument('directory', type=Path)
     p = sub.add_parser('list', help='List published recordings'); p.add_argument('--date'); p.add_argument('--source', choices=['historical_mock','synthetic_test','sbi_live'])

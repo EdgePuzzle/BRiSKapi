@@ -2,12 +2,13 @@
 
 BRiSK is run for each broker on its own address (sbi.brisk.jp, matsui.brisk.jp, ...), behind that
 broker's own login. A site entry says where the login page is, what its passkey button says and which
-host the BRiSK session cookies belong to. Four are built in, taken from the brokers' own pages:
+host the BRiSK session cookies belong to. Five are built in, taken from the brokers' own pages:
 
     sbi        SBI Securities
     matsui     Matsui Securities
     monex      Monex Securities
     smbcnikko  SMBC Nikko Securities
+    e-shiten   Tachibana e-shiten (BRiSK Next at next.e-shiten.brisk.jp)
 
 None has been checked against a live account, so each detail can be overridden, and you can add your
 own entries (or correct a built-in one) in ~/.config/brisk/sites.json (C:\\Users\\you\\.config\\brisk\\sites.json
@@ -17,13 +18,13 @@ on Windows; XDG_CONFIG_HOME overrides the folder):
                 "cookie_host": "mybroker.brisk.jp", "passkey_button": "Sign in with a passkey"}]}
 
 Optional keys: passkey_button, cookie_prefix (a cookie name must start with it before sign-in counts as
-done; empty accepts any), launch_url (opened after sign-in to start BRiSK). An id that is already
-built in only replaces the keys you give.
+done; empty accepts any), launch_url (opened after sign-in to start BRiSK), enroll_url (where `brisk
+enroll` starts, when the first sign-in is not on the passkey login page) and user_field (a CSS selector
+for a user ID box that must be filled before the passkey control works; enroll then asks for the ID and
+keeps it with the passkey; null for none). An id that is already built in only replaces the keys you give.
 
-Only SBI has a data client in briskapi (`briskapi.sbi`, `brisk live --sbi`). For the other sites,
-signing in captures the BRiSK session cookies for your own use. (The same client also serves
-Tachibana's e-shiten BRiSK Next with cookies from your browser, `brisk live --site e-shiten`; it is
-not listed here because passkey sign-in to it is not known to work.)
+SBI and e-shiten have a data client in briskapi (`briskapi.sbi`; `brisk live --sbi`, `brisk live --site
+e-shiten`). For the other sites, signing in captures the BRiSK session cookies for your own use.
 """
 from __future__ import annotations
 
@@ -39,7 +40,7 @@ from briskapi._recording import BriskError
 
 _ID = re.compile(r'[a-z0-9][a-z0-9_-]*')
 _HOST = re.compile(r'[a-z0-9]([a-z0-9.-]*[a-z0-9])?', re.IGNORECASE)
-_KEYS = {'id', 'name', 'login_url', 'cookie_host', 'passkey_button', 'cookie_prefix', 'launch_url'}
+_KEYS = {'id', 'name', 'login_url', 'cookie_host', 'passkey_button', 'cookie_prefix', 'launch_url', 'enroll_url', 'user_field'}
 
 
 class SiteError(BriskError):
@@ -63,7 +64,9 @@ class Site:
     passkey_button: str = 'パスキー'
     cookie_prefix: str = ''
     launch_url: str | None = None
-    client: str | None = None  # 'sbi': briskapi has a data client for this site's BRiSK. Never set from a file.
+    enroll_url: str | None = None
+    user_field: str | None = None
+    client: str | None = None  # The briskapi.sbi site ('sbi', 'e-shiten') that serves this BRiSK. Never set from a file.
     source: str = 'built in'
 
 
@@ -75,6 +78,10 @@ BUILTIN = {site.id: site for site in (
          'パスキーでログイン'),
     Site('smbcnikko', 'SMBC Nikko Securities', 'https://trade.smbcnikko.co.jp/Login/0/login/ipan_web/hyoji/',
          'smbcnikko.brisk.jp'),
+    # The passkey form takes the user ID and runs the ceremony in a popup; a first sign-in is by phone.
+    Site('e-shiten', 'Tachibana e-shiten', 'https://tr2.e-shiten.jp/e-shiten?auth=passkey', 'next.e-shiten.brisk.jp',
+         'パスキーを使う', cookie_prefix='session_', enroll_url='https://tr2.e-shiten.jp/e-shiten',
+         user_field='input[name="kokyakuUserId"]', client='e-shiten'),
 )}
 
 
@@ -97,11 +104,13 @@ def _entry(raw, where):
     for key in ('name', 'passkey_button'):
         if key in raw and (not isinstance(raw[key], str) or not raw[key].strip()):
             raise SiteError(f'{where}: {key} must be non-empty text')
+    if raw.get('user_field') is not None and (not isinstance(raw['user_field'], str) or not raw['user_field'].strip()):
+        raise SiteError(f'{where}: user_field must be non-empty text, or null for none')
     if 'cookie_prefix' in raw and not isinstance(raw['cookie_prefix'], str):
         raise SiteError(f'{where}: cookie_prefix must be text')
     if 'cookie_host' in raw and (not isinstance(raw['cookie_host'], str) or not _HOST.fullmatch(raw['cookie_host'])):
         raise SiteError(f'{where}: cookie_host must be a host name such as x.brisk.jp, without a scheme or path')
-    for key in ('login_url', 'launch_url'):
+    for key in ('login_url', 'launch_url', 'enroll_url'):
         if raw.get(key) is not None:
             _check_url(raw[key], key, where)
     return site_id, {key: value for key, value in raw.items() if key != 'id'}

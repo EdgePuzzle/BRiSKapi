@@ -523,10 +523,14 @@ test('checkMaster accepts a market and refuses a misread master', () => {
     lot_size: 100, name: 'x' });
   const good = Array.from({ length: 4000 }, (_, i) => issue(i));
   assert.doesNotThrow(() => checkMaster(good, 18000));
+  // SBI's master of 2026-03-11: 350 of 4,445 codes have a letter (167A), and some have five digits.
+  const lettered = good.map((m, i) => (i % 12 ? m : { ...m, code: `${100 + i / 12}A` }));
+  lettered[1] = { ...lettered[1], code: '25935' };
+  assert.doesNotThrow(() => checkMaster(lettered, 18000));
   // every field read one word late: tick type as code, base as tick, limits as limits, and so on
   const shifted = good.map(m => ({ code: '3', base_price10: m.limit_up10, limit_up10: m.limit_down10,
     limit_down10: m.lot_size, lot_size: 0, name: '' }));
-  assert.throws(() => checkMaster(shifted, 18000), /layout not recognised for protocol 18000: .*numeric codes.*distinct codes/);
+  assert.throws(() => checkMaster(shifted, 18000), /layout not recognised for protocol 18000: .*security codes.*distinct codes/);
   assert.throws(() => checkMaster(good.slice(0, 10), 18000), /only 10 issues/);
   assert.throws(() => checkMaster([], 18000), /only 0 issues/);
 });

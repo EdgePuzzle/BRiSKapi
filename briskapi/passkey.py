@@ -3,13 +3,13 @@
     brisk enroll      # once: pick your broker, sign in by hand, register a passkey in its settings
     brisk login       # each session: Chrome signs in with that passkey and the BRiSK cookies are kept
     brisk forget      # delete the saved passkey
-    brisk sites       # the brokers you can pick (SBI, Matsui, Monex, SMBC Nikko, or your own)
+    brisk sites       # the brokers you can pick (SBI, Matsui, Monex, SMBC Nikko, Tachibana e-shiten, or your own)
 
 or from Python:
 
     from briskapi import passkey
     passkey.enroll(site="sbi")
-    signin = passkey.login()          # signin.cookies; signin.client for a site with a data client (SBI)
+    signin = passkey.login()          # signin.cookies; signin.client for a site with a data client (SBI, e-shiten)
 
 How it works. A passkey is a key pair: the broker keeps the public half and your device keeps the
 private half, which proves it is you by signing a challenge the site sends. Normally that private half
@@ -24,9 +24,11 @@ the device and signs without asking. So:
   * login opens the same Chrome with the saved passkey loaded, goes to the login page, presses the
     passkey button and the virtual authenticator signs. You are signed in without a touch. Chrome
     then reads the BRiSK session cookies (only those of the BRiSK host), saves them and closes.
+    A broker whose passkey form wants your user ID first (e-shiten) gets the one enroll asked for.
 
-The saved login is the broker you chose plus the passkey. That passkey's private key IS the credential:
-whoever has it can sign in to your account with no further check, so it is kept in the macOS Keychain or
+The saved login is the broker you chose plus the passkey (and that user ID, where one is needed). The
+passkey's private key IS the credential: whoever has it can sign in to your account with no further
+check, so it is kept in the macOS Keychain or
 Windows Credential Manager (or, only if you set BRISK_PASSKEY_STORE=file, an owner-only file) and is never
 put on a command line, in a log or in the repository. A passkey also carries a sign counter that a broker may check, so every change is
 saved the moment it happens. Chrome runs under Node over a private pipe (briskapi/decoder/passkey.cjs)
@@ -266,9 +268,16 @@ def _load_record(store):
     record = store.load()
     if record is None:
         return None
-    if not (isinstance(record, dict) and isinstance(record.get('site'), str) and isinstance(record.get('credential'), dict)):
+    if not (isinstance(record, dict) and isinstance(record.get('site'), str) and isinstance(record.get('credential'), dict)
+            and isinstance(record.get('user_id', ''), str)):
         raise PasskeyError('The saved passkey is in an unknown format; run `brisk enroll --replace`')
     return record
+
+
+def _check_user_id(user_id):
+    if not isinstance(user_id, str) or not user_id.strip() or len(user_id) > 100 or any(c in user_id for c in '\r\n'):
+        raise PasskeyError('The user ID must be one line of text')
+    return user_id.strip()
 
 
 def _request(site, login_url=None, launch_url=None, passkey_button=None, chrome=None, profile_dir=None, headless=None):
@@ -345,6 +354,14 @@ def _confirm():
     input()
 
 
+def _ask_user_id(site):
+    if not sys.stdin.isatty():
+        raise PasskeyError(f'{site.name}\'s passkey sign-in asks for your user ID: pass user_id= or enroll from a terminal')
+    print(f'{site.name}\'s passkey sign-in asks for your user ID before the passkey. It is kept with the passkey and\n'
+          'typed into the login page each time.', file=sys.stderr)
+    return input('User ID: ')
+
+
 def _choose(sites):
     if not sys.stdin.isatty():
         raise PasskeyError('Choose your broker with --site (see `brisk sites`)')
@@ -360,18 +377,19 @@ def _choose(sites):
 
 def _check_client(site):
     """A data client sends its cookies to one host. Cookies of any other site must never be handed to it."""
-    if site.client == 'sbi':
+    if site.client:
         from briskapi import sbi
-        host = urllib.parse.urlsplit(sbi.ORIGIN).hostname
+        served = sbi.SITES[site.client]
+        host = urllib.parse.urlsplit(served.origin).hostname
         if site.cookie_host != host:
-            raise PasskeyError(f'Cookies of {site.cookie_host} are never given to the SBI client, which only talks to {host}')
+            raise PasskeyError(f'Cookies of {site.cookie_host} are never given to the {served.name} client, which only talks to {host}')
 
 
 def _deliver(site, cookies, remember):
-    if site.client == 'sbi':
+    if site.client:
         from briskapi import sbi
-        client = sbi.login(cookies=cookies, remember=remember)
-        return SignIn(site, cookies, client, sbi.cookies_path() if remember else None)
+        client = sbi.login(cookies=cookies, remember=remember, site=site.client)
+        return SignIn(site, cookies, client, sbi.cookies_path(site.client) if remember else None)
     path = None
     if remember:
         path = cookies_path(site.id)
@@ -383,9 +401,10 @@ def _deliver(site, cookies, remember):
 
 
 def enroll(site=None, login_url=None, chrome=None, profile_dir=None, replace=False, store=None, node='node', confirm=None,
-           headless=False, choose=None, sites_file=None):
+           headless=False, choose=None, sites_file=None, user_id=None):
     """Capture the passkey your broker registers in a Chrome you drive by hand, and save it with the site.
 
+    A site whose passkey form wants a user ID first (e-shiten) also needs `user_id` (asked if omitted).
     Returns a public summary (never the private key)."""
     store = store or default_store()
     existing = _load_record(store)
@@ -394,12 +413,15 @@ def enroll(site=None, login_url=None, chrome=None, profile_dir=None, replace=Fal
                            'stays registered at the broker until you remove it in its security settings)')
     sites = load_sites(sites_file)
     chosen = get_site(sites, site or (choose or _choose)(sites))
+    record = {'site': chosen.id}
+    if chosen.user_field:
+        record['user_id'] = _check_user_id(user_id if user_id is not None else _ask_user_id(chosen))
     latest = []
-    _run('enroll', _request(chosen, login_url=login_url, chrome=chrome, profile_dir=profile_dir, headless=headless or None), node,
-         on_credential=latest.append, on_registered=confirm or _confirm)
+    _run('enroll', _request(chosen, login_url=login_url or chosen.enroll_url, chrome=chrome, profile_dir=profile_dir,
+                            headless=headless or None), node, on_credential=latest.append, on_registered=confirm or _confirm)
     if not latest:
         raise PasskeyError('No passkey was captured')
-    store.save({'site': chosen.id, 'credential': latest[-1]})  # Only now: a failed enrollment must not replace a working one.
+    store.save({**record, 'credential': latest[-1]})  # Only now: a failed enrollment must not replace a working one.
     return {'site': chosen.id, 'rp_id': latest[-1]['rpId'], 'user_name': latest[-1].get('userName'), 'stored_in': store.description}
 
 
@@ -414,7 +436,12 @@ def login(remember=True, login_url=None, launch_url=None, passkey_button=None, c
     _check_client(site)
     request = {**_request(site, login_url, launch_url, passkey_button, chrome, profile_dir, headless or None),
                'credential': record['credential']}
-    result = _run('login', request, node, on_credential=lambda credential: store.save({'site': site.id, 'credential': credential}))
+    if site.user_field:
+        if not record.get('user_id'):
+            raise PasskeyError(f'{site.name}\'s passkey sign-in asks for your user ID, which was not saved; run `brisk enroll --replace`')
+        request.update(userField=site.user_field, userId=record['user_id'])
+    kept = {key: record[key] for key in ('site', 'user_id') if key in record}
+    result = _run('login', request, node, on_credential=lambda credential: store.save({**kept, 'credential': credential}))
     return _deliver(site, result['cookies'], remember)
 
 

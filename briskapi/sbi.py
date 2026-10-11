@@ -1,7 +1,8 @@
 """SBI BRiSK (sbi.brisk.jp) session: login, REST data and an experimental live feed.
 
 Tachibana's e-shiten BRiSK Next (next.e-shiten.brisk.jp) is the same app, so the same
-client serves it: sbi.login(cookies={...}, site="e-shiten").
+client serves it: sbi.login(cookies={...}, site="e-shiten"), or `brisk login` after
+`brisk enroll --site e-shiten`.
 
 The data is used through briskapi's own Ticker and Market:
 
@@ -104,7 +105,7 @@ class Session:
         where = _site(site)
         self.origin, self.name = where.origin, where.name
         if not cookies or not isinstance(cookies, dict) or not any(cookies.values()):
-            how = ', or run `brisk login` (passkey)' if site == 'sbi' else f" with site='{site}'"
+            how = ('' if site == 'sbi' else f" with site='{site}'") + ', or run `brisk login` (passkey)'
             raise SessionExpiredError(f'No {self.name} cookies: copy them from your logged-in browser and call sbi.login(){how}')
         self.site = site
         self.cookies = dict(cookies)

@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { Decoder, QuoteHistory, frames, u64, looseU64, loadAssets, replay, main, parseStockView, stockViewShift } = require('../../briskapi/decoder/decoder.cjs');
+const { Decoder, QuoteHistory, frames, u64, looseU64, parseMasterFile, loadAssets, replay, main, parseStockView, stockViewShift } = require('../../briskapi/decoder/decoder.cjs');
 const cache = process.env.BRISK_MOCK_CACHE;
 
 function frame(time, bytes = Buffer.from([1])) {
@@ -273,15 +273,18 @@ test('boot base prices change the master limits; counts are reported', { skip: !
   assert.equal(decoder.applyBasePrice(), 0, 'nothing is queued afterwards');
 });
 
-test('malformed or unknown boot data fails loudly instead of being skipped', { skip: !cache }, async () => {
+test('malformed or unknown boot data fails loudly; a special quote for a lettered code is listed, not sent',
+  { skip: !cache }, async () => {
   const assets = loadAssets(cache);
   const base = { issue_code: '7203', base_price10: 1, limit_down10: 1, limit_up10: 2 };
   await assert.rejects(Decoder.create(assets, { boot: { base_prices: [{ ...base, issue_code: '0000' }] } }),
     /base_prices names issue code 0000, which is not in the master/);
   await assert.rejects(Decoder.create(assets, { boot: { base_prices: [{ ...base, limit_up10: undefined }] } }),
     /Boot limit_up10 is not a number/);
-  await assert.rejects(Decoder.create(assets, { boot: { exceptional_sq: [{ buy_sell: 'S', jump_range: 1, jump_sec: 1,
-    issue_code: '130A', quote_limit_down: 1, quote_limit_up: 2 }] } }), /only numeric codes are supported/);
+  // How the decoder takes 130A is not known; failing would stop every session whose boot names one.
+  const decoder = await Decoder.create(assets, { boot: { exceptional_sq: [{ buy_sell: 'S', jump_range: 1, jump_sec: 1,
+    issue_code: '130A', quote_limit_down: 1, quote_limit_up: 2 }] } });
+  assert.deepEqual(decoder.boot, { exceptional_sq: 0, base_prices: 0, applied: 0, skipped_exceptional_sq: ['130A'] });
 });
 
 test('a host\'s master check runs before boot data is matched to the master', { skip: !cache }, async () => {
@@ -294,4 +297,81 @@ test('a host\'s master check runs before boot data is matched to the master', { 
   } }), /layout not recognised/);
   assert.ok(checked > 1000);
   await assert.rejects(Decoder.create(loadAssets(cache), { boot }), /issue code 0000, which is not in the master/);
+});
+
+// A master file record as the demo's and SBI's files hold them (self-authored values).
+function masterRecord({ code, base, up, down, type = '0111', name = Buffer.alloc(0), lot, topix = false }) {
+  const r = Buffer.alloc(180, 0x20);
+  r.writeUInt32LE(0x1e000018, 0); r.writeUInt32LE(base, 4); r.writeUInt32LE(up, 8); r.writeUInt32LE(down, 12);
+  r.write(type, 40, 'latin1'); r.write(code, 50, 'latin1'); name.copy(r, 74);
+  r.write(String(lot).padStart(15), 124, 'latin1');
+  if (topix) r.write('1 1 1', 139, 'latin1');
+  return r;
+}
+
+test('master file records: header prices, fixed-width text, Shift-JIS names without a market prefix', () => {
+  // 'Ｇ－テスト' and 'テスト' in Shift-JIS.
+  const prefixed = Buffer.from([0x82, 0x66, 0x81, 0x7c, 0x83, 0x65, 0x83, 0x58, 0x83, 0x67]);
+  const records = [
+    masterRecord({ code: '167A', base: 1700, up: 2200, down: 1200, name: prefixed, lot: 100 }),
+    masterRecord({ code: '9984', base: 36320, up: 43320, down: 29320, name: prefixed.subarray(4), lot: 100, topix: true }),
+    masterRecord({ code: '25935', base: 2350, up: 3050, down: 1650, type: '0115', lot: 1 }),
+  ];
+  const expected = [
+    { issue_id: 0, code: '167A', tick_type: 1, base_price10: 1700, limit_up10: 2200, limit_down10: 1200, lot_size: 100,
+      issue_type: 111, name: 'テスト' },
+    { issue_id: 1, code: '9984', tick_type: 3, base_price10: 36320, limit_up10: 43320, limit_down10: 29320, lot_size: 100,
+      issue_type: 111, name: 'テスト' },
+    { issue_id: 2, code: '25935', tick_type: 1, base_price10: 2350, limit_up10: 3050, limit_down10: 1650, lot_size: 1,
+      issue_type: 115, name: '' },
+  ];
+  assert.deepEqual(parseMasterFile(Buffer.concat(records), 3), expected);
+  // Records are counted from the end, so a preamble (the demo's file has one) is skipped.
+  assert.deepEqual(parseMasterFile(Buffer.concat([Buffer.alloc(444, 7), ...records]), 3), expected);
+  assert.ok(Number.isNaN(parseMasterFile(masterRecord({ code: '1301', base: 1, up: 2, down: 0, lot: 'x' }), 1)[0].lot_size));
+  assert.throws(() => parseMasterFile(Buffer.concat(records), 4), /cannot hold 4 issues/);
+  assert.throws(() => parseMasterFile(Buffer.concat(records), 0), /cannot hold 0 issues/);
+});
+
+test('read from the file, the demo\'s master equals the vendor decoder\'s own for every issue', { skip: !cache }, async () => {
+  const assets = loadAssets(cache);
+  const own = await Decoder.create(assets);
+  assert.equal(own.master.length, 4131);
+  assert.deepEqual(parseMasterFile(assets['master.dat'], own.master.length), own.master);
+  const fromFile = await Decoder.create(assets, { masterFromFile: true });
+  assert.deepEqual(fromFile.master, own.master);
+  assert.equal(fromFile.masterFromFile, true);
+  assert.equal(own.masterFromFile, false);
+});
+
+test('a master read from the file takes boot limits from the boot response, and never the decoder\'s records',
+  { skip: !cache }, async () => {
+  // Toyota's own limits (consistent with the demo snapshot); 167A is a code the decoder can't be given.
+  const boot = { base_prices: [{ issue_code: '7203', base_price10: 101000, limit_down10: 71000, limit_up10: 131000 }],
+    exceptional_sq: [{ buy_sell: 'S', jump_range: 10, jump_sec: 180, issue_code: '167A', quote_limit_down: 1, quote_limit_up: 2 }] };
+  const decoder = await Decoder.create(loadAssets(cache), { masterFromFile: true, boot });
+  assert.deepEqual(decoder.boot, { exceptional_sq: 0, base_prices: 1, applied: 1, skipped_exceptional_sq: ['167A'] });
+  assert.equal(decoder.master.find(m => m.code === '7203').limit_up10, 131000);
+  decoder.w._getStockMaster = () => assert.fail('the decoder\'s record layout is not known for a file master');
+  decoder.basePriceQueue.add(5);
+  assert.equal(decoder.applyBasePrice(), 0);
+  assert.deepEqual([...decoder.unreadBasePrices], [5]);
+  assert.equal(decoder.basePriceQueue.size, 0);
+});
+
+test('an 18000 master file must hold exactly the decoder\'s issues, or quotes would pair with the wrong codes', () => {
+  // Just enough of a decoder to load a master: it reports `count` issues.
+  const fake = count => ({ addFunction: () => 0, _initialize: () => 1, _malloc: () => 0, HEAPU8: new Uint8Array(4 * 1024 * 1024),
+    _push() {}, _applyBasePriceQueue() {}, _stockCount: () => count, _getDate: () => 20260311,
+    _getStockMaster: () => assert.fail('an 18000 master is never read from the decoder\'s records') });
+  const file = Buffer.concat([masterRecord({ code: '1301', base: 3240, up: 3940, down: 2540, lot: 100 }),
+    masterRecord({ code: '167A', base: 480, up: 580, down: 380, lot: 100 })]);
+  const assets = { 'master.dat': file, 'snapshot.dat': Buffer.alloc(0) };
+  const decoder = new Decoder(fake(2), assets, { protocolVersion: 18000 });
+  assert.equal(decoder.masterFromFile, true);
+  assert.deepEqual(decoder.master.map(m => m.code), ['1301', '167A']);
+  assert.throws(() => new Decoder(fake(1), assets, { protocolVersion: 18000 }),
+    /master file holds 360 bytes, not the decoder's 1 issues of 180 bytes/);
+  assert.throws(() => new Decoder(fake(2), { ...assets, 'master.dat': Buffer.concat([Buffer.alloc(4), file]) },
+    { protocolVersion: 18000 }), /holds 364 bytes/);
 });

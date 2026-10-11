@@ -2,6 +2,8 @@
 // A fake SBI for the passkey host: a main site with passkey registration and login, and a separate
 // BRiSK host that is entered with a one-time ticket. It checks what a real relying party checks
 // (ES256 signature, rp id hash, user presence and verification, a sign counter that must increase).
+// /eshiten/login signs in the way Tachibana e-shiten's passkey form does: the user ID is typed first,
+// the control is a link around an image, and the ceremony runs in a popup that reports to its opener.
 // Used by passkey.test.cjs and tests/test_passkey.py. Run directly it serves until stdin closes.
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -17,8 +19,10 @@ const dec = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/'))
 // A fake SBI: a main site with passkey registration and login, and a separate BRiSK host that is
 // entered with a one-time ticket. It checks what a real relying party checks.
 class FakeSbi {
-  constructor({ redirectToBrisk = true } = {}) {
+  constructor({ redirectToBrisk = true, userId = 'abc123' } = {}) {
     this.redirectToBrisk = redirectToBrisk;
+    this.userId = userId;
+    this.userIds = [];
     this.credentials = new Map();
     this.challenges = new Set();
     this.tickets = new Set();
@@ -71,6 +75,58 @@ class FakeSbi {
           if (out.ok) location.href = out.next; else document.title = 'refused: ' + out.error;
         };</script>`);
     }
+    if (url.pathname === '/eshiten/login') {
+      // As on e-shiten: a link around an image (no text of its own) that checks the user ID and submits the
+      // form into a window named "passkey"; that window runs the ceremony and posts the result back.
+      return html(`<h2>ユーザIDをご入力のうえ、「パスキーを使う」ボタンを押してください。</h2>
+        <form name="loginForm" method="get" action="/eshiten/popup"><input type="text" name="kokyakuUserId" maxlength="100"></form>
+        <a href="/help">パスキーについて（事前設定が必要となります）</a>
+        <a href="#" id="passkey-start"><img src="/missing.png" alt="パスキーを使う" width="120" height="30"></a>
+        <script>
+        window.addEventListener('message', (event) => {
+          if (event.origin === location.origin && event.data && event.data.next) location.href = event.data.next;
+        });
+        document.getElementById('passkey-start').onclick = () => {
+          const form = document.forms.loginForm;
+          if (!/^[a-zA-Z0-9]+$/.test(form.kokyakuUserId.value)) { document.title = 'missing user id'; return false; }
+          window.open('about:blank', 'passkey');
+          form.target = 'passkey';
+          form.submit();
+          return false;
+        };</script>`);
+    }
+    if (url.pathname === '/twice') {
+      // One ceremony on this page, then a second in a popup (as e-shiten asks again for a withdrawal).
+      return html(`<button id="go">パスキー認証でログイン</button>
+        <form name="again" method="get" action="/eshiten/popup"><input type="hidden" name="kokyakuUserId" value="${this.userId}"></form>
+        <script>${PAGE_HELPERS}
+        window.addEventListener('message', (event) => {
+          if (event.origin === location.origin && event.data && event.data.next) location.href = event.data.next;
+        });
+        document.getElementById('go').onclick = async () => {
+          const opt = await (await fetch('/api/challenge')).json();
+          const got = await navigator.credentials.get({ publicKey: { challenge: dec(opt.challenge), rpId: location.hostname, userVerification: 'required' } });
+          const out = await (await fetch('/api/login', { method: 'POST', body: JSON.stringify({ id: got.id, clientDataJSON: enc(got.response.clientDataJSON),
+            authenticatorData: enc(got.response.authenticatorData), signature: enc(got.response.signature) }) })).json();
+          if (!out.ok) { document.title = 'refused: ' + out.error; return; }
+          window.open('about:blank', 'passkey');
+          document.forms.again.target = 'passkey';
+          document.forms.again.submit();
+        };</script>`);
+    }
+    if (url.pathname === '/eshiten/popup') {
+      return html(`<script>${PAGE_HELPERS}
+        (async () => {
+          const opt = await (await fetch('/api/challenge')).json();
+          const got = await navigator.credentials.get({ publicKey: { challenge: dec(opt.challenge), rpId: location.hostname, userVerification: 'required' } });
+          const out = await (await fetch('/api/login', { method: 'POST', body: JSON.stringify({ id: got.id, clientDataJSON: enc(got.response.clientDataJSON),
+            authenticatorData: enc(got.response.authenticatorData), signature: enc(got.response.signature),
+            userId: ${JSON.stringify(url.searchParams.get('kokyakuUserId') || '')} }) })).json();
+          if (!out.ok) { document.title = 'refused: ' + out.error; return; }
+          opener.postMessage({ next: out.next }, location.origin);
+          window.close();
+        })();</script>`);
+    }
     if (url.pathname === '/__state') return json(this.state());
     if (url.pathname === '/home') return html('home');
     if (url.pathname === '/launch') {
@@ -106,6 +162,10 @@ class FakeSbi {
     const auth = Buffer.from(body.authenticatorData, 'base64url');
     const known = this.credentials.get(body.id);
     if (!known) return refuse('unknown credential');
+    if (body.userId !== undefined) {
+      this.userIds.push(body.userId);
+      if (body.userId !== this.userId) return refuse('the passkey is not registered to that user ID');
+    }
     if (data.type !== 'webauthn.get' || data.origin !== this.mainOrigin || !this.challenges.delete(data.challenge)) return refuse('bad client data');
     if (!auth.subarray(0, 32).equals(sha256('main.localhost'))) return refuse('wrong relying party');
     if ((auth[32] & 0x05) !== 0x05) return refuse('user presence and verification are required');
@@ -136,7 +196,7 @@ class FakeSbi {
 
   state() {
     return { registered: this.registered, accepted: this.accepted, counter: this.credentials.size ? this.counter : null,
-      refusals: this.refusals, briskCookieValue: this.briskCookieValue };
+      refusals: this.refusals, briskCookieValue: this.briskCookieValue, userIds: this.userIds };
   }
 }
 

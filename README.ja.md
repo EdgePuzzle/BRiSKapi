@@ -128,9 +128,10 @@ Node 上で動かします。ブラウザは使いません。ベンダーのク
 で設定し、`trace_protocol=True`（トークンはすべて伏せ字）でサーバーの応答を確認
 してください。正しくなるまでは、推測で動かさず、明示的なエラーで止まります。
 結果をぜひお知らせください。2026-10-08 のセッションでは、サインイン、データの
-取得、デコーダーのダウンロードまでは通り、銘柄マスターで止まりました。現行ビルドの
-レコード配置がまだ分かっていないため、そこで `stock master layout not recognised`
-のエラーになります。Cookie は sbi.brisk.jp にのみ送られます。SBI の市場
+取得、デコーダーのダウンロードまでは通り、銘柄マスターで止まりました。現在は
+BRiSK が配信するマスターファイルから銘柄マスターを読み取ります。この形式はデモと
+2026年3月の SBI のファイルで確認済みです。その先（ストリームと最初の気配）は、
+まだ実際のセッションでは動かしていません。Cookie は sbi.brisk.jp にのみ送られます。SBI の市場
 データは、その記録の開始時に明示的に同意した場合だけ共有します。Python API では
 `share_market_data=True` が必要です。共有がオンなら、市場データの共有を断っても
 タイミングの要約は共有します。
@@ -139,7 +140,9 @@ Node 上で動かします。ブラウザは使いません。ベンダーのク
 
 e支店の BRiSK Next（[next.e-shiten.brisk.jp](https://next.e-shiten.brisk.jp)）は
 同じアプリなので、同じクライアントで使えます。ブラウザでログインし、その Cookie を
-`site="e-shiten"` を付けて渡してください。`brisk login`（パスキー）は対応していません。
+`site="e-shiten"` を付けて渡すか、e支店のパスキーで `briskapi` にサインインさせてください
+（[下記](#パスキーでのサインイン試験的)）。初回のみ `brisk enroll --site e-shiten`、その後は
+`brisk live --site e-shiten` の前に `brisk login` を実行します。
 
 ```python
 sbi.login(cookies={...}, site="e-shiten")   # または BRISK_ESHITEN_COOKIES。remember=True で SBI とは別に保存
@@ -157,8 +160,8 @@ BRiSK は同時に1セッションまでで、別のタブやブラウザで開�
 
 近年は、パスキーでのサインインを求める証券会社が増えています。お使いの証券会社がそうなら、
 Cookie をブラウザからコピーする代わりに、`briskapi` がサインインして BRiSK のセッション
-Cookie を保存できます。SBI証券、松井証券、マネックス証券、SMBC日興証券の BRiSK に対応し、
-他の証券会社も追加できます。Chrome、Node 22 以上、そしてパスキーの安全な保管先（macOS のキー
+Cookie を保存できます。SBI証券、松井証券、マネックス証券、SMBC日興証券、立花証券 e支店の
+BRiSK に対応し、他の証券会社も追加できます。Chrome、Node 22 以上、そしてパスキーの安全な保管先（macOS のキー
 チェーンまたは Windows の資格情報マネージャー。Linux では選択式の本人のみ読み取り可のファイル）が
 必要です。macOS と Windows で動作し（Windows では PowerShell か `cmd` から実行し、WSL ではなく Windows 側の
 Chrome と Node を使います）、Linux でもテストしています。
@@ -178,13 +181,18 @@ Chrome と Node を使います）、Linux でもテストしています。
    登録します。仮想オーセンティケーターがそれを受け取ります。サイトに登録完了と表示された
    ら、ターミナルで Enter を押してください。`briskapi` がパスキーと選んだ証券会社をキー
    チェーン（Windows では資格情報マネージャー）に保存し、Chrome は閉じます。
+   e支店では、パスキーの前にユーザIDを入力するフォームのため、`enroll` が最初にユーザIDを尋ね、
+   パスキーと一緒に保存します。ウィンドウは通常のログイン（ユーザID、暗証番号、電話番号認証）で
+   開きます。パスキーはログイン後に表示される登録画面か、お客様情報 › 設定情報 › パスキー認証
+   から登録してください。
 2. **毎回 `brisk login`。** 保存したパスキーを読み込んだ同じ Chrome が開き、ログインページで
    パスキーのボタンを押すと、仮想オーセンティケーターが署名します。そのウィンドウで証券会社の
    サイトから BRiSK を開いてください（`--launch-url` を指定すれば自動で開きます）。`briskapi` が
    BRiSK のセッション Cookie を読み取って保存し、Chrome を閉じます。
-3. **あとは使うだけ。** SBI証券では、保存した Cookie を `brisk live --sbi` と `briskapi.sbi`
-   API が使います。他の証券会社には `briskapi` のデータクライアントがまだないため、Cookie は
-   ご自身の利用のために保存される（`~/.config/brisk/cookies/`）だけです。
+3. **あとは使うだけ。** SBI証券と e支店では、保存した Cookie を `brisk live --sbi` または
+   `brisk live --site e-shiten` と `briskapi.sbi` API が使います。他の証券会社には `briskapi` の
+   データクライアントがまだないため、Cookie はご自身の利用のために保存される
+   （`~/.config/brisk/cookies/`）だけです。
 
 スマートフォンやパスワードマネージャーにある既存のパスキーには手を加えません。証券会社の
 一覧にパスキーが1つ増えるだけで、セキュリティ設定からいつでも削除できます。
@@ -195,8 +203,8 @@ Chrome と Node を使います）、Linux でもテストしています。
   証券口座へサインインできます。パスキーはキーチェーン／資格情報マネージャーにのみ保存され（`BRISK_PASSKEY_STORE=file`
   なら本人のみ読み取り可のファイルに保存しますが、安全性は下がります。Windows ではそのファイルの
   保護はユーザープロファイルのフォルダー（本人と管理者のみ読み取り可）に依存します）、お使いのマシンの外には
-  出ず、ログにも表示されません。`brisk forget` でここから削除できます。証券会社側でも削除して
-  ください。
+  出ず、ログにも表示されません。e支店ではユーザIDも同じ場所に一緒に保存します。`brisk forget` で
+  ここから削除できます。証券会社側でも削除してください。
 - **試験的な機能です。** 各証券会社のログインページ、パスキーボタンの文言、BRiSK の起動方法は
   公開ページをもとにしたもので、実際の口座では試していません。`--login-url`、`--passkey-button`、
   `--launch-url` や下記の `sites.json` で上書きでき、うまくいかない点はぜひお知らせください。
@@ -212,9 +220,9 @@ brisk login                    # 毎回。enroll で登録した証券会社に�
 brisk forget                   # 保存したパスキーを削除
 ```
 
-Python では `passkey.enroll(site="matsui")` と `signin = passkey.login()` を使います。
-`signin.cookies` が BRiSK の Cookie、`signin.client` がデータクライアントのある証券会社での
-クライアントです。
+Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(site="e-shiten", user_id="...")`）
+と `signin = passkey.login()` を使います。`signin.cookies` が BRiSK の Cookie、`signin.client` が
+データクライアントのある証券会社でのクライアントです。
 
 証券会社を追加したり、組み込みの設定を直したりするには、`~/.config/brisk/sites.json` を編集します。
 
@@ -222,6 +230,10 @@ Python では `passkey.enroll(site="matsui")` と `signin = passkey.login()` を
 {"sites": [{"id": "mybroker", "name": "My Broker", "login_url": "https://broker.example/login",
             "cookie_host": "mybroker.brisk.jp", "passkey_button": "パスキーでログイン"}]}
 ```
+
+ほかのキー: `cookie_prefix`、`launch_url`、`enroll_url`（初回のサインインがパスキーのページとは
+別のページの場合に `enroll` を始める場所）、`user_field`（パスキーのボタンを押す前に入力が必要な
+ユーザID欄の CSS セレクター。指定すると `enroll` がユーザIDを尋ねます）。
 
 内部の仕組みは [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/main/ARCHITECTURE.md#passkey-sign-in) を参照してください。
 

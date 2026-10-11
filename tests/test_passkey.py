@@ -360,11 +360,57 @@ def test_cookies_of_another_site_are_never_given_to_the_sbi_client(tmp_path, hel
     for host in ('matsui.brisk.jp', 'brisk.jp', 'sbi.brisk.jp.evil.example'):
         edited = tmp_path / 'sites.json'
         edited.write_text(json.dumps({'sites': [{'id': 'sbi', 'cookie_host': host}]}))
-        with pytest.raises(passkey.PasskeyError, match=r'never given to the SBI client, which only talks to sbi\.brisk\.jp'):
+        with pytest.raises(passkey.PasskeyError, match=r'never given to the SBI BRiSK client, which only talks to sbi\.brisk\.jp'):
             passkey.login(store=store, sites_file=edited)
     assert not log.exists(), 'the refusal must come before Chrome is started'
     assert store.load() == RECORD, 'no sign-in happened, so the counter is unchanged'
     assert sbi._client is None
+
+
+ESHITEN = {'site': 'e-shiten', 'user_id': 'abc123', 'credential': PASSKEY}
+
+
+def test_e_shiten_signs_in_with_the_saved_user_id_and_its_data_client_gets_the_cookies(tmp_path, helper):
+    log = helper('login-ok')
+    store = saved(tmp_path, ESHITEN)
+    signin = passkey.login(store=store)
+    request = json.loads(log.read_text(encoding='utf-8'))['request']
+    eshiten = sites.BUILTIN['e-shiten']
+    assert (request['loginUrl'], request['passkeyButton'], request['userField'], request['userId'], request['cookieHost'],
+            request['cookiePrefix']) == (eshiten.login_url, 'パスキーを使う', 'input[name="kokyakuUserId"]', 'abc123',
+                                         'next.e-shiten.brisk.jp', 'session_')
+    assert store.load() == {**ESHITEN, 'credential': {**PASSKEY, 'signCount': 5}}, 'saving the counter must keep the user ID'
+    assert signin.client.site == 'e-shiten' and signin.client.session.origin == 'https://next.e-shiten.brisk.jp'
+    assert sbi._default() is signin.client
+    assert signin.saved_to == sbi.cookies_path('e-shiten') and not sbi.cookies_path('sbi').exists()
+    assert json.loads(signin.saved_to.read_text(encoding='utf-8')) == signin.cookies
+    assert_private(signin.saved_to, 0o600)
+
+
+def test_a_site_without_a_user_id_box_is_sent_none_and_a_missing_user_id_stops_before_chrome(tmp_path, helper):
+    log = helper('login-ok')
+    passkey.login(store=saved(tmp_path), remember=False)
+    request = json.loads(log.read_text(encoding='utf-8'))['request']
+    assert 'userField' not in request and 'userId' not in request
+    log.unlink()
+    store = saved(tmp_path, {'site': 'e-shiten', 'credential': PASSKEY})
+    with pytest.raises(passkey.PasskeyError, match=r"Tachibana e-shiten's passkey sign-in asks for your user ID.*brisk enroll --replace"):
+        passkey.login(store=store)
+    assert not log.exists()
+    with pytest.raises(passkey.PasskeyError, match='unknown format'):
+        passkey.login(store=saved(tmp_path, {**ESHITEN, 'user_id': 123}))
+
+
+def test_cookies_of_another_site_are_never_given_to_the_e_shiten_client(tmp_path, helper):
+    log = helper('login-ok')
+    store = saved(tmp_path, ESHITEN)
+    edited = tmp_path / 'sites.json'
+    for host in ('sbi.brisk.jp', 'e-shiten.brisk.jp', 'next.e-shiten.brisk.jp.evil.example'):
+        edited.write_text(json.dumps({'sites': [{'id': 'e-shiten', 'cookie_host': host}]}))
+        with pytest.raises(passkey.PasskeyError,
+                           match=r'never given to the e-shiten BRiSK Next client, which only talks to next\.e-shiten\.brisk\.jp'):
+            passkey.login(store=store, sites_file=edited)
+    assert not log.exists() and store.load() == ESHITEN and sbi._client is None
 
 
 def test_non_ascii_text_from_the_helper_is_read_as_utf_8_whatever_the_system_code_page(tmp_path, helper):
@@ -467,7 +513,7 @@ def test_enroll_asks_which_broker_when_no_site_is_given(tmp_path, helper):
     store = passkey.FileStore(tmp_path / 'store.json')
     asked = []
     passkey.enroll(store=store, confirm=lambda: None, choose=lambda found: asked.append(list(found)) or 'smbcnikko')
-    assert asked == [['sbi', 'matsui', 'monex', 'smbcnikko']] and store.load()['site'] == 'smbcnikko'
+    assert asked == [['sbi', 'matsui', 'monex', 'smbcnikko', 'e-shiten']] and store.load()['site'] == 'smbcnikko'
     store.delete()
     log.unlink()
     with pytest.raises(passkey.PasskeyError, match=r'Choose your broker with --site \(see `brisk sites`\)'):
@@ -475,6 +521,37 @@ def test_enroll_asks_which_broker_when_no_site_is_given(tmp_path, helper):
     with pytest.raises(sites.SiteError, match="Unknown site 'nowhere'"):
         passkey.enroll(site='nowhere', store=store)
     assert not log.exists() and store.load() is None
+
+
+def test_enroll_at_e_shiten_starts_at_its_first_sign_in_and_keeps_the_user_id_with_the_passkey(tmp_path, helper):
+    log = helper('enroll-ok')
+    store = passkey.FileStore(tmp_path / 'store.json')
+    summary = passkey.enroll(site='e-shiten', store=store, confirm=lambda: None, user_id=' abc123 ')
+    record = store.load()
+    assert record == {'site': 'e-shiten', 'user_id': 'abc123', 'credential': {**record['credential'], 'signCount': 2}}
+    assert 'abc123' not in json.dumps(summary)
+    request = json.loads(log.read_text(encoding='utf-8'))['request']
+    assert request['loginUrl'] == 'https://tr2.e-shiten.jp/e-shiten' and 'userId' not in request, 'enrolling is done by hand'
+    passkey.enroll(site='e-shiten', store=store, confirm=lambda: None, user_id='abc123', replace=True, login_url='https://x.example/')
+    assert json.loads(log.read_text(encoding='utf-8'))['request']['loginUrl'] == 'https://x.example/'
+    store.delete()
+    log.unlink()
+    for bad in ('', '  ', 'a\nb', 'x' * 101):
+        with pytest.raises(passkey.PasskeyError, match='one line of text'):
+            passkey.enroll(site='e-shiten', store=store, confirm=lambda: None, user_id=bad)
+    with pytest.raises(passkey.PasskeyError, match=r"asks for your user ID: pass user_id= or enroll from a terminal"):
+        passkey.enroll(site='e-shiten', store=store, confirm=lambda: None)  # no terminal in the tests, so it cannot ask
+    assert not log.exists() and store.load() is None, 'nothing starts without the user ID'
+    passkey.enroll(site='sbi', store=store, confirm=lambda: None, user_id='ignored')
+    assert 'user_id' not in store.load(), 'a site without a user ID box keeps none'
+
+
+def test_the_user_id_is_asked_on_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(passkey.sys, 'stdin', type('Tty', (), {'isatty': lambda self: True})())
+    monkeypatch.setattr('builtins.input', lambda prompt='': prompt + 'abc123')
+    assert passkey._ask_user_id(sites.BUILTIN['e-shiten']) == 'User ID: abc123'
+    captured = capsys.readouterr()
+    assert "Tachibana e-shiten's passkey sign-in asks for your user ID" in captured.err and captured.out == ''
 
 
 def test_the_interactive_choice_takes_a_number_or_an_id(monkeypatch, capsys):
@@ -537,8 +614,9 @@ def test_nothing_in_the_sbi_module_is_about_passkeys():
 def test_cli_sites_lists_the_built_ins_and_your_own(tmp_path, capsys):
     cli.main(['sites'])
     lines = capsys.readouterr().out.splitlines()
-    assert [line.split()[0] for line in lines] == ['sbi', 'matsui', 'monex', 'smbcnikko']
-    assert 'data client: yes' in lines[0] and all('data client: no' in line for line in lines[1:])
+    assert [line.split()[0] for line in lines] == ['sbi', 'matsui', 'monex', 'smbcnikko', 'e-shiten']
+    assert [line.split()[0] for line in lines if 'data client: yes' in line] == ['sbi', 'e-shiten']
+    assert 'next.e-shiten.brisk.jp' in lines[-1]
     path = tmp_path / 'config' / 'brisk' / 'sites.json'
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({'sites': [{'id': 'mine', 'login_url': 'https://m.example/', 'cookie_host': 'mine.brisk.jp'}]}))
@@ -659,7 +737,7 @@ def test_full_stack_a_site_you_define_enroll_then_login(tmp_path):
 
 @needs_chrome
 def test_full_stack_sbi_signs_in_and_its_data_client_gets_the_cookies(tmp_path, monkeypatch):
-    monkeypatch.setattr(sbi, 'ORIGIN', 'https://brisk.localhost')
+    monkeypatch.setitem(sbi.SITES, 'sbi', sbi.SITES['sbi']._replace(origin='https://brisk.localhost'))
     with FakeBroker() as broker:
         main = broker.origins['mainOrigin']
         define(tmp_path, {'id': 'sbi', 'login_url': main + '/login', 'cookie_host': 'brisk.localhost'})
@@ -669,3 +747,21 @@ def test_full_stack_sbi_signs_in_and_its_data_client_gets_the_cookies(tmp_path, 
         assert signin.site.id == 'sbi' and sbi._default() is signin.client
         assert signin.client.session.cookies['session_fake'] == broker.state()['briskCookieValue']
         assert signin.saved_to == sbi.cookies_path() and broker.state()['accepted'] == 1
+
+
+@needs_chrome
+def test_full_stack_e_shiten_types_the_user_id_signs_in_through_its_popup_and_its_data_client_gets_the_cookies(tmp_path, monkeypatch):
+    monkeypatch.setitem(sbi.SITES, 'e-shiten', sbi.SITES['e-shiten']._replace(origin='https://brisk.localhost'))
+    with FakeBroker() as broker:
+        main = broker.origins['mainOrigin']
+        define(tmp_path, {'id': 'e-shiten', 'login_url': main + '/eshiten/login', 'enroll_url': main + '/enroll',
+                          'cookie_host': 'brisk.localhost'})
+        store = passkey.FileStore(tmp_path / 'passkey.json')
+        passkey.enroll(site='e-shiten', store=store, headless=True, confirm=broker.registered, user_id='abc123')
+        signin = passkey.login(store=store, headless=True)
+        seen = broker.state()
+        assert seen['userIds'] == ['abc123'] and seen['accepted'] == 1 and seen['refusals'] == []
+        assert signin.site.id == 'e-shiten' and signin.client.site == 'e-shiten' and sbi._default() is signin.client
+        assert signin.client.session.cookies['session_fake'] == seen['briskCookieValue']
+        assert signin.saved_to == sbi.cookies_path('e-shiten')
+        assert store.load()['credential']['signCount'] == seen['counter'] and store.load()['user_id'] == 'abc123'

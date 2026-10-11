@@ -155,7 +155,8 @@ function checkMaster(master, protocolVersion) {
   const problems = [];
   if (master.length < 1000) problems.push(`only ${master.length} issues`);
   const rules = [
-    ['numeric codes', 0.95, m => /^\d{3,4}$/.test(m.code)],
+    // Four digits, five for some preferred shares, or since 2024 letters too (167A).
+    ['security codes', 0.95, m => /^[0-9][0-9A-Z]{3,4}$/.test(m.code)],
     ['positive base prices', 0.98, m => m.base_price10 > 0],
     ['limits around the base price', 0.98, m => m.limit_up10 > m.base_price10 && m.base_price10 > m.limit_down10],
     ['lot sizes of 1 to 1,000,000', 0.98, m => m.lot_size >= 1 && m.lot_size <= 1e6],
@@ -216,6 +217,8 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     authError: () => fail(new Error(`${where.name} reports another WebSocket session for this user (only one is allowed); close the other one`)),
     marketFinished: () => { marketFinished = true; },
   } });
+  trace?.(`master: ${decoder.master.length} issues read from the ${decoder.masterFromFile ? 'master file' : 'decoder'}`
+    + (decoder.boot.skipped_exceptional_sq ? `; special quotes not sent for ${decoder.boot.skipped_exceptional_sq.join(',')}` : ''));
   const selected = new Set(codes);
   const master = decoder.master.filter(m => !selected.size || selected.has(m.code));
   const missing = codes.filter(code => !master.some(m => m.code === code));
@@ -223,6 +226,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   const ids = new Set(master.map(m => m.issue_id));
   const input_transport = { kind: where.transport, origin: where.origin + '/', ws_host: wsUrl.host, series: app.series,
     protocol_version: protocolVersion, boot_applied: decoder.boot,
+    master_source: decoder.masterFromFile ? 'file' : 'decoder',
     decoder: paths, decoder_sha256: crypto.createHash('sha256').update(assets['fita.wasm']).digest('hex'),
     setup_ms: performance.now() - began };
 
@@ -252,7 +256,8 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     }
     started = true;
     const batch = { type: 'bootstrap', seq: seq++, source: where.source, trading_date: String(app.date).replaceAll('-', ''),
-      input_transport: { ...input_transport, dialect: link.mode, engineio: link.version, caught_up_issues: caughtUp },
+      input_transport: { ...input_transport, dialect: link.mode, engineio: link.version, caught_up_issues: caughtUp,
+        unread_base_prices: decoder.unreadBasePrices.size },
       source_timestamp_origin: 'brisk_decoder_unverified', exchange_delay_ms: null,
       source_time_us: now, market_issue_count: decoder.master.length, master, quotes };
     work = work.then(() => failure || emit(batch)).catch(fail);
