@@ -76,14 +76,19 @@ permission are supplied by the contributor and cannot be independently verified.
 
 ## SBI BRiSK
 
-The SBI BRiSK client (`briskapi.sbi`, `brisk live --sbi`) uses session cookies
+The SBI BRiSK client (`briskapi.sbi`, `brisk live --sbi`; `site="e-shiten"` and
+`brisk live --site e-shiten` for Tachibana e-shiten BRiSK Next) uses session cookies
 from your own browser. They are credentials:
 
-- They are sent only to `https://sbi.brisk.jp`, together with the API token it
-  issues. The client never follows redirects, so they can't be forwarded elsewhere.
+- They are sent only to the site that issued them, `https://sbi.brisk.jp` or
+  `https://next.e-shiten.brisk.jp`, together with the API token it issues. The
+  client never follows redirects, so they can't be forwarded elsewhere. The live
+  stream may be on another BRiSK host (`api.brisk.jp`); like a browser, the client
+  sends it the session named in the site's boot response, not your cookies, and
+  refuses a stream outside `brisk.jp`.
 - They stay in memory unless you call `sbi.login(..., remember=True)`, which saves
-  them to `~/.config/brisk/sbi-cookies.json` (or `$XDG_CONFIG_HOME/brisk/`),
-  readable only by you. `sbi.logout()` deletes that file.
+  them to `~/.config/brisk/sbi-cookies.json` (`e-shiten-cookies.json` for e-shiten;
+  or `$XDG_CONFIG_HOME/brisk/`), readable only by you. `sbi.logout()` deletes both.
 - The live host receives them through its environment, not its command line.
 - `brisk enroll` / `brisk login` (passkey sign-in to the broker you choose: SBI, Matsui, Monex,
   SMBC Nikko or one you add) capture a passkey that you register at that broker and use it to
@@ -111,6 +116,7 @@ from your own browser. They are credentials:
   public archive, permanently. `contribute=False` on `sbi.connect()` or
   `BRISK_CONTRIBUTE=0` keeps both the summary and any market recording local.
   The environment opt-out suppresses the interactive sharing questions as well.
+- An e-shiten session contributes nothing: no market data and no timing summary.
 
 ## Network metadata
 

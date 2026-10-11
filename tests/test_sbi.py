@@ -18,7 +18,7 @@ import briskapi
 import briskapi.cli as cli
 import briskapi.schema as schema
 from briskapi import sbi
-from briskapi._recording import JST
+from briskapi._recording import JST, NotFoundError
 
 BOOT = {'result': True, 'user_id': 'test-uuid', 'api_token': 'v2.local.testtoken', 'api_endpoint': 'https://api.brisk.jp'}
 APP_BOOT = {'result': True, 'series': 0, 'date': '2026-03-11', 'session_status': 'running',
@@ -69,6 +69,7 @@ def client(**routes):
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
     monkeypatch.delenv('BRISK_SBI_COOKIES', raising=False)
+    monkeypatch.delenv('BRISK_ESHITEN_COOKIES', raising=False)
     monkeypatch.delenv('BRISK_CONTRIBUTE', raising=False)
     monkeypatch.setattr(sbi, '_client', None)
     monkeypatch.setattr(briskapi, '_current', None)
@@ -357,3 +358,65 @@ def test_opted_in_sbi_capture_closed_early_does_not_publish(tmp_path, monkeypatc
     feed.close()
     assert feed.status == 'closed' and feed.contribution is None
     assert not Path(feed._tmp.name).exists()
+
+
+def test_e_shiten_has_its_own_address_cookies_and_variable(monkeypatch):
+    with pytest.raises(sbi.SessionExpiredError, match="No e-shiten BRiSK Next cookies.*site='e-shiten'"):
+        sbi.login(site='e-shiten')
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"for": "sbi"}')
+    with pytest.raises(sbi.SessionExpiredError):  # SBI's cookies never go to another site
+        sbi.login(site='e-shiten')
+    monkeypatch.setenv('BRISK_ESHITEN_COOKIES', '{"from": "env"}')
+    c = sbi.login(site='e-shiten')
+    assert c.site == 'e-shiten' and c.session.cookies == {'from': 'env'}
+    opener = Opener({})
+    c.session._opener, c.session.rate_limit = opener, 0
+    with pytest.raises(NotFoundError):
+        c.session.get('/api/frontend/boot')
+    assert opener.requests[0].full_url == 'https://next.e-shiten.brisk.jp/api/frontend/boot'
+    monkeypatch.delenv('BRISK_ESHITEN_COOKIES')
+    sbi.login({'saved': 'e'}, remember=True, site='e-shiten')
+    sbi.login({'saved': 's'}, remember=True)
+    assert json.loads(sbi.cookies_path('e-shiten').read_text()) == {'saved': 'e'}
+    assert json.loads(sbi.cookies_path().read_text()) == {'saved': 's'}
+    sbi.logout()
+    assert not sbi.cookies_path('e-shiten').exists() and not sbi.cookies_path().exists()
+    with pytest.raises(ValueError, match='Unknown BRiSK site'):
+        sbi.login({'a': 'b'}, site='matsui')
+
+
+@pytest.fixture
+def eshiten_host(tmp_path, monkeypatch):
+    """A stand-in for sbi.cjs on e-shiten that reports the site it was asked for."""
+    batches = sbi_session()
+    batches[0] = {**batches[0], 'source': 'eshiten_live',
+                  'input_transport': {'kind': 'eshiten_websocket', 'origin': 'https://next.e-shiten.brisk.jp/'}}
+    script = tmp_path / 'eshiten_fake.cjs'
+    script.write_text('console.error(process.env.BRISK_SBI_SITE);\n'
+                      f'for (const b of {json.dumps(batches)}) console.log(JSON.stringify(b));\n')
+    monkeypatch.setattr(sbi, 'DECODER', script)
+    monkeypatch.setattr(cli, 'contribute', lambda *args, **kwargs: pytest.fail('e-shiten market data is never shared'))
+    monkeypatch.setattr(cli, 'contribute_timing', lambda *args: pytest.fail('nor is e-shiten timing'))
+
+
+def test_e_shiten_feed_contributes_nothing(eshiten_host, capfd):
+    briskapi.consent(accept=True, contributor='owner')
+    sbi.login({'s': 'v'}, site='e-shiten')
+    feed = sbi.connect(codes=['7203']).wait()
+    assert feed.source == 'eshiten_live' and briskapi.Ticker('7203').quote()['last_price'] == 10160.0
+    assert feed.contribution is None and feed.timing_contribution is None
+    assert capfd.readouterr().err.strip() == 'e-shiten'
+    with pytest.raises(briskapi.BriskError, match='Only SBI market recordings can be shared'):
+        sbi.connect(share_market_data=True)
+
+
+def test_cli_live_e_shiten_asks_nothing(eshiten_host, monkeypatch, capsys):
+    monkeypatch.setenv('BRISK_ESHITEN_COOKIES', '{"s": "v"}')
+    monkeypatch.setattr(cli, 'interactive', lambda: True)
+    monkeypatch.setattr(cli, 'ask_consent', lambda: pytest.fail('nothing to consent to'))
+    cli.main(['live', '--site', 'e-shiten', '--codes', '7203'])
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines[-1]['last_price'] == 10160.0 and cli.load_consent() is None
+    with pytest.raises(SystemExit):
+        cli.main(['live', '--site', 'e-shiten', '--share-market-data'])
+    assert '--share-market-data requires --sbi' in capsys.readouterr().err

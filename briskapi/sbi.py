@@ -1,5 +1,8 @@
 """SBI BRiSK (sbi.brisk.jp) session: login, REST data and an experimental live feed.
 
+Tachibana's e-shiten BRiSK Next (next.e-shiten.brisk.jp) is the same app, so the same
+client serves it: sbi.login(cookies={...}, site="e-shiten").
+
 The data is used through briskapi's own Ticker and Market:
 
     import briskapi
@@ -14,9 +17,10 @@ The endpoint sequence (cookie login, token boot, data endpoints) was learned fro
 pybrisk (https://github.com/obichan117/pybrisk), Copyright (c) 2026 obichan117,
 MIT License; see LICENSE-pybrisk.txt in this package.
 
-Your session cookies are credentials. They are sent only to sbi.brisk.jp and are
-kept in memory unless you pass remember=True. Sharing SBI market data requires
-share_market_data=True for that session and contribution consent.
+Your session cookies are credentials. They are sent only to the site that issued
+them and are kept in memory unless you pass remember=True. Sharing SBI market data
+requires share_market_data=True for that session and contribution consent. An
+e-shiten session contributes nothing, not even timing.
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ import json
 import os
 from pathlib import Path
 import time
+from typing import NamedTuple
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,7 +38,18 @@ import zlib
 
 from briskapi._recording import JST, BriskError, NotFoundError, Table
 
-ORIGIN = 'https://sbi.brisk.jp'
+
+
+class _Site(NamedTuple):
+    origin: str
+    name: str
+    cookies_env: str
+
+
+# Brokers whose BRiSK is this app; decoder/sbi.cjs keeps the same table.
+SITES = {'sbi': _Site('https://sbi.brisk.jp', 'SBI BRiSK', 'BRISK_SBI_COOKIES'),
+         'e-shiten': _Site('https://next.e-shiten.brisk.jp', 'e-shiten BRiSK Next', 'BRISK_ESHITEN_COOKIES')}
+ORIGIN = SITES['sbi'].origin
 DECODER = Path(__file__).resolve().parent / 'decoder' / 'sbi.cjs'
 INTERVALS = ('5m', '1d', '1w', '1mo')
 SCHEDULE = {'morning_pre_open': 'morning_session_pre_open_time', 'morning_open': 'morning_session_open_time',
@@ -48,11 +64,11 @@ MARGIN = {'long_balance': 'kakuhoLongShares', 'short_balance': 'kakuhoShortShare
 
 
 class SessionExpiredError(BriskError):
-    """The SBI BRiSK session is missing, invalid or expired. Log in again."""
+    """The BRiSK session is missing, invalid or expired. Log in again."""
 
 
 class APIError(BriskError):
-    """Unexpected HTTP status from SBI BRiSK."""
+    """Unexpected HTTP status from the BRiSK site."""
 
     def __init__(self, status, message=''):
         self.status = status
@@ -70,17 +86,27 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def cookies_path() -> Path:
-    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'brisk' / 'sbi-cookies.json'
+def _site(site) -> _Site:
+    if site not in SITES:
+        raise ValueError(f'Unknown BRiSK site {site!r}; use one of: {", ".join(SITES)}')
+    return SITES[site]
+
+
+def cookies_path(site='sbi') -> Path:
+    _site(site)
+    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'brisk' / f'{site}-cookies.json'
 
 
 class Session:
-    """Cookie-authenticated HTTP to sbi.brisk.jp: rate limited, no redirects."""
+    """Cookie-authenticated HTTP to one BRiSK site (sbi.brisk.jp by default): rate limited, no redirects."""
 
-    def __init__(self, cookies, rate_limit=1.0, timeout=30, opener=None):
+    def __init__(self, cookies, rate_limit=1.0, timeout=30, opener=None, site='sbi'):
+        where = _site(site)
+        self.origin, self.name = where.origin, where.name
         if not cookies or not isinstance(cookies, dict) or not any(cookies.values()):
-            raise SessionExpiredError('No SBI BRiSK cookies: copy them from your logged-in browser and call sbi.login(), '
-                                      'or run `brisk login` (passkey)')
+            how = ', or run `brisk login` (passkey)' if site == 'sbi' else f" with site='{site}'"
+            raise SessionExpiredError(f'No {self.name} cookies: copy them from your logged-in browser and call sbi.login(){how}')
+        self.site = site
         self.cookies = dict(cookies)
         self.rate_limit, self.timeout = rate_limit, timeout
         self.token = None
@@ -97,7 +123,7 @@ class Session:
             if wait > 0:
                 time.sleep(wait)
             self._last = time.monotonic()
-        url = ORIGIN + path + ('?' + urllib.parse.urlencode(params) if params else '')
+        url = self.origin + path + ('?' + urllib.parse.urlencode(params) if params else '')
         headers = {'Cookie': self.cookie_header, 'Accept': 'application/json'}
         if self.token:
             headers['Authorization'] = f'Bearer {self.token}'
@@ -107,7 +133,7 @@ class Session:
         except urllib.error.HTTPError as e:
             text = e.read(500).decode(errors='replace')
             if e.code in (301, 302, 303, 307, 308, 401, 403):
-                raise SessionExpiredError('SBI BRiSK session expired or invalid; log in again') from None
+                raise SessionExpiredError(f'{self.name} session expired or invalid; log in again') from None
             if e.code == 404:
                 raise NotFoundError(f'{path}: {text}') from None
             if e.code == 429:
@@ -117,11 +143,15 @@ class Session:
 
 
 class Client:
-    """One SBI BRiSK session. Booting exchanges cookies for an API token on first use."""
+    """One BRiSK site session. Booting exchanges cookies for an API token on first use."""
 
-    def __init__(self, cookies=None, session=None):
-        self.session = session or Session(cookies)
+    def __init__(self, cookies=None, session=None, site='sbi'):
+        self.session = session or Session(cookies, site=site)
         self._boot = None
+
+    @property
+    def site(self) -> str:
+        return self.session.site
 
     @property
     def boot(self) -> dict:
@@ -209,18 +239,19 @@ def _at(date, clock):
 _client: Client | None = None
 
 
-def login(cookies=None, remember=False) -> Client:
-    """Use SBI BRiSK session cookies (from DevTools or pycookiecheat).
+def login(cookies=None, remember=False, site='sbi') -> Client:
+    """Use BRiSK session cookies (from DevTools or pycookiecheat) for `site`: 'sbi' or 'e-shiten'.
 
-    Without cookies, uses BRISK_SBI_COOKIES (JSON) or cookies saved with remember=True.
+    Without cookies, uses the site's variable (BRISK_SBI_COOKIES, BRISK_ESHITEN_COOKIES; JSON)
+    or the cookies saved for that site with remember=True.
     """
     global _client
-    path = cookies_path()
-    if cookies is None and os.environ.get('BRISK_SBI_COOKIES'):
-        cookies = json.loads(os.environ['BRISK_SBI_COOKIES'])
+    path, env = cookies_path(site), _site(site).cookies_env
+    if cookies is None and os.environ.get(env):
+        cookies = json.loads(os.environ[env])
     if cookies is None and path.exists():
         cookies = json.loads(path.read_text())
-    _client = Client(cookies)
+    _client = Client(cookies, site=site)
     if remember:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -230,21 +261,22 @@ def login(cookies=None, remember=False) -> Client:
 
 
 def logout():
-    """Forget the session, including saved cookies."""
+    """Forget the session, including the cookies saved for every site."""
     global _client
     _client = None
-    cookies_path().unlink(missing_ok=True)
+    for site in SITES:
+        cookies_path(site).unlink(missing_ok=True)
 
 
 def _default() -> Client:
     if _client is None:
-        raise SessionExpiredError('SBI BRiSK data needs a session: call briskapi.sbi.login(cookies={...}) first')
+        raise SessionExpiredError('BRiSK site data needs a session: call briskapi.sbi.login(cookies={...}) first')
     return _client
 
 
 def connect(codes=None, history=False, node='node', timeout=120, contribute=None, trace_protocol=False, profile=None,
             share_market_data=False):
-    """Experimental live SBI BRiSK feed: SBI's own WASM decoder under Node, never Chrome.
+    """Experimental live feed from the logged-in site: its own WASM decoder under Node, never Chrome.
 
     Returns a briskapi.Feed (the default source for briskapi.Ticker and Market).
     The host follows the vendor client's connect sequence: it feeds the WASM from the
@@ -263,21 +295,25 @@ def connect(codes=None, history=False, node='node', timeout=120, contribute=None
     recording after a clean end, under your saved alias, license and redistribution
     declaration. It requires current consent; contribute=False or BRISK_CONTRIBUTE=0
     keeps both local. Cookies, tokens and connection diagnostics are never published.
+    An e-shiten session contributes nothing (the archive takes SBI sessions only), so
+    share_market_data is refused there.
     """
     from briskapi import load
     from briskapi._live import Feed
     session = _default().session
+    if share_market_data and session.site != 'sbi':
+        raise BriskError(f'Only SBI market recordings can be shared, not {session.name}')
     command = [node, str(DECODER)]
     if codes:
         command += ['--codes', codes if isinstance(codes, str) else ','.join(map(str, codes))]
     if trace_protocol:
         command.append('--trace-protocol')
     # Cookies and the profile travel in the environment, never on the command line (visible to other users).
-    env = {**os.environ, 'BRISK_SBI_COOKIES': json.dumps(session.cookies)}
+    env = {**os.environ, 'BRISK_SBI_COOKIES': json.dumps(session.cookies), 'BRISK_SBI_SITE': session.site}
     if profile:
         env['BRISK_SBI_PROFILE'] = json.dumps(profile)
-    feed = Feed(command=command, env=env, history=history, contribute=contribute, timing='sbi_live',
-                share_market_data=share_market_data)
+    feed = Feed(command=command, env=env, history=history, contribute=contribute,
+                timing='sbi_live' if session.site == 'sbi' else None, share_market_data=share_market_data)
     try:
         return load(feed.ready(timeout))
     except BaseException:

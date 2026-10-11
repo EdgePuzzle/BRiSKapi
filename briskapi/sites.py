@@ -21,7 +21,9 @@ done; empty accepts any), launch_url (opened after sign-in to start BRiSK). An i
 built in only replaces the keys you give.
 
 Only SBI has a data client in briskapi (`briskapi.sbi`, `brisk live --sbi`). For the other sites,
-signing in captures the BRiSK session cookies for your own use.
+signing in captures the BRiSK session cookies for your own use. (The same client also serves
+Tachibana's e-shiten BRiSK Next with cookies from your browser, `brisk live --site e-shiten`; it is
+not listed here because passkey sign-in to it is not known to work.)
 """
 from __future__ import annotations
 

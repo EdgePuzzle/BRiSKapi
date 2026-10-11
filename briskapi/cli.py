@@ -273,18 +273,20 @@ def live(args):
     """Print each quote update as one JSON line; a complete session is contributed per consent."""
     from briskapi import connect, sbi  # The API package builds on this module.
     codes = args.codes.split(',') if args.codes else None
-    if args.sbi:
-        sbi.login()  # Missing cookies fail before consent prompts or decoder startup.
-    if load_consent() is None and os.environ.get('BRISK_CONTRIBUTE') != '0' and interactive():
+    if args.site:
+        sbi.login(site=args.site)  # Missing cookies fail before consent prompts or decoder startup.
+    # An e-shiten session contributes nothing, so there is nothing to ask.
+    if (args.site != 'e-shiten' and load_consent() is None and os.environ.get('BRISK_CONTRIBUTE') != '0'
+            and interactive()):
         ask_consent()
     share_market_data = args.share_market_data
     choice = load_consent()
-    if (args.sbi and share_market_data is None and choice and choice['enabled']
+    if (args.site == 'sbi' and share_market_data is None and choice and choice['enabled']
             and os.environ.get('BRISK_CONTRIBUTE') != '0' and interactive()):
         share_market_data = ask_sbi_market_sharing(choice)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        if args.sbi:
+        if args.site:
             feed = sbi.connect(codes=codes, trace_protocol=args.trace_protocol, share_market_data=bool(share_market_data))
         else:
             feed = connect(web=args.web, cache=args.cache, codes=codes, speed=args.speed, limit_frames=args.limit_frames)
@@ -364,10 +366,14 @@ def _main(argv):
     p.add_argument('--speed', type=float, default=1)
     p.add_argument('--limit-frames', type=int)
     p.add_argument('--raw', action='store_true', help='Vendor fields (price10, microseconds) instead of yen/ISO times')
-    group.add_argument('--sbi', action='store_true',
+    group.add_argument('--sbi', action='store_const', dest='site', const='sbi',
                        help='Live SBI BRiSK (experimental); cookies from BRISK_SBI_COOKIES, saved with sbi.login(remember=True) or by `brisk login`')
+    group.add_argument('--site', choices=('sbi', 'e-shiten'),
+                       help='Live BRiSK of this broker (experimental); --site e-shiten for Tachibana e-shiten BRiSK Next, '
+                            "cookies from BRISK_ESHITEN_COOKIES or saved with sbi.login(site='e-shiten', remember=True); "
+                            'its sessions stay local')
     p.add_argument('--trace-protocol', action='store_true',
-                   help='With --sbi: print the connection steps to stderr, every token redacted (wire details in BRISK_SBI_PROFILE)')
+                   help='With --sbi or --site: print the connection steps to stderr, every token redacted (wire details in BRISK_SBI_PROFILE)')
     p.add_argument('--share-market-data', action=argparse.BooleanOptionalAction, default=None,
                    help='With --sbi and consent: share this decoded market session (interactive default: ask, Enter accepts)')
     sub.add_parser('sites', help='List the brokers you can sign in to (built in, plus your own in sites.json)')
@@ -396,7 +402,7 @@ def _main(argv):
     group.add_argument('--revoke', action='store_true')
     p.add_argument('--contributor'); p.add_argument('--license', choices=LICENSES)
     args = parser.parse_args(argv)
-    if args.command == 'live' and args.share_market_data and not args.sbi:
+    if args.command == 'live' and args.share_market_data and args.site != 'sbi':
         parser.error('--share-market-data requires --sbi')
     config = settings(args.config)
     if args.command == 'consent':

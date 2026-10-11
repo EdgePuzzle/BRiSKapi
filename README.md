@@ -14,6 +14,7 @@ SBI, TSE or JPX.
 >   its recorded pace. This is not live market data.
 > - **With an SBI Securities BRiSK subscription:** SBI BRiSK market data (candles,
 >   margin, alerts, schedule, watchlist) and an experimental live feed.
+> - **With Tachibana e-shiten BRiSK Next:** the same, kept on your computer.
 
 ## Install
 
@@ -121,10 +122,29 @@ session, and three wire details aren't public: the Socket.IO connect parameters,
 the `startLive` payload and the catch-up request body. Set them with
 `sbi.connect(profile={...})` and see what the server answers with
 `trace_protocol=True` (every token redacted); until they are right it stops with an
-explicit error rather than guessing. Please report what you see. Your cookies go
-only to sbi.brisk.jp. SBI market data is shared only after an explicit choice for
+explicit error rather than guessing. Please report what you see. Sessions on
+2026-10-08 got through sign-in, the data endpoints and the decoder download, then
+stopped at the stock master: the current build's record layout isn't known yet, so
+expect `stock master layout not recognised` there. Your cookies go only to sbi.brisk.jp. SBI market data is shared only after an explicit choice for
 that capture; the Python API requires `share_market_data=True`. With contribution
 on, a timing summary is shared even when market-data sharing is declined.
+
+### Tachibana e-shiten BRiSK Next
+
+e-shiten's BRiSK Next ([next.e-shiten.brisk.jp](https://next.e-shiten.brisk.jp)) is the
+same app, so the same client serves it. Log in there in your browser and pass its
+cookies with `site="e-shiten"`; `brisk login` (passkey) doesn't cover it.
+
+```python
+sbi.login(cookies={...}, site="e-shiten")   # or BRISK_ESHITEN_COOKIES; remember=True keeps them apart from SBI's
+feed = sbi.connect(codes=["7203"])           # live (experimental)
+```
+
+Everything above applies, except that an e-shiten session shares nothing, not even a
+timing summary, and its cookies go only to next.e-shiten.brisk.jp. e-shiten allows one
+BRiSK session at a time: opening it in a second tab or browser has stopped the first
+(message 10011), so the feed and BRiSK in your browser can end each other. Before you
+record, read what Tachibana's BRiSK Next terms say about storing and reusing its data.
 
 ## Signing in with a passkey (experimental)
 
@@ -231,6 +251,7 @@ recording once (about six seconds for the complete 420 MB demo).
 brisk live --web --codes 7203,6758          # one JSON object per quote update (--raw for vendor fields)
 brisk sites | enroll | login | forget       # sign in to your broker's BRiSK with a passkey through Chrome (experimental)
 brisk live --sbi --codes 7203               # SBI BRiSK; cookies from BRISK_SBI_COOKIES (JSON) or `brisk login`; --trace-protocol shows the handshake, wire details in BRISK_SBI_PROFILE
+brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; cookies from BRISK_ESHITEN_COOKIES (JSON); shares nothing
 brisk record --web --output recordings/s1   # record a replay (shared if you agreed)
 brisk list --date 20210927 --source historical_mock
 brisk pull PREFIX --output recordings/downloaded   # use a prefix returned by brisk list

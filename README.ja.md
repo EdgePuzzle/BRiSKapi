@@ -16,6 +16,8 @@ BRiSK の板寄せデータを扱う、非公式の pybrisk 風 Python API と `
 > - **SBI証券の BRiSK 契約がある場合:** SBI BRiSK の市場データ（ローソク足、
 >   信用残、アラート、取引スケジュール、ウォッチリスト）と、試験的なライブ
 >   フィード。
+> - **立花証券 e支店の BRiSK Next を使える場合:** 同じ機能。データはお使いの
+>   コンピューターから出ません。
 
 ## インストール
 
@@ -125,10 +127,31 @@ Node 上で動かします。ブラウザは使いません。ベンダーのク
 ター、`startLive` のペイロード、追いつき要求の本文）。`sbi.connect(profile={...})`
 で設定し、`trace_protocol=True`（トークンはすべて伏せ字）でサーバーの応答を確認
 してください。正しくなるまでは、推測で動かさず、明示的なエラーで止まります。
-結果をぜひお知らせください。Cookie は sbi.brisk.jp にのみ送られます。SBI の市場
+結果をぜひお知らせください。2026-10-08 のセッションでは、サインイン、データの
+取得、デコーダーのダウンロードまでは通り、銘柄マスターで止まりました。現行ビルドの
+レコード配置がまだ分かっていないため、そこで `stock master layout not recognised`
+のエラーになります。Cookie は sbi.brisk.jp にのみ送られます。SBI の市場
 データは、その記録の開始時に明示的に同意した場合だけ共有します。Python API では
 `share_market_data=True` が必要です。共有がオンなら、市場データの共有を断っても
 タイミングの要約は共有します。
+
+### 立花証券 e支店の BRiSK Next
+
+e支店の BRiSK Next（[next.e-shiten.brisk.jp](https://next.e-shiten.brisk.jp)）は
+同じアプリなので、同じクライアントで使えます。ブラウザでログインし、その Cookie を
+`site="e-shiten"` を付けて渡してください。`brisk login`（パスキー）は対応していません。
+
+```python
+sbi.login(cookies={...}, site="e-shiten")   # または BRISK_ESHITEN_COOKIES。remember=True で SBI とは別に保存
+feed = sbi.connect(codes=["7203"])           # ライブ（試験的）
+```
+
+上記の説明はそのまま当てはまりますが、e支店のセッションは何も共有しません（タイミング
+の要約も共有しません）。Cookie は next.e-shiten.brisk.jp にのみ送られます。e支店の
+BRiSK は同時に1セッションまでで、別のタブやブラウザで開くと先に開いていた方が
+止まりました（メッセージ 10011）。そのため、フィードとブラウザの BRiSK は互いに
+相手を止めることがあります。記録する前に、立花証券の BRiSK Next 利用規定で
+データの蓄積や二次利用についての定めを確認してください。
 
 ## パスキーでのサインイン（試験的）
 
@@ -238,6 +261,7 @@ Python では `passkey.enroll(site="matsui")` と `signin = passkey.login()` を
 brisk live --web --codes 7203,6758          # 気配の更新ごとに JSON を1行出力（--raw でベンダー形式）
 brisk sites | enroll | login | forget       # Chrome 経由のパスキーで証券会社の BRiSK にサインイン（試験的）
 brisk live --sbi --codes 7203               # SBI BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_SBI_PROFILE）
+brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）。何も共有しない
 brisk record --web --output recordings/s1   # デモを記録（同意済みなら共有）
 brisk list --date 20210927 --source historical_mock
 brisk pull PREFIX --output recordings/downloaded   # brisk list が返した prefix を使う

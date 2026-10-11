@@ -7,16 +7,16 @@ itself. For usage, see the [README](README.md).
 
 | Component | Where | Role |
 | --- | --- | --- |
-| Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `sbi.cjs` drives SBI BRiSK's decoder from an authenticated session. Both emit one JSON batch per frame. |
+| Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `sbi.cjs` drives SBI BRiSK's (or e-shiten BRiSK Next's) decoder from an authenticated session. Both emit one JSON batch per frame. |
 | Python API | `briskapi/` | `Recording` (files), `Feed` (live, background thread), `Ticker`/`Market` views and `Archive`. |
-| SBI session | `briskapi/sbi.py` | Cookie login, token boot and SBI's REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `sbi.connect()` starts the live host. |
+| SBI session | `briskapi/sbi.py` | Cookie login (SBI, or e-shiten with `site="e-shiten"`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `sbi.connect()` starts the live host. |
 | Archive client | `briskapi/cli.py`, `briskapi/schema.py` | The `brisk` CLI, sharing consent, canonical packaging, upload and verified download. |
 | Auction state | `rust/brisk_quote_ingest` | Optional Rust tools: `brisk_quote_ingest` validates batches, keeps per-security state and publishes latest-state files; `brisk_recording` reconstructs a saved recording. |
 | Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL issues upload tickets; S3-triggered ingest validates and publishes; DynamoDB holds quotas. |
 
 ```
 demo assets (HTTPS, pinned) ─► decoder.cjs ─┐
-SBI session (cookies) ───────► sbi.cjs ─────┴─► JSON batches ─┬─► briskapi.Feed: live state, callbacks, iterators
+SBI/e-shiten session ────────► sbi.cjs ─────┴─► JSON batches ─┬─► briskapi.Feed: live state, callbacks, iterators
                                                              ├─► brisk live: JSON lines
                                                              └─► briskapi.record ─► events.jsonl (demo only)
 
@@ -113,6 +113,17 @@ pinned), checks that it exports every function the host calls, and decodes
 WebSocket frames with protocol version 18000. Cookies reach it through the
 environment, never the command line.
 
+The page may name its bundles by absolute or relative path, and a bundle names the
+loader either as a literal path or as a template with an exchange variant,
+`./assets/wasm${r}/fita.<hash>.js` (`r` is `-fukuoka` for the Fukuoka exchange; only
+the Tokyo build is used), in which case the `.wasm` name follows the loader's, as
+Emscripten names them. Bundles on another host are never fetched. The boot's
+`ws_url` is relative: as in the browser, it is resolved against the frontend boot's
+`api_endpoint` (`https://api.brisk.jp` on e-shiten and in pybrisk's SBI sample), or
+the site when there is none. A stream outside `brisk.jp` is refused. Cookies go only
+to the site's own host; elsewhere the session in `ws_url` authenticates the stream,
+which is opened with the site as `Origin`.
+
 The host follows the connect sequence in the vendor client (the public Next demo
 bundle) and in pybrisk's SBI research (`engineio.cjs` and `sbi.cjs`):
 
@@ -138,9 +149,9 @@ bundle) and in pybrisk's SBI research (`engineio.cjs` and `sbi.cjs`):
    most 90 s. The WASM's `authError` is the single-session rule (one WebSocket per
    user), and `marketFinished` makes an abnormal close a normal end.
 5. The decoder protocol comes from the boot response's `flex_version` (an explicit
-   option wins; 18000 if the server says nothing). The boot response's
-   `exceptional_sq` and `base_prices` are pushed into the WASM after the master is
-   loaded and before the snapshot, as the vendor client does, and the master's
+   option wins; 18000 if the server says nothing). The master is checked as soon as
+   it is read (below). The boot response's `exceptional_sq` and `base_prices` are
+   pushed into the WASM after that and before the snapshot, as the vendor client does, and the master's
    limits are re-read after every frame in case the decoder changes them.
 
 The ping loop is the WASM's own. In the real decoder, market and sync frames never
@@ -165,7 +176,7 @@ decoder is tested against the vendor client's own indices on real data, and its
 heartbeat, ping reply and callbacks through its function table; the ping loop and
 the whole flow run offline against fake servers (plain, Engine.IO 3 and 4) using it.
 What is not verified against a live session: any of the above on SBI itself, the
-18000 master layout, and three wire details that are not public: the Socket.IO
+18000 master layout (now known to differ from the demo's; see below), and three wire details that are not public: the Socket.IO
 connect parameters, the `startLive` payload and the catch-up request body. They live in a profile
 (`BRISK_SBI_PROFILE`, or `sbi.connect(profile=...)`); the defaults are labelled
 unverified, and the catch-up request is used only when the profile names a format.
@@ -174,6 +185,26 @@ attempt shows what the server answers. Anything wrong ends in an explicit error 
 stream that never initializes, a refused namespace, a rejected catch-up, an
 implausible stock view or master) rather than guessed data. Not implemented: reconnecting.
 The feed fails and needs a restart.
+
+### Tachibana e-shiten BRiSK Next
+
+e-shiten's BRiSK Next (`next.e-shiten.brisk.jp`) is the same app. In sessions on
+2026-10-08, the two sites' `/api/app/boot` responses matched (`flex_version`
+18000, the same master and snapshot hashes) and they served the same decoder
+(`fita.35e38ad5…`), reached only through the template path above. On both, cookie
+sign-in, every REST endpoint and the decoder, master and snapshot downloads worked.
+Both stopped while reading the master with the demo's 144-byte records (a lot size
+beyond 2^53), so the WebSocket was never reached: the 18000 master layout is not the
+demo's. Lot sizes are now read without failing and the master check runs before boot
+base prices are matched to it, so this ends in `stock master layout not recognised`
+with the failed checks instead. e-shiten enforces one BRiSK session per user: opening
+it in a second tab stopped the first (message 10011).
+
+`site="e-shiten"` selects it (`BRISK_SBI_SITE` for the host; saved cookies in
+`e-shiten-cookies.json`, `BRISK_ESHITEN_COOKIES`). Its batches say
+`source=eshiten_live` and `kind=eshiten_websocket`. Its sessions are never offered
+for contribution, neither market data nor timing, and the archive accepts neither
+label. There is no passkey site entry for it: Tachibana's sign-in has not been mapped.
 
 ## Passkey sign-in
 
@@ -384,7 +415,8 @@ to every source.
 
 ### Sources
 
-The decoded schema accepts `historical_mock`, `synthetic_test` and `sbi_live`.
+The decoded schema accepts `historical_mock`, `synthetic_test` and `sbi_live`
+(`eshiten_live` is a local label only).
 The small, self-authored `synthetic_test` fixture verifies publication; filter by
 source when selecting market data. Opted-in decoded SBI recordings retain
 `source=sbi_live` and undergo canonical-field, integrity and continuity checks.

@@ -1,8 +1,10 @@
 'use strict';
-// Experimental live host for SBI BRiSK (sbi.brisk.jp): the session's own WASM
-// decoder under Node, fed from the authenticated WebSocket. No browser or Chrome
-// DevTools. Emits the same JSON batches as decoder.cjs (source=sbi_live).
-// Cookies come from BRISK_SBI_COOKIES (JSON object), never from the command line.
+// Experimental live host for broker-hosted BRiSK: SBI BRiSK (sbi.brisk.jp) and
+// Tachibana's e-shiten BRiSK Next (next.e-shiten.brisk.jp), BRISK_SBI_SITE=e-shiten.
+// The session's own WASM decoder under Node, fed from the authenticated WebSocket.
+// No browser or Chrome DevTools. Emits the same JSON batches as decoder.cjs
+// (source=sbi_live or eshiten_live). Cookies come from BRISK_SBI_COOKIES (JSON
+// object), never from the command line.
 //
 // It follows the vendor client's connect sequence (public Next demo bundle) and
 // upstream's SBI research (pybrisk): feed the WASM from the first frame, wait for its
@@ -15,7 +17,13 @@ const { once } = require('node:events');
 const { Decoder } = require('./decoder.cjs');
 const { Link, resolveProfile, heartbeatMonitor, staleDataCheck, redact } = require('./engineio.cjs');
 
-const ORIGIN = 'https://sbi.brisk.jp';
+// Brokers whose BRiSK is this app. On 2026-10-08 both served the same boot (flex_version 18000),
+// master, snapshot and decoder, so only the address differs.
+const SITES = {
+  sbi: { origin: 'https://sbi.brisk.jp', name: 'SBI BRiSK', source: 'sbi_live', transport: 'sbi_websocket' },
+  'e-shiten': { origin: 'https://next.e-shiten.brisk.jp', name: 'e-shiten BRiSK Next', source: 'eshiten_live',
+    transport: 'eshiten_websocket' },
+};
 const PROTOCOL_VERSION = 18000;
 const MAX_BYTES = 64 * 1024 * 1024;
 // SBI's decoder must provide everything the host calls (the demo ABI minus portfolio).
@@ -23,13 +31,20 @@ const REQUIRED = ['_initialize', '_push', '_applyBasePriceQueue', '_stockCount',
   '_getDate', '_getTime', '_pushWs', '_getFrameNumbers', '_apiRecieved', '_addTraceUpdate', '_getTrace',
   '_clearTrace', '_getStockView', '_fitItaViewRowPrice10', '_getItaRows', '_malloc', 'addFunction'];
 
+function site(id = 'sbi') {
+  if (!Object.hasOwn(SITES, id)) throw new Error(`Unknown BRiSK site ${JSON.stringify(id)}; use ${Object.keys(SITES).join(' or ')}`);
+  return { id, ...SITES[id] };
+}
+
 class Session {
-  constructor(cookies, fetchImpl = fetch) {
+  constructor(cookies, fetchImpl = fetch, where = site()) {
     if (!cookies || typeof cookies !== 'object' || !Object.keys(cookies).length) {
-      throw new Error('Set BRISK_SBI_COOKIES to your SBI BRiSK session cookies (JSON object)');
+      throw new Error(`Set BRISK_SBI_COOKIES to your ${where.name} session cookies (JSON object)`);
     }
     this.cookie = Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join('; ');
     this.fetch = fetchImpl;
+    this.origin = where.origin;
+    this.name = where.name;
     this.token = null;
   }
 
@@ -42,18 +57,18 @@ class Session {
     if (this.token) headers.authorization = `Bearer ${this.token}`;
     if (contentType) headers['content-type'] = contentType;
     // Redirects mean a login page; following them would forward credentials elsewhere.
-    const response = await this.fetch(new URL(path, ORIGIN), { method, headers, body, redirect: 'manual', signal: AbortSignal.timeout(30000) });
+    const response = await this.fetch(new URL(path, this.origin), { method, headers, body, redirect: 'manual', signal: AbortSignal.timeout(30000) });
     if ([301, 302, 303, 307, 308, 401, 403].includes(response.status) || response.type === 'opaqueredirect') {
-      throw new Error('SBI BRiSK session expired or invalid; log in again');
+      throw new Error(`${this.name} session expired or invalid; log in again`);
     }
     if (!response.ok) {
-      const error = new Error(`SBI BRiSK ${path}: HTTP ${response.status}`);
+      const error = new Error(`${this.name} ${path}: HTTP ${response.status}`);
       error.status = response.status;
       error.reason = response.headers?.get?.('x-error-reason') ?? null;
       throw error;
     }
     const data = Buffer.from(await response.arrayBuffer());
-    if (data.length > MAX_BYTES) throw new Error(`SBI BRiSK ${path}: response too large`);
+    if (data.length > MAX_BYTES) throw new Error(`${this.name} ${path}: response too large`);
     return kind === 'json' ? JSON.parse(data) : kind === 'text' ? data.toString('utf8') : data;
   }
 }
@@ -84,7 +99,7 @@ async function fetchCatchUp(session, { app, issues, format, retries = 5, backoff
       return await session.request(path, { method: 'POST', body, contentType, kind: 'bytes' });
     } catch (error) {
       if (error.reason === 'too-old') {
-        throw new Error('SBI BRiSK says the snapshot is too old to catch up (x-error-reason: too-old); restart to load a fresh one');
+        throw new Error(`${session.name} says the snapshot is too old to catch up (x-error-reason: too-old); restart to load a fresh one`);
       }
       if (/session expired/.test(error.message) || attempt >= retries) {
         throw new Error(`Catch-up failed: ${error.message}${error.status ? ` (the server rejected format "${format}")` : ''}`);
@@ -95,27 +110,46 @@ async function fetchCatchUp(session, { app, issues, format, retries = 5, backoff
   }
 }
 
-// The decoder is served to logged-in sessions only and changes with SBI releases,
-// so it is located through the app's own bundles rather than pinned.
+// The decoder is served to logged-in sessions only and changes with releases, so it is
+// located through the app's own bundles rather than pinned. The page may name its bundles by
+// absolute or relative path (e-shiten: `main-XXXX.js`). A bundle names the loader either as a
+// literal path or, in both sites' builds of 2026-10-08, as a template with an exchange variant,
+// `./assets/wasm${r}/fita.<hash>.js` (r is '-fukuoka' for the Fukuoka exchange); only the Tokyo
+// build is used. Without a literal .wasm path, its name follows the loader's (Emscripten's rule).
 async function decoderAssets(session) {
   const page = await session.get('/', 'text');
-  const scripts = [...page.matchAll(/<script[^>]+src="(\/[^"]+\.js)"/g)].map(m => m[1]);
+  const scripts = [...page.matchAll(/<script\b[^>]*\ssrc=["']([^"']+\.js)["']/g)]
+    .map(m => new URL(m[1], session.origin + '/'))
+    .filter(url => url.origin === session.origin)  // never send the session to another host
+    .map(url => url.pathname);
   for (const script of scripts) {
     const source = await session.get(script, 'text');
-    const js = source.match(/["'`](\/?assets\/wasm\/fita[\w.-]*\.js)["'`]/);
-    const wasm = source.match(/["'`](\/?assets\/wasm\/fita[\w.-]*\.wasm)["'`]/);
-    if (js && wasm) {
-      const assets = { 'fita.js': await session.get('/' + js[1].replace(/^\//, ''), 'bytes'),
-        'fita.wasm': await session.get('/' + wasm[1].replace(/^\//, ''), 'bytes') };
-      return { assets, paths: [js[1], wasm[1]] };
-    }
+    const js = source.match(/["'`](?:\.?\/)?assets\/wasm(?:\$\{[\w$.]+\})?\/(fita[\w.-]*)\.js["'`]/);
+    if (!js) continue;
+    const wasm = source.match(/["'`](?:\.?\/)?assets\/wasm\/(fita[\w.-]*)\.wasm["'`]/);
+    const paths = [`/assets/wasm/${js[1]}.js`, `/assets/wasm/${wasm ? wasm[1] : js[1]}.wasm`];
+    const assets = { 'fita.js': await session.get(paths[0], 'bytes'), 'fita.wasm': await session.get(paths[1], 'bytes') };
+    return { assets, paths };
   }
-  throw new Error('SBI BRiSK decoder not found in the app bundles; the site layout may have changed');
+  throw new Error(`${session.name} decoder not found in the app bundles; the site layout may have changed`);
 }
 
-// The master's record layout also depends on the protocol version, and SBI's is not independently
+// Where the stream is. The boot's ws_url is relative, and the browser resolves it against the
+// API endpoint the frontend boot names (https://api.brisk.jp on e-shiten), not against the site
+// that served the page. ws_url carries the session, so only a BRiSK host may receive it.
+function streamUrl(wsUrl, apiEndpoint, origin) {
+  const base = typeof apiEndpoint === 'string' && apiEndpoint.startsWith('https://') ? apiEndpoint : origin;
+  const url = new URL(wsUrl, base.replace(/^https:/, 'wss:'));
+  if (url.protocol !== 'wss:' || !(url.hostname === 'brisk.jp' || url.hostname.endsWith('.brisk.jp'))) {
+    throw new Error(`Refusing to stream from ${url.protocol}//${url.host}: not a BRiSK host`);
+  }
+  return url;
+}
+
+// The master's record layout also depends on the protocol version, and 18000's is not independently
 // confirmed. A wrong layout would read tick types as codes, limits as lot sizes and so on, so
 // refuse a master that does not look like a market. (The 2021 demo's passes every test at 99.98%.)
+// The decoder runs this as soon as it has read the master, before boot data is matched to it.
 function checkMaster(master, protocolVersion) {
   const fraction = predicate => master.filter(predicate).length / (master.length || 1);
   const problems = [];
@@ -134,20 +168,21 @@ function checkMaster(master, protocolVersion) {
   const distinct = new Set(master.map(m => m.code)).size / (master.length || 1);
   if (distinct < 0.99) problems.push(`distinct codes: ${(100 * distinct).toFixed(1)}% (need 99%)`);
   if (problems.length) {
-    throw new Error(`SBI BRiSK stock master layout not recognised for protocol ${protocolVersion}: ${problems.join('; ')}`);
+    throw new Error(`BRiSK stock master layout not recognised for protocol ${protocolVersion}: ${problems.join('; ')}`);
   }
 }
 
 function checkAbi(wasm) {
   const missing = REQUIRED.filter(name => typeof wasm[name] !== 'function');
-  if (missing.length) throw new Error(`SBI BRiSK decoder changed; missing ${missing.join(', ')}`);
+  if (missing.length) throw new Error(`BRiSK decoder changed; missing ${missing.join(', ')}`);
 }
 
 async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImpl = WebSocket, startTimeoutMs = 60000,
   protocolVersion, profile: overrides = {}, trace = null, catchUp = null, heartbeatMs = 7000,
-  staleSeconds = 90, connectTimeoutMs = 15000, catchUpBackoffMs }) {
+  staleSeconds = 90, connectTimeoutMs = 15000, catchUpBackoffMs, site: siteId = 'sbi' }) {
+  const where = site(siteId);
   const profile = resolveProfile(overrides);
-  const session = new Session(cookies, fetchImpl);
+  const session = new Session(cookies, fetchImpl, where);
   const began = performance.now();
   const frontend = await session.get('/api/frontend/boot');
   session.token = frontend.api_token;
@@ -155,9 +190,10 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   // The server says which decoder protocol it speaks (the vendor client passes it to the WASM and
   // falls back to 16000); an explicit option wins, then the boot response, then SBI's 18000.
   protocolVersion ??= app.flex_version ?? PROTOCOL_VERSION;
+  const wsUrl = streamUrl(app.ws_url, frontend.api_endpoint, where.origin);
   trace?.(`boot: date ${app.date}, series ${app.series}, flex_version ${protocolVersion}, `
     + `${(app.base_prices || []).length} base prices, ${(app.exceptional_sq || []).length} exceptional special quotes, `
-    + `ws_url ${redact(app.ws_url)}`);
+    + `ws_url ${redact(app.ws_url)} on ${wsUrl.host}`);
   const { assets, paths } = await decoderAssets(session);
   assets['master.dat'] = await session.get(`/api/master/${encodeURIComponent(app.master)}`, 'bytes');
   assets['snapshot.dat'] = await session.get(`/api/snapshot/${encodeURIComponent(app.snapshot)}`, 'bytes');
@@ -173,33 +209,33 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   let monitor = null, timer = null;  // started with the link and always stopped, so a failure cannot leave the process hanging
   const stale = staleSeconds ? staleDataCheck({ date: app.date, thresholdUs: staleSeconds * 1e6 }) : null;
   const decoder = await Decoder.create(assets, { protocolVersion, check: checkAbi,
+    checkMaster: master => checkMaster(master, protocolVersion),
     boot: { exceptional_sq: app.exceptional_sq, base_prices: app.base_prices }, callbacks: {
     send: bytes => { if (link) link.send(bytes); },
     heartbeat: ns => { monitor?.beat(); stale?.beat(ns); },
-    authError: () => fail(new Error('SBI BRiSK reports another WebSocket session for this user (only one is allowed); close the other one')),
+    authError: () => fail(new Error(`${where.name} reports another WebSocket session for this user (only one is allowed); close the other one`)),
     marketFinished: () => { marketFinished = true; },
   } });
-  checkMaster(decoder.master, protocolVersion);
   const selected = new Set(codes);
   const master = decoder.master.filter(m => !selected.size || selected.has(m.code));
   const missing = codes.filter(code => !master.some(m => m.code === code));
-  if (missing.length) throw new Error(`Codes not in the SBI master: ${missing.join(',')}`);
+  if (missing.length) throw new Error(`Codes not in the ${where.name} master: ${missing.join(',')}`);
   const ids = new Set(master.map(m => m.issue_id));
-  const input_transport = { kind: 'sbi_websocket', origin: ORIGIN + '/', series: app.series,
+  const input_transport = { kind: where.transport, origin: where.origin + '/', ws_host: wsUrl.host, series: app.series,
     protocol_version: protocolVersion, boot_applied: decoder.boot,
     decoder: paths, decoder_sha256: crypto.createHash('sha256').update(assets['fita.wasm']).digest('hex'),
     setup_ms: performance.now() - began };
 
   const requestCatchUp = catchUp || (issues => fetchCatchUp(session, { app, issues, format: profile.catchUp,
     backoffMs: catchUpBackoffMs, trace }));
-  const wsSession = new URL(app.ws_url, ORIGIN).searchParams.get('session');
+  const wsSession = wsUrl.searchParams.get('session');
   // Only a Socket.IO server needs these; a plain WebSocket never asks for the market token.
   const context = async () => {
     let marketToken;
     try { marketToken = (await session.get('/api/app/market-token')).token; } catch (error) {
       throw new Error(`app/market-token failed: ${error.message}`);
     }
-    return { marketToken, identity: frontend.identity, wsSession, tabId: crypto.randomUUID(), origin: ORIGIN };
+    return { marketToken, identity: frontend.identity, wsSession, tabId: crypto.randomUUID(), origin: where.origin };
   };
 
   let seq = 0, frames = 0, updates = 0, started = false, starting = false, work = Promise.resolve();
@@ -210,12 +246,12 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     decoder.begin();
     const now = decoder.time();
     const quotes = master.map(m => decoder.quote(m.issue_id));
-    // The stock view layout is unverified for SBI's build: refuse implausible values.
+    // The stock view layout is unverified for the broker build: refuse implausible values.
     if (quotes.some(q => q.frame > q.max_frame || q.source_time_us > now)) {
-      throw new Error(`SBI BRiSK stock view layout not recognised (ohlcLength=${decoder.ohlc})`);
+      throw new Error(`${where.name} stock view layout not recognised (ohlcLength=${decoder.ohlc})`);
     }
     started = true;
-    const batch = { type: 'bootstrap', seq: seq++, source: 'sbi_live', trading_date: String(app.date).replaceAll('-', ''),
+    const batch = { type: 'bootstrap', seq: seq++, source: where.source, trading_date: String(app.date).replaceAll('-', ''),
       input_transport: { ...input_transport, dialect: link.mode, engineio: link.version, caught_up_issues: caughtUp },
       source_timestamp_origin: 'brisk_decoder_unverified', exchange_delay_ms: null,
       source_time_us: now, market_issue_count: decoder.master.length, master, quotes };
@@ -267,10 +303,13 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   try {
     monitor = heartbeatMonitor({ intervalMs: heartbeatMs, checkEveryMs: Math.min(1000, heartbeatMs / 4), onFail: fail,
       staleCheck: stale && (() => stale.check(decoder.time())) });
-    timer = setTimeout(() => fail(new Error(`SBI BRiSK stream did not initialize within ${startTimeoutMs / 1000}s; `
+    timer = setTimeout(() => fail(new Error(`${where.name} stream did not initialize within ${startTimeoutMs / 1000}s; `
       + 'no first frame numbers arrived (run with --trace-protocol to see what the server sent)')), startTimeoutMs);
-    link = new Link({ WebSocketImpl, url: new URL(app.ws_url, ORIGIN.replace('https:', 'wss:')),
-      headers: { cookie: session.cookie }, profile, context, trace, connectTimeoutMs, onBinary: onFrame,
+    // Cookies go only to the host that set them (elsewhere the session in ws_url authenticates);
+    // Origin is what a browser on the site sends.
+    const headers = { origin: where.origin };
+    if (wsUrl.origin === where.origin.replace(/^https:/, 'wss:')) headers.cookie = session.cookie;
+    link = new Link({ WebSocketImpl, url: wsUrl, headers, profile, context, trace, connectTimeoutMs, onBinary: onFrame,
       onClose: closed => settle(closed), onError: error => { failure = failure || error; settle({ code: -1, reason: '' }); } });
 
     const closed = await ended;
@@ -278,7 +317,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     for (let pending = null; pending !== work;) { pending = work; await pending; }
     if (failure) throw failure;
     if ((closed.code !== 1000 && !marketFinished) || !started) {
-      throw new Error(`SBI BRiSK stream closed (${closed.code} ${closed.reason || ''})`.trim());
+      throw new Error(`${where.name} stream closed (${closed.code} ${closed.reason || ''})`.trim());
     }
     const summary = { type: 'end', seq, source_time_us: decoder.time(), frames, quote_updates: updates,
       replay_wall_ms: performance.now() - start };
@@ -291,7 +330,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   }
 }
 
-const USAGE = 'Usage: BRISK_SBI_COOKIES=... sbi.cjs [--codes 7203,6758] [--trace-protocol]';
+const USAGE = 'Usage: BRISK_SBI_COOKIES=... [BRISK_SBI_SITE=e-shiten] sbi.cjs [--codes 7203,6758] [--trace-protocol]';
 
 function parseArgs(argv) {
   const options = { codes: [], trace: false };
@@ -311,14 +350,15 @@ async function main(argv, env = process.env) {
   if (env.BRISK_SBI_PROFILE) {
     try { profile = JSON.parse(env.BRISK_SBI_PROFILE); } catch { throw new Error('BRISK_SBI_PROFILE is not valid JSON'); }
   }
-  await live({ cookies: JSON.parse(env.BRISK_SBI_COOKIES || 'null'), codes, profile,
+  await live({ cookies: JSON.parse(env.BRISK_SBI_COOKIES || 'null'), codes, profile, site: env.BRISK_SBI_SITE || 'sbi',
     trace: trace ? line => process.stderr.write(`[sbi protocol] ${line}\n`) : null,
     emit: async record => {
       if (!process.stdout.write(JSON.stringify(record) + '\n')) await once(process.stdout, 'drain');
     } });
 }
 
-module.exports = { Session, decoderAssets, checkAbi, checkMaster, live, main, fetchCatchUp, CATCH_UP_FORMATS, PROTOCOL_VERSION, REQUIRED };
+module.exports = { Session, SITES, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, main, fetchCatchUp, CATCH_UP_FORMATS,
+  PROTOCOL_VERSION, REQUIRED };
 if (require.main === module) main(process.argv.slice(2)).catch(error => {
   console.error(error.message); process.exitCode = 1;
 });

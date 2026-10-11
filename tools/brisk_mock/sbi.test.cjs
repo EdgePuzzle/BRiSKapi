@@ -5,7 +5,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { Session, checkAbi, checkMaster, live, main, fetchCatchUp } = require('../../briskapi/decoder/sbi.cjs');
+const { Session, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, main, fetchCatchUp } = require('../../briskapi/decoder/sbi.cjs');
 const { frames, Decoder } = require('../../briskapi/decoder/decoder.cjs');
 const cache = process.env.BRISK_MOCK_CACHE;
 
@@ -87,7 +87,7 @@ test('SBI host bootstraps from boot, master and snapshot, then streams frames', 
   const summary = await live({ cookies: { session_x: 'v' }, codes: ['7203'], emit: async b => batches.push(b),
     fetchImpl, WebSocketImpl: socketFrom(chunks), protocolVersion: 16000 });
   assert.equal(String(socketFrom.last.url), 'wss://sbi.brisk.jp/realtime/0?session=abc');
-  assert.equal(socketFrom.last.init.headers.cookie, 'session_x=v');
+  assert.deepEqual(socketFrom.last.init.headers, { origin: 'https://sbi.brisk.jp', cookie: 'session_x=v' });
   assert.ok(requests.filter(r => r.path.startsWith('/api/app')).every(r => r.headers.authorization === 'Bearer token'));
   const [bootstrap, ...rest] = batches;
   assert.equal(bootstrap.source, 'sbi_live');
@@ -95,6 +95,8 @@ test('SBI host bootstraps from boot, master and snapshot, then streams frames', 
   assert.deepEqual(bootstrap.master.map(m => m.code), ['7203']);
   assert.equal(bootstrap.quotes[0].indicative_price10, 101500);
   assert.equal(bootstrap.input_transport.kind, 'sbi_websocket');
+  assert.equal(bootstrap.input_transport.ws_host, 'sbi.brisk.jp');
+  assert.deepEqual(bootstrap.input_transport.decoder, ['/assets/wasm/fita.test.js', '/assets/wasm/fita.test.wasm']);
   assert.equal(bootstrap.input_transport.dialect, 'raw');
   assert.equal(bootstrap.input_transport.caught_up_issues, 0);
   assert.ok(!requests.some(r => r.path === '/api/app/market-token'), 'a plain server never asks for the market token');
@@ -104,12 +106,65 @@ test('SBI host bootstraps from boot, master and snapshot, then streams frames', 
   assert.equal(summary.frames, 6);
 });
 
+test('e-shiten: its own address, a relative bundle, a templated decoder and the stream on the API host',
+  { skip: !cache }, async () => {
+  // As mapped on next.e-shiten.brisk.jp (2026-10-08): the page names `main-XXXX.js` relatively, the
+  // bundle names the loader as a template with no .wasm path, and ws_url is relative to api_endpoint.
+  const { files, chunks } = demo();
+  const { fetchImpl, requests } = server(files, {
+    '/api/frontend/boot': () => JSON.stringify({ api_token: 'token', identity: IDENTITY, api_endpoint: 'https://api.brisk.jp' }),
+    '/': () => '<html><script type="module" crossorigin src="main-W3ZVNLJR.js"></script></html>',
+    '/main-W3ZVNLJR.js': () => 'const r=x?"-fukuoka":"";import(`./assets/wasm${r}/fita.test.js`)',
+  });
+  const origins = new Set();
+  const batches = [];
+  await live({ cookies: { session_x: 'v' }, codes: ['7203'], emit: async b => batches.push(b), site: 'e-shiten',
+    fetchImpl: async (url, init) => { origins.add(url.origin); return fetchImpl(url, init); },
+    WebSocketImpl: socketFrom(chunks), protocolVersion: 16000 });
+  assert.deepEqual([...origins], ['https://next.e-shiten.brisk.jp']);
+  assert.ok(requests.some(r => r.path === '/assets/wasm/fita.test.wasm'), 'the .wasm name follows the loader\'s');
+  assert.equal(String(socketFrom.last.url), 'wss://api.brisk.jp/realtime/0?session=abc');
+  assert.deepEqual(socketFrom.last.init.headers, { origin: 'https://next.e-shiten.brisk.jp' }, 'no cookies to another host');
+  const [bootstrap] = batches;
+  assert.equal(bootstrap.source, 'eshiten_live');
+  assert.equal(bootstrap.input_transport.kind, 'eshiten_websocket');
+  assert.equal(bootstrap.input_transport.origin, 'https://next.e-shiten.brisk.jp/');
+  assert.equal(bootstrap.input_transport.ws_host, 'api.brisk.jp');
+  assert.equal(batches.at(-1).type, 'end');
+  await assert.rejects(live({ cookies: { s: 'v' }, site: 'matsui', emit: async () => {} }), /Unknown BRiSK site "matsui"/);
+});
+
+test('bundles on other hosts are never fetched, and a session is never streamed off BRiSK', async () => {
+  const fetched = [];
+  const pages = {
+    '/': '<script src="https://cdn.example/x.js"></script><script src=\'./lib/app.js\'></script>',
+    '/lib/app.js': 'f("/assets/wasm/fita.abc.js")',
+  };
+  const session = new Session({ s: 'v' }, async url => {
+    fetched.push(url.href);
+    return new Response(pages[url.pathname] ?? 'bytes', { status: 200 });
+  }, site('e-shiten'));
+  const { paths } = await decoderAssets(session);
+  assert.deepEqual(paths, ['/assets/wasm/fita.abc.js', '/assets/wasm/fita.abc.wasm']);
+  assert.ok(fetched.every(href => href.startsWith('https://next.e-shiten.brisk.jp/')), fetched.join(' '));
+
+  const sbi = 'https://sbi.brisk.jp';
+  assert.equal(streamUrl('/realtime/0?session=a', undefined, sbi).href, 'wss://sbi.brisk.jp/realtime/0?session=a');
+  assert.equal(streamUrl('/realtime/0?session=a', 'https://api.brisk.jp', sbi).href, 'wss://api.brisk.jp/realtime/0?session=a');
+  assert.equal(streamUrl('/realtime/0', 'http://api.brisk.jp', sbi).host, 'sbi.brisk.jp', 'only an https endpoint is a base');
+  assert.equal(streamUrl('wss://brisk.jp/ws', 'https://api.brisk.jp', sbi).host, 'brisk.jp');
+  for (const [url, endpoint] of [['/ws?session=a', 'https://evil.example'], ['wss://brisk.jp.evil.example/ws', undefined],
+    ['ws://api.brisk.jp/ws', undefined], ['https://api.brisk.jp/ws', undefined]]) {
+    assert.throws(() => streamUrl(url, endpoint, sbi), /not a BRiSK host/, url);
+  }
+});
+
 test('SBI host fails loudly on changed sites, unknown codes and abnormal closes', { skip: !cache }, async () => {
   const { files, chunks } = demo();
   const run = (overrides, options = {}) => live({ cookies: { s: 'v' }, emit: async () => {}, protocolVersion: 16000,
     fetchImpl: server(files, overrides).fetchImpl, WebSocketImpl: socketFrom(chunks), ...options });
   await assert.rejects(run({ '/main.abc.js': () => 'nothing' }), /decoder not found/);
-  await assert.rejects(run({}, { codes: ['0000'] }), /not in the SBI master/);
+  await assert.rejects(run({}, { codes: ['0000'] }), /not in the SBI BRiSK master/);
   await assert.rejects(run({}, { WebSocketImpl: socketFrom(chunks, 1006) }), /closed \(1006/);
   await assert.rejects(run({}, { WebSocketImpl: socketFrom([]) }), /closed/);
   await assert.rejects(main(['--bad']), /Usage/);

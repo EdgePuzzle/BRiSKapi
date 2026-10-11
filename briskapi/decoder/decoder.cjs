@@ -16,6 +16,12 @@ function u64(words, i) {
   return value;
 }
 
+// A master read with the wrong layout can hold any bits; NaN keeps them for the host's layout check.
+function looseU64(words, i) {
+  const value = words[i] + 4294967296 * words[i + 1];
+  return Number.isSafeInteger(value) ? value : NaN;
+}
+
 function* frames(data) {
   let previous = -1;
   for (let offset = 0; offset < data.length;) {
@@ -83,6 +89,8 @@ class Decoder {
   //   authError(), marketFinished() }, the vendor client's six WASM callbacks.
   // options.boot: { exceptional_sq, base_prices } from the app boot response, applied in the
   //   vendor client's order: after the master is loaded, before the snapshot.
+  // options.checkMaster(master): throws if the master read does not look like a market, before
+  //   anything else uses it. Without it, a lot size beyond 2^53 is an error.
   static async create(assets, options = {}) {
     // Isolate the legacy glue's globals and process exception handlers. No UI,
     // network, filesystem access or account state is needed inside this VM.
@@ -101,7 +109,7 @@ class Decoder {
     return new Decoder(wasm, assets, options);
   }
 
-  constructor(w, assets, { protocolVersion = manifest.protocol_version, callbacks = {}, boot = {} } = {}) {
+  constructor(w, assets, { protocolVersion = manifest.protocol_version, callbacks = {}, boot = {}, checkMaster } = {}) {
     this.w = w;
     this.layoutShift = stockViewShift(protocolVersion);
     this.basePriceQueue = new Set();
@@ -140,10 +148,12 @@ class Decoder {
     this.master = Array.from({ length: count }, (_, issue_id) => {
       const a = new Uint32Array(w.HEAPU8.buffer, this.buf + 144 * issue_id, 36);
       return { issue_id, code: String(a[0]), tick_type: a[1], base_price10: a[2],
-        limit_up10: a[3], limit_down10: a[4], lot_size: u64(a, 5), issue_type: a[7],
+        limit_up10: a[3], limit_down10: a[4], lot_size: looseU64(a, 5), issue_type: a[7],
         name: Buffer.from(w.HEAPU8.subarray(this.buf + 144 * issue_id + 68,
           this.buf + 144 * issue_id + 68 + a[16])).toString('utf8') };
     });
+    if (checkMaster) checkMaster(this.master);
+    else if (this.master.some(m => Number.isNaN(m.lot_size))) throw new Error('Unsafe 64-bit quantity/timestamp');
     this.boot = this.applyBoot(boot);
     this.unserialize(assets['snapshot.dat']);
     this.date = String(w._getDate(this.id));
@@ -381,7 +391,7 @@ async function main(argv) {
     } });
 }
 
-module.exports = { Decoder, QuoteHistory, frames, u64, loadAssets, replay, main, parseStockView, stockViewShift, STOCK_VIEW_SHIFT };
+module.exports = { Decoder, QuoteHistory, frames, u64, looseU64, loadAssets, replay, main, parseStockView, stockViewShift, STOCK_VIEW_SHIFT };
 if (require.main === module) main(process.argv.slice(2)).catch(error => {
   console.error(error.message); process.exitCode = 1;
 });

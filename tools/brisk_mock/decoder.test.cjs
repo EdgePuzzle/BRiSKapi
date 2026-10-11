@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { Decoder, QuoteHistory, frames, u64, loadAssets, replay, main, parseStockView, stockViewShift } = require('../../briskapi/decoder/decoder.cjs');
+const { Decoder, QuoteHistory, frames, u64, looseU64, loadAssets, replay, main, parseStockView, stockViewShift } = require('../../briskapi/decoder/decoder.cjs');
 const cache = process.env.BRISK_MOCK_CACHE;
 
 function frame(time, bytes = Buffer.from([1])) {
@@ -20,6 +20,8 @@ test('record container validates lengths, truncation and time order', () => {
     Buffer.concat([frame(9), frame(8)])]) assert.throws(() => [...frames(bad)]);
   assert.equal(u64([0xffffffff, 1], 0), 8589934591);
   assert.throws(() => u64([0xffffffff, 0xffffffff], 0), /Unsafe/);
+  assert.equal(looseU64([100, 0], 0), 100);
+  assert.ok(Number.isNaN(looseU64([0xffffffff, 0xffffffff], 0)));
 });
 
 test('QR rollback and clone keep independent last prices', () => {
@@ -280,4 +282,16 @@ test('malformed or unknown boot data fails loudly instead of being skipped', { s
     /Boot limit_up10 is not a number/);
   await assert.rejects(Decoder.create(assets, { boot: { exceptional_sq: [{ buy_sell: 'S', jump_range: 1, jump_sec: 1,
     issue_code: '130A', quote_limit_down: 1, quote_limit_up: 2 }] } }), /only numeric codes are supported/);
+});
+
+test('a host\'s master check runs before boot data is matched to the master', { skip: !cache }, async () => {
+  // A misread master would otherwise fail on its first boot base price, hiding the real problem.
+  let checked = 0;
+  const boot = { base_prices: [{ issue_code: '0000', base_price10: 1000, limit_down10: 500, limit_up10: 1500 }] };
+  await assert.rejects(Decoder.create(loadAssets(cache), { boot, checkMaster: master => {
+    checked = master.length;
+    throw new Error('stock master layout not recognised');
+  } }), /layout not recognised/);
+  assert.ok(checked > 1000);
+  await assert.rejects(Decoder.create(loadAssets(cache), { boot }), /issue code 0000, which is not in the master/);
 });
