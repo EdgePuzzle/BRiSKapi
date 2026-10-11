@@ -124,9 +124,10 @@ the `startLive` payload and the catch-up request body. Set them with
 `trace_protocol=True` (every token redacted); until they are right it stops with an
 explicit error rather than guessing. Please report what you see. Sessions on
 2026-10-08 got through sign-in, the data endpoints and the decoder download, then
-stopped at the stock master. The master is now read from the file BRiSK serves, whose
-format is checked against the demo and a March 2026 SBI file; the steps after it
-(the stream and its first quotes) have not run against a live session yet. Your cookies
+stopped at the stock master. The master is now read with the current build's record
+layout, found with SBI's decoder of March 2026 and checked against the master file at
+every start; the steps after it (the stream and its first quotes) have not run against
+a live session yet. Your cookies
 go only to sbi.brisk.jp. SBI market data is shared only after an explicit choice for
 that capture; the Python API requires `share_market_data=True`. With contribution
 on, a timing summary is shared even when market-data sharing is declined.

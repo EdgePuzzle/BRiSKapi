@@ -19,7 +19,7 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install -r requirements-dev.txt -e .
       - run: python -m pytest tests --cov=archive_service --cov=briskapi --cov-fail-under=85
-      - run: python -m pytest tools/brisk_mock/test_download.py
+      - run: python -m pytest tools/brisk_mock/test_download.py tools/brisk_mock/test_sbi_master_layout.py
       - run: python tools/brisk_mock/download_mock.py --cache /tmp/brisk-mock-cache
       - name: Verify archive reference against the pinned demo replay
         run: python -m pytest tools/brisk_mock/test_reference.py

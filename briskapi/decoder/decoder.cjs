@@ -83,16 +83,38 @@ function parseStockView(words, ohlc, shift) {
     volume: u64(a, 3) };
 }
 
-// The master file the decoder loads: fixed 180-byte records, one per issue in issue order, after a
-// preamble (444 bytes in the 2021 demo, none in SBI's of 2026-03-11). Each record is a 16-byte
-// binary header (a word of unknown use, then base price, upper and lower limit in tenths of a yen)
-// and fixed-width text. pybrisk's research documents the header and the code. Read this way, the
-// demo's file gives exactly the master the vendor decoder itself reports, for all 4,131 issues,
-// which places the other fields: issue type at 40, code at 50 (five wide), name at 74 (Shift-JIS,
-// less a market prefix such as "Ｍ－"), lot size right-aligned up to 139 and, at 141, the flag the
-// decoder reports as tick type 3 (TOPIX 100: exactly 100 issues carry it in SBI's file).
+// The decoder's own master records (_getStockMaster), in issue order. 16000 (the demo) is the vendor
+// client's layout. 18000 widens the code from a number to eight bytes of text, which must hold codes
+// such as 167A, so every later field is four bytes on (`shift`): found by running SBI's decoder of
+// March 2026 (from pybrisk's research) on the master file it served, where all 4,445 records agree
+// with the file on code, prices, lot size and issue type. Any other version is refused.
+const MASTER_LAYOUT = { 16000: { size: 144, shift: 0 }, 18000: { size: 148, shift: 4 } };
+
+function masterLayout(protocolVersion) {
+  if (!(protocolVersion in MASTER_LAYOUT)) {
+    throw new Error(`Master layout for protocol ${protocolVersion} is not known (known: ${Object.keys(MASTER_LAYOUT).join(', ')})`);
+  }
+  return MASTER_LAYOUT[protocolVersion];
+}
+
+// One record at byte `at` of `heap`. Past the code, field indices are the demo's.
+// The name never runs past its record, however a misread length says.
+function readMasterRecord(heap, at, issue_id, { size, shift }) {
+  const a = new Uint32Array(heap.buffer, heap.byteOffset + at + shift, 36);
+  const code = shift ? Buffer.from(heap.subarray(at, at + 8)).toString('latin1').replace(/\0[^]*$/, '') : String(a[0]);
+  return { issue_id, code, tick_type: a[1], base_price10: a[2], limit_up10: a[3], limit_down10: a[4],
+    lot_size: looseU64(a, 5), issue_type: a[7],
+    name: Buffer.from(heap.subarray(at + shift + 68, at + Math.min(size, shift + 68 + a[16]))).toString('utf8') };
+}
+
+// The master file the decoder loads: fixed 180-byte records in issue order, after a preamble (444
+// bytes in the 2021 demo, none in SBI's of 2026-03-11). A 16-byte binary header (a word of unknown
+// use, then base price, upper and lower limit in tenths of a yen) and fixed-width text: issue type at
+// 40, code at 50 (five wide), lot size right-aligned up to 139. pybrisk's research documents the
+// header and the code; the rest agrees with the vendor decoder's own master on every issue of both
+// files. Names and tick types are not read here: the decoder's differ (it keeps "Ｕ－ＮＥＸＴ" whole
+// but drops a market prefix such as "Ｍ－", and SBI's tick types follow no single column).
 const MASTER_RECORD = 180;
-const shiftJis = new TextDecoder('shift_jis');
 
 function parseMasterFile(data, count) {
   const start = data.length - count * MASTER_RECORD;
@@ -101,11 +123,24 @@ function parseMasterFile(data, count) {
   const integer = value => (/^\d+$/.test(value) ? Number(value) : NaN);
   return Array.from({ length: count }, (_, issue_id) => {
     const r = data.subarray(start + MASTER_RECORD * issue_id, start + MASTER_RECORD * (issue_id + 1));
-    return { issue_id, code: text(r, 50, 55), tick_type: r[141] === 0x31 ? 3 : 1,
-      base_price10: r.readUInt32LE(4), limit_up10: r.readUInt32LE(8), limit_down10: r.readUInt32LE(12),
-      lot_size: integer(text(r, 124, 139)), issue_type: integer(text(r, 40, 44)),
-      name: shiftJis.decode(r.subarray(74, 94)).replace(/[ \u3000]+$/, '').replace(/^[Ａ-Ｚ]\uFF0D/, '') };
+    return { issue_id, code: text(r, 50, 55), base_price10: r.readUInt32LE(4), limit_up10: r.readUInt32LE(8),
+      limit_down10: r.readUInt32LE(12), lot_size: integer(text(r, 124, 139)), issue_type: integer(text(r, 40, 44)) };
   });
+}
+
+// The decoder's master must agree with the file it loaded. A record layout that no longer fits a
+// build shows here as a disagreement, and is refused rather than read.
+const CHECKED = ['code', 'base_price10', 'limit_up10', 'limit_down10', 'lot_size', 'issue_type'];
+
+function checkMasterFile(master, data) {
+  const file = parseMasterFile(data, master.length);
+  const wrong = master.filter((m, i) => CHECKED.some(key => m[key] !== file[i][key]));
+  if (wrong.length) {
+    const [m] = wrong, f = file[m.issue_id];
+    const key = CHECKED.find(k => m[k] !== f[k]);
+    throw new Error(`The decoder's master disagrees with its master file on ${wrong.length} of ${master.length} issues `
+      + `(issue ${m.issue_id}: ${key} ${JSON.stringify(m[key])}, file ${JSON.stringify(f[key])}); its record layout may have changed`);
+  }
 }
 
 class Decoder {
@@ -115,9 +150,8 @@ class Decoder {
   // options.boot: { exceptional_sq, base_prices } from the app boot response, applied in the
   //   vendor client's order: after the master is loaded, before the snapshot.
   // options.checkMaster(master): throws if the master read does not look like a market, before
-  //   anything else uses it. Without it, a lot size beyond 2^53 is an error.
-  // options.masterFromFile: read the master from the master file rather than from the decoder's
-  //   own records, whose layout is known only for 16000. The default for 18000.
+  //   anything else uses it. Without it, a lot size beyond 2^53 is an error. Either way the
+  //   master is then checked against the master file.
   static async create(assets, options = {}) {
     // Isolate the legacy glue's globals and process exception handlers. No UI,
     // network, filesystem access or account state is needed inside this VM.
@@ -136,13 +170,11 @@ class Decoder {
     return new Decoder(wasm, assets, options);
   }
 
-  constructor(w, assets, { protocolVersion = manifest.protocol_version, callbacks = {}, boot = {}, checkMaster,
-    masterFromFile = protocolVersion === 18000 } = {}) {
+  constructor(w, assets, { protocolVersion = manifest.protocol_version, callbacks = {}, boot = {}, checkMaster } = {}) {
     this.w = w;
     this.layoutShift = stockViewShift(protocolVersion);
-    this.masterFromFile = masterFromFile;
+    this.layout = masterLayout(protocolVersion);
     this.basePriceQueue = new Set();
-    this.unreadBasePrices = new Set();
     this.authError = false;
     this.marketFinished = false;
     this.initialFrames = null;
@@ -173,36 +205,20 @@ class Decoder {
     this.push(assets['master.dat']);
     w._applyBasePriceQueue(this.id);
     const count = w._stockCount(this.id);
-    if (masterFromFile) {
-      // SBI's file is records only (the 444-byte preamble is the demo's). Any other size means the
-      // file and the decoder count issues differently, and reading on would pair quotes with the
-      // wrong codes.
-      const size = assets['master.dat'].length;
-      if (protocolVersion !== 16000 && size !== count * MASTER_RECORD) {
-        throw new Error(`The master file holds ${size} bytes, not the decoder's ${count} issues of ${MASTER_RECORD} bytes`);
-      }
-      this.master = parseMasterFile(assets['master.dat'], count);
-    } else {
-      if (count <= 0 || count * 144 > BUFFER) throw new Error('Invalid mock master count');
-      w._getStockMaster(this.id, this.buf, count * 144);
-      this.master = Array.from({ length: count }, (_, issue_id) => {
-        const a = new Uint32Array(w.HEAPU8.buffer, this.buf + 144 * issue_id, 36);
-        return { issue_id, code: String(a[0]), tick_type: a[1], base_price10: a[2],
-          limit_up10: a[3], limit_down10: a[4], lot_size: looseU64(a, 5), issue_type: a[7],
-          name: Buffer.from(w.HEAPU8.subarray(this.buf + 144 * issue_id + 68,
-            this.buf + 144 * issue_id + 68 + a[16])).toString('utf8') };
-      });
-    }
+    if (count <= 0 || count * this.layout.size > BUFFER) throw new Error('Invalid master count');
+    w._getStockMaster(this.id, this.buf, count * this.layout.size);
+    this.master = Array.from({ length: count },
+      (_, issue_id) => readMasterRecord(w.HEAPU8, this.buf + this.layout.size * issue_id, issue_id, this.layout));
     if (checkMaster) checkMaster(this.master);
     else if (this.master.some(m => Number.isNaN(m.lot_size))) throw new Error('Unsafe 64-bit quantity/timestamp');
+    checkMasterFile(this.master, assets['master.dat']);
     this.boot = this.applyBoot(boot);
     this.unserialize(assets['snapshot.dat']);
     this.date = String(w._getDate(this.id));
   }
 
   // The vendor client pushes the boot response's exceptional special quotes and base-price
-  // changes into the decoder right after the master, then re-reads the master's limits. A master
-  // read from the file takes the new limits from the boot response itself.
+  // changes into the decoder right after the master, then re-reads the master's limits.
   applyBoot({ exceptional_sq = [], base_prices = [] } = {}) {
     const byCode = new Map(this.master.map(m => [m.code, m.issue_id]));
     const number = (value, what) => {
@@ -226,33 +242,24 @@ class Decoder {
       if (issue === undefined) throw new Error(`Boot base_prices names issue code ${change.issue_code}, which is not in the master`);
       this.w._pushBasePrice(this.id, issue, number(change.base_price10, 'base_price10'),
         number(change.limit_down10, 'limit_down10'), number(change.limit_up10, 'limit_up10'));
-      if (this.masterFromFile) {
-        Object.assign(this.master[issue], { base_price10: change.base_price10, limit_up10: change.limit_up10,
-          limit_down10: change.limit_down10 });
-      } else this.basePriceQueue.add(issue);
+      this.basePriceQueue.add(issue);
     }
-    const applied = this.masterFromFile ? base_prices.length : this.applyBasePrice();
-    return { exceptional_sq: exceptional_sq.length - skipped.length, base_prices: base_prices.length, applied,
+    return { exceptional_sq: exceptional_sq.length - skipped.length, base_prices: base_prices.length, applied: this.applyBasePrice(),
       ...(skipped.length && { skipped_exceptional_sq: skipped }) };
   }
 
   // Re-read the master's price limits for issues whose base price changed (the vendor client
-  // does this after boot and after every frame); cheap when nothing is queued. Without the
-  // decoder's record layout, a change it makes itself is noted in unreadBasePrices instead.
+  // does this after boot and after every frame); cheap when nothing is queued.
   applyBasePrice() {
     if (!this.basePriceQueue.size) return 0;
-    if (this.masterFromFile) {
-      for (const issue of this.basePriceQueue) this.unreadBasePrices.add(issue);
-      this.basePriceQueue.clear();
-      return 0;
-    }
-    this.w._getStockMaster(this.id, this.buf, this.master.length * 144);
+    const { size } = this.layout;
+    this.w._getStockMaster(this.id, this.buf, this.master.length * size);
     let applied = 0;
     for (const issue of this.basePriceQueue) {
       const m = this.master[issue];
       if (!m) throw new Error(`Base price change for unknown issue index ${issue}`);
-      const a = new Uint32Array(this.w.HEAPU8.buffer, this.buf + 144 * issue, 36);
-      m.base_price10 = a[2]; m.limit_up10 = a[3]; m.limit_down10 = a[4];
+      const { base_price10, limit_up10, limit_down10 } = readMasterRecord(this.w.HEAPU8, this.buf + size * issue, issue, this.layout);
+      Object.assign(m, { base_price10, limit_up10, limit_down10 });
       applied++;
     }
     this.basePriceQueue.clear();
@@ -448,7 +455,8 @@ async function main(argv) {
     } });
 }
 
-module.exports = { Decoder, QuoteHistory, frames, u64, looseU64, parseMasterFile, loadAssets, replay, main, parseStockView, stockViewShift, STOCK_VIEW_SHIFT };
+module.exports = { Decoder, QuoteHistory, frames, u64, looseU64, readMasterRecord, masterLayout, MASTER_LAYOUT,
+  parseMasterFile, checkMasterFile, loadAssets, replay, main, parseStockView, stockViewShift, STOCK_VIEW_SHIFT };
 if (require.main === module) main(process.argv.slice(2)).catch(error => {
   console.error(error.message); process.exitCode = 1;
 });

@@ -217,7 +217,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     authError: () => fail(new Error(`${where.name} reports another WebSocket session for this user (only one is allowed); close the other one`)),
     marketFinished: () => { marketFinished = true; },
   } });
-  trace?.(`master: ${decoder.master.length} issues read from the ${decoder.masterFromFile ? 'master file' : 'decoder'}`
+  trace?.(`master: ${decoder.master.length} issues, ${decoder.layout.size}-byte records, agreeing with the master file`
     + (decoder.boot.skipped_exceptional_sq ? `; special quotes not sent for ${decoder.boot.skipped_exceptional_sq.join(',')}` : ''));
   const selected = new Set(codes);
   const master = decoder.master.filter(m => !selected.size || selected.has(m.code));
@@ -226,7 +226,6 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   const ids = new Set(master.map(m => m.issue_id));
   const input_transport = { kind: where.transport, origin: where.origin + '/', ws_host: wsUrl.host, series: app.series,
     protocol_version: protocolVersion, boot_applied: decoder.boot,
-    master_source: decoder.masterFromFile ? 'file' : 'decoder',
     decoder: paths, decoder_sha256: crypto.createHash('sha256').update(assets['fita.wasm']).digest('hex'),
     setup_ms: performance.now() - began };
 
@@ -256,8 +255,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     }
     started = true;
     const batch = { type: 'bootstrap', seq: seq++, source: where.source, trading_date: String(app.date).replaceAll('-', ''),
-      input_transport: { ...input_transport, dialect: link.mode, engineio: link.version, caught_up_issues: caughtUp,
-        unread_base_prices: decoder.unreadBasePrices.size },
+      input_transport: { ...input_transport, dialect: link.mode, engineio: link.version, caught_up_issues: caughtUp },
       source_timestamp_origin: 'brisk_decoder_unverified', exchange_delay_ms: null,
       source_time_us: now, market_issue_count: decoder.master.length, master, quotes };
     work = work.then(() => failure || emit(batch)).catch(fail);

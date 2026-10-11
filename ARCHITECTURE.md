@@ -152,8 +152,8 @@ bundle) and in pybrisk's SBI research (`engineio.cjs` and `sbi.cjs`):
    option wins; 18000 if the server says nothing). The master is checked as soon as
    it is read (below). The boot response's `exceptional_sq` and `base_prices` are
    pushed into the WASM after that and before the snapshot, as the vendor client does, and the master's
-   limits are re-read after every frame in case the decoder changes them (for 18000 the boot's own
-   values are used and later changes are counted, see below). A special quote for a code with a
+   limits are re-read after every frame in case the decoder changes them (a pushed base price
+   moves the record's limits; in both builds its base price field keeps the loaded value). A special quote for a code with a
    letter (`167A`) is not sent: how the decoder takes such a code is not known, so it is listed in
    `boot_applied.skipped_exceptional_sq`.
 
@@ -170,27 +170,30 @@ index is one lower; this comes from a single independent parser of SBI's current
 build and is not confirmed against SBI itself. Any other protocol version is refused
 rather than read at guessed offsets.
 
-The decoder's own master records are known only for 16000, so for 18000 the master is
-read from the master file it was loaded from (`parseMasterFile` in `decoder.cjs`):
-fixed 180-byte records, one per issue in issue order. pybrisk's research documents the
-record size, the binary header (a word of unknown use, then base price, upper and lower
-limit in tenths of a yen), the code's position and that the issue index is the record
-index; its March 2026 SBI capture holds a real 18000 master file (4,445 records). The
-2021 demo's master file has the same records after a 444-byte preamble. Read this way,
-it equals the vendor decoder's own master for every one of its 4,131 issues (tested),
-which places the other fields: issue type at byte 40, code at 50 (five wide, for some
-preferred shares), name at 74 (Shift-JIS, less a market prefix such as `Ｍ－`, which the
-decoder drops), lot size right-aligned up to 139 and a flag at 141 the decoder reports
-as tick type 3 (exactly 100 issues carry it in SBI's file: TOPIX 100). SBI's file passes
-the same reading: every code valid and distinct (350 have a letter), lot sizes of 1, 10,
-100 and 1,000. Records are counted back from the end of the file with the decoder's own
-issue count, so the demo's preamble is skipped; an 18000 file must hold exactly that many
-records (SBI's has no preamble), or the session stops rather than pair quotes with the
-wrong codes. Changes to base prices the boot response names
-are applied from its values; a change the decoder makes itself can't be read back, so it
-is counted (`unread_base_prices` in the bootstrap's transport). The master is still
-refused if it does not look like a market (security codes, base prices inside their
-limits, plausible lot sizes, names).
+The master is read from the decoder's own records (`_getStockMaster`), as the vendor
+client does, at the version's layout (`MASTER_LAYOUT` in `decoder.cjs`). 16000's is the
+vendor client's: 144 bytes, the code a number. In 18000 the code is eight bytes of text,
+which must hold codes such as `167A` (350 of 4,445 in SBI's master of 2026-03-11), and
+every later field is four bytes on: 148 bytes. That layout was found by running SBI's
+decoder of March 2026 and the master file it served, both from pybrisk's research, and
+matching the records against the file: all 4,445 agree on code, base price, limits, lot
+size and issue type, and the names and tick types (0, 1 and 3) are the decoder's own.
+`tools/brisk_mock/sbi_master_layout.py` repeats this from pinned downloads.
+
+The master file the decoder loads checks every master read (`checkMasterFile`). It holds
+fixed 180-byte records in issue order; pybrisk documents the record size, the binary header
+(a word of unknown use, then base price, upper and lower limit in tenths of a yen) and the
+code's position. The 2021 demo's file has the same records after a 444-byte preamble, and
+reading it equals the demo decoder's own master on all 4,131 issues, which places issue
+type at byte 40, the code at 50 (five wide, for some preferred shares) and the lot size
+right-aligned up to 139. Records are counted back from the end with the decoder's issue
+count. If any issue disagrees on those six fields, the session stops: a build whose
+record layout has changed, or a file that does not line up with the decoder's issues,
+can't pair quotes with the wrong codes. Names and tick types are not compared, because the
+file's differ (the decoder keeps `Ｕ－ＮＥＸＴ` whole but drops a market prefix such as
+`Ｍ－`, and SBI's tick types follow no single column). The master is also refused if it
+does not look like a market (security codes, base prices inside their limits, plausible
+lot sizes, names).
 
 What is verified: the decoder SBI served in pybrisk's March 2026 capture exports
 the demo's interface apart from `_getPortfolio` (so SBI quotes have no
@@ -199,7 +202,8 @@ decoder is tested against the vendor client's own indices on real data, and its
 heartbeat, ping reply and callbacks through its function table; the ping loop and
 the whole flow run offline against fake servers (plain, Engine.IO 3 and 4) using it.
 What is not verified against a live session: any of the above on SBI itself, the
-18000 master read from the file (built on a March 2026 file, not today's), and three wire details that are not public: the Socket.IO
+18000 master layout on today's build (found on SBI's of March 2026; each start checks it
+against the master file), and three wire details that are not public: the Socket.IO
 connect parameters, the `startLive` payload and the catch-up request body. They live in a profile
 (`BRISK_SBI_PROFILE`, or `sbi.connect(profile=...)`); the defaults are labelled
 unverified, and the catch-up request is used only when the profile names a format.
@@ -218,8 +222,9 @@ e-shiten's BRiSK Next (`next.e-shiten.brisk.jp`) is the same app. In sessions on
 sign-in, every REST endpoint and the decoder, master and snapshot downloads worked.
 Both stopped while reading the master with the demo's 144-byte records (a lot size
 beyond 2^53), so the WebSocket was never reached: the decoder's 18000 master records are
-not the demo's. That is why an 18000 master is now read from the file (above); their
-master file was about 800 KB for 4,443 issues, which fits the same 180-byte records.
+not the demo's (above: 148 bytes; read at 144, the records drift until a lot size is
+garbage). Their master file was about 800 KB for 4,443 issues, which fits the same
+180-byte file records.
 e-shiten enforces one BRiSK session per user: opening
 it in a second tab stopped the first (message 10011).
 
