@@ -12,8 +12,11 @@ MIT License; its notice ships as `briskapi/LICENSE-pybrisk.txt`. The live transp
 (`briskapi/decoder/engineio.cjs`, `sbi.cjs`) also relies on pybrisk's published
 protocol research (the Engine.IO/Socket.IO layer, frame types, heartbeat and the
 market token) and on the public Next demo's client behavior. briskapi's own calls
-replace pybrisk's interface. No vendor bundles or raw captures from that
-repository are bundled here. SBI BRiSK's decoder is downloaded at runtime
+replace pybrisk's interface. The master file layout and the 18000 master record
+layout rest on pybrisk's research too: `tools/brisk_mock/sbi_master_layout.py`
+downloads, at the user's request and into the user's own cache, pinned copies of the
+SBI decoder and master file published there. No vendor bundles or raw captures from
+that repository are bundled here. SBI BRiSK's decoder is downloaded at runtime
 with the user's own session and is never stored or redistributed by this project.
 Dependencies retain their own licenses. Cargo.lock records Rust dependencies;
 boto3 uses Apache-2.0.

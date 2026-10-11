@@ -13,7 +13,7 @@ import threading
 from typing import Callable, Iterator
 import warnings
 
-from briskapi import cli
+from briskapi import cli, schema
 from briskapi._recording import BriskError, NotFoundError, Recording, Table, micros, quote_view
 from briskapi.timing import TimingStats
 
@@ -89,9 +89,9 @@ class Feed:
 
     def __init__(self, web=False, cache=None, codes=None, speed=1, limit_frames=None, contribute=None,
                  history=False, node='node', *, command=None, env=None, timing=None, share_market_data=False):
-        # SBI market recordings require a separate opt-in for this session.
-        if share_market_data and (command is None or timing != 'sbi_live'):
-            raise BriskError('share_market_data requires an SBI live session')
+        # Broker market recordings (SBI, e-shiten) require a separate opt-in for this session.
+        if share_market_data and (command is None or timing not in schema.BROKER_TRANSPORT):
+            raise BriskError('share_market_data requires a broker live session (SBI or e-shiten)')
         cli.check_node(command[0] if command else node)
         if command is None:
             choice, upload = _consent(contribute, limit_frames)

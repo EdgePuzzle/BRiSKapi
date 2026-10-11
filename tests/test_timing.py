@@ -69,6 +69,9 @@ def test_service_publishes_canonical_report(monkeypatch):
     assert s3.objects[published['key']] == body
     # Same report again: same object, no error.
     assert json.loads(service.api(event(body={'timing': r}), s3, db)['body']) == published
+    # e-shiten sessions report the same way (to a separate archive, so the listing below stays one report).
+    e = report(source='eshiten_live')
+    assert json.loads(service.api(event(body={'timing': e}), S3(), db)['body'])['status'] == 'published'
     assert {c['Key']['id']['S'].split(':')[0][:7] for c in db.calls} >= {'timing-', 'global-'}
     entries = list(cli.timing_reports(s3, 'bucket'))
     assert entries == [(published['key'], r)] and list(cli.timing_reports(s3, 'bucket', '20260311'))

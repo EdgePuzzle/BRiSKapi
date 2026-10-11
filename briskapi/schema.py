@@ -2,7 +2,7 @@
 
 The archive accepts byte-canonical recordings with exact market/timing fields.
 Demo and synthetic market content must match a pinned reference replay. Opted-in
-SBI recordings have structural and continuity checks, but their market content
+broker recordings (SBI, e-shiten) have structural and continuity checks, but their market content
 cannot be independently verified. The service recompresses accepted content itself.
 """
 import datetime as dt
@@ -18,7 +18,7 @@ MAX_COMPRESSED = 64 * 1024 * 1024
 MAX_EXPANDED = 1024 * 1024 * 1024
 MAX_LINE = 16 * 1024 * 1024
 SCHEMA = 'brisk-decoded-jsonl-v1'
-SOURCES = {'historical_mock', 'synthetic_test', 'sbi_live'}
+SOURCES = {'historical_mock', 'synthetic_test', 'sbi_live', 'eshiten_live'}
 QUOTE_KEYS = set('issue_id code frame source_time_us max_frame last_price10 open_price10 bid_price10 ask_price10 indicative_price10 indicative_volume indicative_side closing_indicative_price10 closing_indicative_volume quote_flag quote_side special_quote_time_us indicative_open_price10 auction_reference_price10 volume issue_status market_buy_quantity market_sell_quantity closing_market_buy_quantity closing_market_sell_quantity'.split())
 SBI_QUOTE_KEYS = QUOTE_KEYS - {'issue_status'}
 MASTER_KEYS = set('issue_id code tick_type base_price10 limit_up10 limit_down10 lot_size issue_type name'.split())
@@ -29,7 +29,11 @@ BATCH_KEYS = {
 }
 SUMMARY_KEYS = {'source', 'trading_date', 'first_source_time_us', 'last_source_time_us', 'codes', 'batches', 'quote_updates', 'expanded_bytes'}
 DEMO_ORIGIN = 'https://next-demo.brisk.jp/'
-SBI_TRANSPORT = {'kind': 'sbi_websocket', 'origin': 'https://sbi.brisk.jp/'}
+# Broker-hosted BRiSK (SBI, Tachibana e-shiten): the same app and decoder, so the same rules; each
+# keeps only its fixed public transport provenance.
+BROKER_TRANSPORT = {'sbi_live': {'kind': 'sbi_websocket', 'origin': 'https://sbi.brisk.jp/'},
+                    'eshiten_live': {'kind': 'eshiten_websocket', 'origin': 'https://next.e-shiten.brisk.jp/'}}
+SBI_TRANSPORT = BROKER_TRANSPORT['sbi_live']
 REFERENCE_DIR = Path(__file__).resolve().parent / 'references'
 # Local measurements are client reported. Plausible ranges and microsecond
 # precision keep them useful as timing data and useless as a payload carrier.
@@ -76,12 +80,13 @@ def canonical_lines(source):
         require(len(line) <= MAX_LINE, 'Recording exceeds decode limit')
         b = json.loads(line, parse_constant=_nonfinite)
         require(isinstance(b, dict), 'Invalid batch')
-        if b.get('type') == 'bootstrap' and b.get('source') == 'sbi_live':
+        public = BROKER_TRANSPORT.get(b.get('source')) if b.get('type') == 'bootstrap' else None
+        if public:
             transport = b.get('input_transport')
-            if isinstance(transport, dict) and all(transport.get(k) == v for k, v in SBI_TRANSPORT.items()):
+            if isinstance(transport, dict) and all(transport.get(k) == v for k, v in public.items()):
                 # Keep only public transport provenance, never session/profile or
                 # decoder paths and connection diagnostics from the local host.
-                b['input_transport'] = dict(SBI_TRANSPORT)
+                b['input_transport'] = dict(public)
         for key in ('master', 'quotes'):
             if isinstance(b.get(key), list):
                 b[key].sort(key=_issue)
@@ -115,8 +120,8 @@ class Fingerprint:
         return self.issues[issue].hexdigest()[:32]
 
 def _transport(value, source):
-    if source == 'sbi_live':
-        require(value == SBI_TRANSPORT, 'Invalid SBI transport fields')
+    if source in BROKER_TRANSPORT:
+        require(value == BROKER_TRANSPORT[source], 'Invalid broker transport fields')
         return
     require(value == {'kind': 'local_cache'} or (isinstance(value, dict) and set(value) == {'kind', 'origin', 'asset_fetch_ms'}
             and value['kind'] == 'https_recorded_assets' and value['origin'] == DEMO_ORIGIN), 'Invalid transport fields')
@@ -184,8 +189,8 @@ def _scan(stream):
             require(previous_stamp <= stamp <= received + MAX_SESSION_MS, 'Local receipt clock regression/span')
             previous_stamp = stamp
             lateness = b['replay_lateness_ms']
-            if source == 'sbi_live':
-                require(lateness is None, 'SBI streams are not demo replays')
+            if source in BROKER_TRANSPORT:
+                require(lateness is None, 'Broker streams are not demo replays')
             if lateness is not None:
                 measurement(lateness, MAX_SESSION_MS)
             # A replay is paced (measured) or unpaced (null) throughout.
@@ -195,7 +200,7 @@ def _scan(stream):
         require(isinstance(quotes, list) and len(quotes) <= len(identities), 'Invalid quote count')
         previous_issue = -1
         for q in quotes:
-            keys = SBI_QUOTE_KEYS if source == 'sbi_live' else QUOTE_KEYS
+            keys = SBI_QUOTE_KEYS if source in BROKER_TRANSPORT else QUOTE_KEYS
             require(isinstance(q, dict) and set(q) == keys, 'Unknown or missing quote fields')
             issue = integer(q['issue_id'], 2**32-1)
             require(issue > previous_issue and identities.get(issue) == code(q['code']), 'Quote identity mismatch/duplicate')
@@ -212,7 +217,7 @@ def _scan(stream):
             require(len(quotes) == len(identities), 'Incomplete bootstrap')
         if kind == 'end':
             frames = integer(b['frames'])
-            require((frames >= seq - 1 if source == 'sbi_live' else frames == seq)
+            require((frames >= seq - 1 if source in BROKER_TRANSPORT else frames == seq)
                     and integer(b['quote_updates']) == updates, 'End summary mismatch')
             measurement(b['replay_wall_ms'], MAX_SESSION_MS)
             ended = True
@@ -259,13 +264,13 @@ REFERENCES = load_references()
 def validate_stream(stream, references=None):
     """Validate canonical fields/continuity, plus reference content for demo/synthetic data.
 
-    SBI live content is contributor-declared and has no reference replay. Its
-    quotes omit issue_status (not exported by SBI's decoder), its transport is
-    exactly SBI_TRANSPORT, and replay_lateness_ms must be null. End frames include
-    pre-bootstrap catch-up frames as well as the emitted quote batches.
+    Broker live content (SBI, e-shiten) is contributor-declared and has no reference
+    replay. Its quotes omit issue_status (not exported by the broker decoder), its
+    transport is exactly its BROKER_TRANSPORT, and replay_lateness_ms must be null. End
+    frames include pre-bootstrap catch-up frames as well as the emitted quote batches.
     """
     summary, fingerprint, market = _scan(stream)
-    if summary['source'] == 'sbi_live':
+    if summary['source'] in BROKER_TRANSPORT:
         return summary
     reference = (REFERENCES if references is None else references).get(summary['source'])
     require(reference is not None, 'No reference replay for this source')
@@ -344,9 +349,9 @@ def repack(path, manifest, output, references=None):
     require(summary == manifest['summary'], 'Summary mismatch')
     return validate_manifest({**manifest, 'sha256': digest(output), 'bytes': output.stat().st_size})
 
-# Timing reports: what an SBI session contributes instead of market data.
+# Timing reports: what a broker session (SBI, e-shiten) contributes besides any opted-in market data.
 TIMING_SCHEMA = 'brisk-timing-v1'
-TIMING_SOURCES = {'sbi_live'}
+TIMING_SOURCES = set(BROKER_TRANSPORT)
 TIMING_KEYS = {'schema', 'source', 'trading_date', 'first_minute', 'last_minute', 'frames', 'stalls',
                'client_version', 'decode_ms', 'source_age_ms', 'interarrival_ms', 'contributor', 'license'}
 QUANTILES = ('p50', 'p90', 'p99', 'max')

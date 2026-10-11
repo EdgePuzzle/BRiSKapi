@@ -4,8 +4,8 @@
 
 BRiSK の板寄せデータを扱う、非公式の pybrisk 風 Python API と `brisk`
 コマンドラインツールです。ライブフィードの購読、記録データの任意時点での照会、
-公開アーカイブからの共有記録の取得に加え、ご自身の口座で SBI BRiSK も利用
-できます。本プロジェクトは独立したもので、BRiSK、立花証券、SBI証券、
+公開アーカイブからの共有記録の取得に加え、ご自身の口座で SBI BRiSK や立花証券
+e支店の BRiSK Next も利用できます（パスキーでのサインインにも対応）。本プロジェクトは独立したもので、BRiSK、立花証券、SBI証券、
 東京証券取引所（TSE）、日本取引所グループ（JPX）とは提携しておらず、承認も
 受けていません。
 
@@ -150,11 +150,12 @@ sbi.login(cookies={...}, site="e-shiten")   # または BRISK_ESHITEN_COOKIES。
 feed = sbi.connect(codes=["7203"])           # ライブ（試験的）
 ```
 
-上記の説明はそのまま当てはまりますが、e支店のセッションは何も共有しません（タイミング
-の要約も共有しません）。Cookie は next.e-shiten.brisk.jp にのみ送られます。e支店の
+上記の説明は共有も含めてそのまま当てはまります（保存した選択に従ってタイミングの要約を
+共有し、市場データはその記録で同意した場合だけ共有します）。Cookie は
+next.e-shiten.brisk.jp にのみ送られます。e支店の
 BRiSK は同時に1セッションまでで、別のタブやブラウザで開くと先に開いていた方が
 止まりました（メッセージ 10011）。そのため、フィードとブラウザの BRiSK は互いに
-相手を止めることがあります。記録する前に、立花証券の BRiSK Next 利用規定で
+相手を止めることがあります。記録や共有の前に、立花証券の BRiSK Next 利用規定で
 データの蓄積や二次利用についての定めを確認してください。
 
 ## パスキーでのサインイン（試験的）
@@ -255,9 +256,9 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | `briskapi.recordings()` / `.pull()` / `.load()` | アーカイブの一覧、検証付きダウンロード、ローカルファイル |
 | `briskapi.record(output, web=True, ...)` | デモの記録（共有設定に従って共有） |
 | `briskapi.consent(...)` | 共有の設定 |
-| `Ticker(code).candles(interval)` / `.margin(days)` | SBI BRiSK のローソク足、信用残と貸株料 |
-| `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | SBI BRiSK の市場データ |
-| `briskapi.sbi.login()` / `.connect()` | SBI BRiSK のセッションとライブフィード |
+| `Ticker(code).candles(interval)` / `.margin(days)` | 証券会社の BRiSK（SBI、e支店）のローソク足、信用残と貸株料 |
+| `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | 証券会社の BRiSK の市場データ |
+| `briskapi.sbi.login(site=...)` / `.connect()` | SBI（既定）または e支店の BRiSK のセッションとライブフィード |
 | `briskapi.passkey.enroll()` / `.login()` / `.forget()` | 証券会社の BRiSK へのパスキーでのサインイン |
 
 価格は円単位の浮動小数点数で、ベンダーの「値なし」（0）は `None` になります。
@@ -274,7 +275,7 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 brisk live --web --codes 7203,6758          # 気配の更新ごとに JSON を1行出力（--raw でベンダー形式）
 brisk sites | enroll | login | forget       # Chrome 経由のパスキーで証券会社の BRiSK にサインイン（試験的）
 brisk live --sbi --codes 7203               # SBI BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_SBI_PROFILE）
-brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）。何も共有しない
+brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）または `brisk login` が保存したもの
 brisk record --web --output recordings/s1   # デモを記録（同意済みなら共有）
 brisk list --date 20210927 --source historical_mock
 brisk pull PREFIX --output recordings/downloaded   # brisk list が返した prefix を使う
@@ -285,11 +286,12 @@ brisk upload recordings/s1                  # 記録の共有を再試行
 各コマンドの詳細は `--help` で確認できます。`pull` はすべて検証してから
 書き込み、既存のフォルダーを上書きすることはありません。
 
-共有がオンの場合、対話型の `brisk live --sbi` は記録開始時に毎回、そのセッションの
+共有がオンの場合、対話型の `brisk live --sbi` と `--site e-shiten` は記録開始時に毎回、そのセッションの
 市場データを公開するか確認します。Enter で今回だけ同意し、この選択は保存しません。
 スクリプトでは `--share-market-data` で同意でき、`--no-share-market-data` なら確認
 せずに断れます。公開にはセッションの正常終了が必要です。`brisk list --source sbi_live`
-で共有された SBI の記録を一覧できます。市場データの正確性は提供者の申告に基づきます。
+（または `eshiten_live`）で共有された証券会社の記録を一覧できます。市場データの正確性は
+提供者の申告に基づきます。
 
 ## 記録の共有
 
@@ -299,11 +301,11 @@ brisk upload recordings/s1                  # 記録の共有を再試行
 Python API から確認を求めることはありません。決めるまでは、セッションは
 お使いのコンピューターにだけ保存されます。
 
-- **SBI のタイミング共有:** デコード時間、受信時のデータの
+- **証券会社（SBI、e支店）のタイミング共有:** デコード時間、受信時のデータの
   遅れ、フレーム間隔のパーセンタイル、停滞回数、フレーム数、取引日、最初と
   最後の分、エイリアスとライセンスです。`briskapi.Archive().timing()` で全員の
   レポートを一覧できます。
-- **任意の SBI 市場データ共有:** 記録開始時に毎回明示的に同意すると、デコードした
+- **任意の証券会社の市場データ共有:** 記録開始時に毎回明示的に同意すると、デコードした
   銘柄マスター、価格、数量、銘柄コード、ローカルの計測値も公開アーカイブに追加
   します。Cookie、トークン、接続の診断情報は含めません。
 - **デモのセッションで共有される内容:** 記録した市場データ、ローカルの計測値（お使いの
@@ -325,7 +327,7 @@ Python API から確認を求めることはありません。決めるまでは
 - [ARCHITECTURE.md](ARCHITECTURE.md): 仕組み、データ形式、アーカイブの改ざん対策と制限
 - [PRIVACY.md](PRIVACY.md): プライバシーポリシー
 - [CONTRIBUTING.md](CONTRIBUTING.md): 開発、テスト、リリース
-- [tools/brisk_mock/README.md](tools/brisk_mock/README.md): Rust コレクター、フィールド定義、タイミングとレイテンシー
+- [tools/brisk_mock/README.md](tools/brisk_mock/README.md): フィールド定義、タイミングとレイテンシー、SBI のマスター配置の確認、任意の Rust コレクター
 - [infra/README.md](infra/README.md): 独自アーカイブのデプロイ
 - [THIRD_PARTY.md](THIRD_PARTY.md): デコーダー、データ、pybrisk の権利表示
 

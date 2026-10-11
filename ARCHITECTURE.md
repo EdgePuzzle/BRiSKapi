@@ -85,7 +85,7 @@ market data; an interrupted capture's temporary file is deleted.
 
 ## Timing reports
 
-A timing report is shared independently of an SBI market-recording opt-in. A report
+A timing report is shared independently of a broker (SBI, e-shiten) market-recording opt-in. A report
 (`brisk-timing-v1`) holds p50/p90/p99/max of decode time, feed-clock age at
 receipt and frame spacing, a stall count (gaps over one second), the frame
 count, trading date, first/last JST minute, client version, alias and license.
@@ -230,9 +230,10 @@ it in a second tab stopped the first (message 10011).
 
 `site="e-shiten"` selects it (`BRISK_SBI_SITE` for the host; saved cookies in
 `e-shiten-cookies.json`, `BRISK_ESHITEN_COOKIES`). Its batches say
-`source=eshiten_live` and `kind=eshiten_websocket`. Its sessions are never offered
-for contribution, neither market data nor timing, and the archive accepts neither
-label. `brisk login` can sign in to it with a passkey (site `e-shiten`; see
+`source=eshiten_live` and `kind=eshiten_websocket`. Its sessions are contributed as
+SBI's are: a timing summary under saved consent, market data only after the per-capture
+opt-in, with the same opt-outs; packaging keeps only `next.e-shiten.brisk.jp` as its
+transport provenance (`BROKER_TRANSPORT` in `schema.py`). `brisk login` can sign in to it with a passkey (site `e-shiten`; see
 [Tachibana e-shiten's sign-in](#tachibana-e-shitens-sign-in)).
 
 ## Passkey sign-in
@@ -430,7 +431,7 @@ is contributor-declared:
   batch it arrived in) and a hash of the batch clock timeline; it contains no
   market data. Any subset of securities is accepted, but only complete replays.
   `tools/brisk_mock/build_reference.py` regenerates it after a re-audited asset pin.
-  This comparison applies only to demo/synthetic sources, not to `sbi_live`.
+  This comparison applies only to demo/synthetic sources, not to `sbi_live` or `eshiten_live`.
 - **Canonical bytes.** Each line must be the one canonical JSON encoding of its
   value: sorted keys, issues in ID order, compact separators, no escapes. Extra
   whitespace, duplicate keys, alternative number spellings and other encoding
@@ -484,11 +485,10 @@ to every source.
 
 ### Sources
 
-The decoded schema accepts `historical_mock`, `synthetic_test` and `sbi_live`
-(`eshiten_live` is a local label only).
-The small, self-authored `synthetic_test` fixture verifies publication; filter by
-source when selecting market data. Opted-in decoded SBI recordings retain
-`source=sbi_live` and undergo canonical-field, integrity and continuity checks.
+The decoded schema accepts `historical_mock`, `synthetic_test`, `sbi_live` and
+`eshiten_live`. The small, self-authored `synthetic_test` fixture verifies publication;
+filter by source when selecting market data. Opted-in decoded broker recordings retain
+`source=sbi_live` or `eshiten_live` and undergo canonical-field, integrity and continuity checks.
 Their market accuracy and redistribution permission are contributor-declared;
 they are not silently treated as reference-verified demo data. New raw-wire
 submissions remain unsupported. The existing legacy wire capture is labeled

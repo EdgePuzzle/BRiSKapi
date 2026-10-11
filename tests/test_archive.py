@@ -455,10 +455,10 @@ def test_pull_rejects_manifest_before_fetching_payload(packaged, tmp_path, chang
     assert not (tmp_path / 'download').exists()
 
 
-def sbi_batches():
+def sbi_batches(source='sbi_live'):
     records = batches()
-    records[0].update(source='sbi_live', trading_date='20260311',
-                      input_transport={**schema.SBI_TRANSPORT, 'decoder': '/private/decoder.js', 'session': 'secret'})
+    records[0].update(source=source, trading_date='20260311',
+                      input_transport={**schema.BROKER_TRANSPORT[source], 'decoder': '/private/decoder.js', 'session': 'secret'})
     for batch in records:
         for q in batch.get('quotes', []):
             q.pop('issue_status')
@@ -467,12 +467,13 @@ def sbi_batches():
     return records
 
 
-def test_sbi_market_recording_publish_and_pull(tmp_path):
+@pytest.mark.parametrize('source', ['sbi_live', 'eshiten_live'])
+def test_broker_market_recording_publish_and_pull(tmp_path, source):
     events = tmp_path / 'sbi.jsonl'
-    events.write_bytes(stream(sbi_batches()).read())
+    events.write_bytes(stream(sbi_batches(source)).read())
     directory = tmp_path / 'package'
     m = cli.package(events, directory, 'sbi-contributor', 'CC-BY-4.0')
-    assert m['summary']['source'] == 'sbi_live' and m['redistribution_permitted']
+    assert m['summary']['source'] == source and m['redistribution_permitted']
     s3, db = S3(), DB()
     ticket = ticket_for(s3, db, m)
     service.ingest(upload(s3, m, directory, ticket), s3, db)
@@ -481,8 +482,14 @@ def test_sbi_market_recording_publish_and_pull(tmp_path):
     cli.pull(s3, 'bucket', status['prefix'], tmp_path / 'download')
     data = (tmp_path / 'download/events.jsonl').read_bytes()
     assert b'secret' not in data and b'/private/' not in data
-    assert json.loads(data.splitlines()[0])['input_transport'] == schema.SBI_TRANSPORT
-    assert list(cli.manifests(s3, 'bucket'))[0][1]['summary']['source'] == 'sbi_live'
+    assert json.loads(data.splitlines()[0])['input_transport'] == schema.BROKER_TRANSPORT[source]
+    assert list(cli.manifests(s3, 'bucket'))[0][1]['summary']['source'] == source
+    # A recording labelled with one site but the other's transport is refused.
+    other = sbi_batches(source)
+    other[0]['input_transport'] = dict(schema.BROKER_TRANSPORT['eshiten_live' if source == 'sbi_live' else 'sbi_live'])
+    events.write_bytes(stream(other).read())
+    with pytest.raises(ValueError, match='broker transport'):
+        cli.package(events, tmp_path / 'mixed', 'sbi-contributor', 'CC-BY-4.0')
     m['redistribution_permitted'] = False
     with pytest.raises(ValueError, match='Redistribution'):
         ticket_for(s3, db, m)

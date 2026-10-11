@@ -25,7 +25,8 @@ particular key and exact size. Public bucket policy permits only TLS reads of
 enabled. Logs expire after 14 days.
 
 Ingest accepts canonical demo/synthetic recordings that match a reference replay
-and opted-in decoded SBI recordings with structural/continuity checks. It
+and opted-in decoded broker recordings (SBI, e-shiten) with structural/continuity checks,
+and timing reports from either. It
 publishes its own gzip of the validated content (see the integrity section of
 [ARCHITECTURE.md](../ARCHITECTURE.md)). The deployment package holds
 `archive_service.py`, `briskapi/schema.py` and `briskapi/references/*.json`,

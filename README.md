@@ -4,7 +4,8 @@
 
 An unofficial, pybrisk-style Python API and `brisk` command line for BRiSK auction
 data. Consume a live feed, query recordings at any point in time, pull shared
-recordings from a public archive, and use SBI BRiSK with your own account. This
+recordings from a public archive, and use SBI BRiSK or Tachibana e-shiten BRiSK Next
+with your own account, signing in with a passkey if you like. This
 is an independent project, not affiliated with or endorsed by BRiSK, Tachibana,
 SBI, TSE or JPX.
 
@@ -145,11 +146,13 @@ sbi.login(cookies={...}, site="e-shiten")   # or BRISK_ESHITEN_COOKIES; remember
 feed = sbi.connect(codes=["7203"])           # live (experimental)
 ```
 
-Everything above applies, except that an e-shiten session shares nothing, not even a
-timing summary, and its cookies go only to next.e-shiten.brisk.jp. e-shiten allows one
+Everything above applies, sharing included (a timing summary under your saved choice,
+market data only if you opt in for that capture); its cookies go only to
+next.e-shiten.brisk.jp. e-shiten allows one
 BRiSK session at a time: opening it in a second tab or browser has stopped the first
 (message 10011), so the feed and BRiSK in your browser can end each other. Before you
-record, read what Tachibana's BRiSK Next terms say about storing and reusing its data.
+record or share, read what Tachibana's BRiSK Next terms say about storing and reusing
+its data.
 
 ## Signing in with a passkey (experimental)
 
@@ -247,9 +250,9 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | `briskapi.recordings()` / `.pull()` / `.load()` | Archive listing, verified download, local file |
 | `briskapi.record(output, web=True, ...)` | A recording of the demo, shared per your choice |
 | `briskapi.consent(...)` | Your sharing choice |
-| `Ticker(code).candles(interval)` / `.margin(days)` | SBI BRiSK price bars; margin balances and lending fees |
-| `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | SBI BRiSK market data |
-| `briskapi.sbi.login()` / `.connect()` | SBI BRiSK session and live feed |
+| `Ticker(code).candles(interval)` / `.margin(days)` | Broker BRiSK (SBI, e-shiten) price bars; margin balances and lending fees |
+| `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | Broker BRiSK market data |
+| `briskapi.sbi.login(site=...)` / `.connect()` | SBI (default) or e-shiten BRiSK session and live feed |
 | `briskapi.passkey.enroll()` / `.login()` / `.forget()` | Passkey sign-in to your broker's BRiSK |
 
 Prices are yen floats, with `None` for the vendor's zero "unavailable" value.
@@ -266,7 +269,7 @@ recording once (about six seconds for the complete 420 MB demo).
 brisk live --web --codes 7203,6758          # one JSON object per quote update (--raw for vendor fields)
 brisk sites | enroll | login | forget       # sign in to your broker's BRiSK with a passkey through Chrome (experimental)
 brisk live --sbi --codes 7203               # SBI BRiSK; cookies from BRISK_SBI_COOKIES (JSON) or `brisk login`; --trace-protocol shows the handshake, wire details in BRISK_SBI_PROFILE
-brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; cookies from BRISK_ESHITEN_COOKIES (JSON); shares nothing
+brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; cookies from BRISK_ESHITEN_COOKIES (JSON) or `brisk login`
 brisk record --web --output recordings/s1   # record a replay (shared if you agreed)
 brisk list --date 20210927 --source historical_mock
 brisk pull PREFIX --output recordings/downloaded   # use a prefix returned by brisk list
@@ -277,12 +280,13 @@ brisk upload recordings/s1                  # retry sharing a recording
 Each command has `--help`. `pull` verifies everything before writing and never
 overwrites an existing folder.
 
-At the beginning of each interactive `brisk live --sbi` capture with contribution
-enabled, you are asked whether to publish that session's market data; Enter opts
-in. The choice is not saved. Use `--share-market-data` to opt in explicitly in a
-script, or `--no-share-market-data` to decline without prompting. A clean session
-end is required to publish a recording. `brisk list --source sbi_live` lists shared
-SBI recordings; their market content is contributor-declared.
+At the beginning of each interactive `brisk live --sbi` or `--site e-shiten` capture
+with contribution enabled, you are asked whether to publish that session's market data;
+Enter opts in. The choice is not saved. Use `--share-market-data` to opt in explicitly
+in a script, or `--no-share-market-data` to decline without prompting. A clean session
+end is required to publish a recording. `brisk list --source sbi_live` (or
+`eshiten_live`) lists shared broker recordings; their market content is
+contributor-declared.
 
 ## Sharing recordings
 
@@ -291,11 +295,11 @@ the tool shows what would be shared and asks once; Enter accepts. After that,
 every complete demo session is uploaded and published automatically. The Python
 API never asks: until you decide, sessions stay on your computer.
 
-- **SBI timing sharing:** percentiles of decode time, data age at
+- **Broker timing sharing (SBI, e-shiten):** percentiles of decode time, data age at
   receipt and frame spacing, a stall count, the frame count, the trading date,
   the first and last minute, and your alias and license.
   `briskapi.Archive().timing()` lists everyone's reports.
-- **Optional SBI market sharing:** an explicit choice at the start of each capture
+- **Optional broker market sharing:** an explicit choice at the start of each capture
   adds the decoded securities master, prices, quantities, codes and local timing
   to the public archive. Cookies, tokens and connection diagnostics are excluded.
 - **What a demo session shares:** the market data you recorded, local timing measurements
@@ -317,7 +321,7 @@ API never asks: until you decide, sessions stay on your computer.
 - [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/main/ARCHITECTURE.md): how it works, data format, archive integrity and limits
 - [PRIVACY.md](https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md): privacy policy
 - [CONTRIBUTING.md](https://github.com/honvl/BRiSKapi/blob/main/CONTRIBUTING.md): development, tests and releases
-- [tools/brisk_mock/README.md](https://github.com/honvl/BRiSKapi/blob/main/tools/brisk_mock/README.md): Rust collector, field definitions, timing and latency
+- [tools/brisk_mock/README.md](https://github.com/honvl/BRiSKapi/blob/main/tools/brisk_mock/README.md): field definitions, timing and latency, checking the SBI master layout, and the optional Rust collector
 - [infra/README.md](https://github.com/honvl/BRiSKapi/blob/main/infra/README.md): deploying your own archive
 - [THIRD_PARTY.md](https://github.com/honvl/BRiSKapi/blob/main/THIRD_PARTY.md): decoder, data and pybrisk attribution
 

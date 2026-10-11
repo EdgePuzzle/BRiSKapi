@@ -19,9 +19,9 @@ pybrisk (https://github.com/obichan117/pybrisk), Copyright (c) 2026 obichan117,
 MIT License; see LICENSE-pybrisk.txt in this package.
 
 Your session cookies are credentials. They are sent only to the site that issued
-them and are kept in memory unless you pass remember=True. Sharing SBI market data
-requires share_market_data=True for that session and contribution consent. An
-e-shiten session contributes nothing, not even timing.
+them and are kept in memory unless you pass remember=True. With contribution consent a
+session shares a timing summary; sharing its market data also needs share_market_data=True
+for that session. Both work the same on SBI and e-shiten.
 """
 from __future__ import annotations
 
@@ -45,11 +45,12 @@ class _Site(NamedTuple):
     origin: str
     name: str
     cookies_env: str
+    source: str  # the archive's label for its sessions
 
 
 # Brokers whose BRiSK is this app; decoder/sbi.cjs keeps the same table.
-SITES = {'sbi': _Site('https://sbi.brisk.jp', 'SBI BRiSK', 'BRISK_SBI_COOKIES'),
-         'e-shiten': _Site('https://next.e-shiten.brisk.jp', 'e-shiten BRiSK Next', 'BRISK_ESHITEN_COOKIES')}
+SITES = {'sbi': _Site('https://sbi.brisk.jp', 'SBI BRiSK', 'BRISK_SBI_COOKIES', 'sbi_live'),
+         'e-shiten': _Site('https://next.e-shiten.brisk.jp', 'e-shiten BRiSK Next', 'BRISK_ESHITEN_COOKIES', 'eshiten_live')}
 ORIGIN = SITES['sbi'].origin
 DECODER = Path(__file__).resolve().parent / 'decoder' / 'sbi.cjs'
 INTERVALS = ('5m', '1d', '1w', '1mo')
@@ -296,14 +297,10 @@ def connect(codes=None, history=False, node='node', timeout=120, contribute=None
     recording after a clean end, under your saved alias, license and redistribution
     declaration. It requires current consent; contribute=False or BRISK_CONTRIBUTE=0
     keeps both local. Cookies, tokens and connection diagnostics are never published.
-    An e-shiten session contributes nothing (the archive takes SBI sessions only), so
-    share_market_data is refused there.
     """
     from briskapi import load
     from briskapi._live import Feed
     session = _default().session
-    if share_market_data and session.site != 'sbi':
-        raise BriskError(f'Only SBI market recordings can be shared, not {session.name}')
     command = [node, str(DECODER)]
     if codes:
         command += ['--codes', codes if isinstance(codes, str) else ','.join(map(str, codes))]
@@ -314,7 +311,7 @@ def connect(codes=None, history=False, node='node', timeout=120, contribute=None
     if profile:
         env['BRISK_SBI_PROFILE'] = json.dumps(profile)
     feed = Feed(command=command, env=env, history=history, contribute=contribute,
-                timing='sbi_live' if session.site == 'sbi' else None, share_market_data=share_market_data)
+                timing=SITES[session.site].source, share_market_data=share_market_data)
     try:
         return load(feed.ready(timeout))
     except BaseException:

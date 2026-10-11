@@ -30,7 +30,7 @@ DECODER = PACKAGE / 'decoder' / 'decoder.cjs'
 MIN_NODE = 22
 LICENSES = ('CC0-1.0', 'CC-BY-4.0')
 # Bump with any PRIVACY.md change to what is collected; saved choices then lapse.
-POLICY_VERSION = 3
+POLICY_VERSION = 4
 NOTICE = '''\
 Sessions are contributed to the shared public BRiSK archive automatically.
 After each clean, complete demo replay the contribution contains:
@@ -38,11 +38,11 @@ After each clean, complete demo replay the contribution contains:
   - local timing measurements: decode durations, replay lateness, asset download
     time and your computer's receipt clock, which shows when you recorded;
   - your public alias and data license, in the published manifest.
-SBI BRiSK sessions contribute a timing summary: decode time, data age and frame
-spacing percentiles, stalls, frame count, date and start/end minute. At the start
-of each interactive SBI capture, a separate question asks whether to publish its
-decoded market recording too; Enter accepts for that session only. Scripts can
-opt in with --share-market-data or sbi.connect(share_market_data=True). This
+Broker BRiSK sessions (SBI, Tachibana e-shiten) contribute a timing summary: decode
+time, data age and frame spacing percentiles, stalls, frame count, date and start/end
+minute. At the start of each interactive broker capture, a separate question asks
+whether to publish its decoded market recording too; Enter accepts for that session
+only. Scripts can opt in with --share-market-data or sbi.connect(share_market_data=True). This
 publishes its securities master, prices, quantities, codes and per-frame timing.
 Cookies, tokens and connection diagnostics are never published.
 Contributions are public and permanent. Your IP address is used only for
@@ -103,9 +103,9 @@ def ask_consent():
     accepted = sys.stdin.readline().strip().lower() in {'', 'y', 'yes'}
     return save_consent(accepted, alias)
 
-def ask_sbi_market_sharing(choice):
-    """An explicit choice at the beginning of each SBI capture; never saved."""
-    sys.stderr.write('Share this SBI capture publicly? This publishes the securities master, codes, prices, '
+def ask_market_sharing(choice, site='SBI'):
+    """An explicit choice at the beginning of each broker capture; never saved."""
+    sys.stderr.write(f'Share this {site} capture publicly? This publishes the securities master, codes, prices, '
                      'quantities and local per-frame timing, after a clean session end. Cookies, tokens and '
                      'connection diagnostics are excluded. '
                      f"Publish as '{choice['contributor']}' under {choice['license']}? [Y/n] ")
@@ -275,15 +275,13 @@ def live(args):
     codes = args.codes.split(',') if args.codes else None
     if args.site:
         sbi.login(site=args.site)  # Missing cookies fail before consent prompts or decoder startup.
-    # An e-shiten session contributes nothing, so there is nothing to ask.
-    if (args.site != 'e-shiten' and load_consent() is None and os.environ.get('BRISK_CONTRIBUTE') != '0'
-            and interactive()):
+    if load_consent() is None and os.environ.get('BRISK_CONTRIBUTE') != '0' and interactive():
         ask_consent()
     share_market_data = args.share_market_data
     choice = load_consent()
-    if (args.site == 'sbi' and share_market_data is None and choice and choice['enabled']
+    if (args.site and share_market_data is None and choice and choice['enabled']
             and os.environ.get('BRISK_CONTRIBUTE') != '0' and interactive()):
-        share_market_data = ask_sbi_market_sharing(choice)
+        share_market_data = ask_market_sharing(choice, 'SBI' if args.site == 'sbi' else 'e-shiten')
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         if args.site:
@@ -370,12 +368,11 @@ def _main(argv):
                        help='Live SBI BRiSK (experimental); cookies from BRISK_SBI_COOKIES, saved with sbi.login(remember=True) or by `brisk login`')
     group.add_argument('--site', choices=('sbi', 'e-shiten'),
                        help='Live BRiSK of this broker (experimental); --site e-shiten for Tachibana e-shiten BRiSK Next, '
-                            "cookies from BRISK_ESHITEN_COOKIES, saved with sbi.login(site='e-shiten', remember=True) or by `brisk login`; "
-                            'its sessions stay local')
+                            "cookies from BRISK_ESHITEN_COOKIES, saved with sbi.login(site='e-shiten', remember=True) or by `brisk login`")
     p.add_argument('--trace-protocol', action='store_true',
                    help='With --sbi or --site: print the connection steps to stderr, every token redacted (wire details in BRISK_SBI_PROFILE)')
     p.add_argument('--share-market-data', action=argparse.BooleanOptionalAction, default=None,
-                   help='With --sbi and consent: share this decoded market session (interactive default: ask, Enter accepts)')
+                   help='With --sbi or --site and consent: share this decoded market session (interactive default: ask, Enter accepts)')
     sub.add_parser('sites', help='List the brokers you can sign in to (built in, plus your own in sites.json)')
     for name, text in (('enroll', 'Once: pick your broker, sign in by hand and register a passkey; it is saved to the Keychain'),
                        ('login', 'Sign in with the saved passkey in Chrome and keep the BRiSK session cookies')):
@@ -394,7 +391,7 @@ def _main(argv):
                            help='Save the cookies (default: yes; owner-only file); `brisk live --sbi` and `--site e-shiten` read them')
     sub.add_parser('forget', help='Delete the saved passkey (it stays registered at your broker until you remove it there)')
     p = sub.add_parser('upload', help='Contribute a prepared package'); p.add_argument('directory', type=Path)
-    p = sub.add_parser('list', help='List published recordings'); p.add_argument('--date'); p.add_argument('--source', choices=['historical_mock','synthetic_test','sbi_live'])
+    p = sub.add_parser('list', help='List published recordings'); p.add_argument('--date'); p.add_argument('--source', choices=['historical_mock','synthetic_test','sbi_live','eshiten_live'])
     p = sub.add_parser('pull', help='Download and verify a recording'); p.add_argument('prefix'); p.add_argument('--output', type=Path, required=True)
     p = sub.add_parser('consent', help='Show or change automatic contribution')
     group = p.add_mutually_exclusive_group()
@@ -402,8 +399,8 @@ def _main(argv):
     group.add_argument('--revoke', action='store_true')
     p.add_argument('--contributor'); p.add_argument('--license', choices=LICENSES)
     args = parser.parse_args(argv)
-    if args.command == 'live' and args.share_market_data and args.site != 'sbi':
-        parser.error('--share-market-data requires --sbi')
+    if args.command == 'live' and args.share_market_data and not args.site:
+        parser.error('--share-market-data requires --sbi or --site')
     config = settings(args.config)
     if args.command == 'consent':
         if args.accept:

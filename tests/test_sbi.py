@@ -339,7 +339,7 @@ def test_cli_asks_for_each_sbi_capture_and_enter_opts_in(fake_host, monkeypatch,
 def test_cli_sbi_market_sharing_flags(fake_host, monkeypatch, flag, shared):
     monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
     briskapi.consent(accept=True, contributor='owner')
-    monkeypatch.setattr(cli, 'ask_sbi_market_sharing', lambda *args: pytest.fail('explicit flag suppresses prompt'))
+    monkeypatch.setattr(cli, 'ask_market_sharing', lambda *args: pytest.fail('explicit flag suppresses prompt'))
     sent = []
     monkeypatch.setattr(cli, 'contribute', lambda *args, **kwargs: sent.append(args) or {'status': 'published'})
     monkeypatch.setattr(cli, 'contribute_timing', lambda *args: {'status': 'published'})
@@ -389,34 +389,58 @@ def test_e_shiten_has_its_own_address_cookies_and_variable(monkeypatch):
 def eshiten_host(tmp_path, monkeypatch):
     """A stand-in for sbi.cjs on e-shiten that reports the site it was asked for."""
     batches = sbi_session()
-    batches[0] = {**batches[0], 'source': 'eshiten_live',
-                  'input_transport': {'kind': 'eshiten_websocket', 'origin': 'https://next.e-shiten.brisk.jp/'}}
+    batches[0] = {**batches[0], 'source': 'eshiten_live', 'input_transport': {
+        **schema.BROKER_TRANSPORT['eshiten_live'], 'ws_host': 'api.brisk.jp', 'decoder': '/private/decoder.js'}}
     script = tmp_path / 'eshiten_fake.cjs'
     script.write_text('console.error(process.env.BRISK_SBI_SITE);\n'
                       f'for (const b of {json.dumps(batches)}) console.log(JSON.stringify(b));\n')
     monkeypatch.setattr(sbi, 'DECODER', script)
-    monkeypatch.setattr(cli, 'contribute', lambda *args, **kwargs: pytest.fail('e-shiten market data is never shared'))
-    monkeypatch.setattr(cli, 'contribute_timing', lambda *args: pytest.fail('nor is e-shiten timing'))
+    sent = {'timing': [], 'market': []}
+    def publish(directory, url, **options):
+        m = json.loads((directory / 'manifest.json').read_text())
+        schema.inspect_package(directory / 'events.jsonl.gz', m)
+        sent['market'].append(m)
+        return {'status': 'published'}
+    monkeypatch.setattr(cli, 'contribute', publish)
+    monkeypatch.setattr(cli, 'contribute_timing',
+                        lambda report, url: sent['timing'].append(schema.validate_timing(report)) or {'status': 'published'})
+    return sent
 
 
-def test_e_shiten_feed_contributes_nothing(eshiten_host, capfd):
-    briskapi.consent(accept=True, contributor='owner')
+def test_e_shiten_shares_like_sbi_and_honors_opt_out(eshiten_host, monkeypatch, capfd):
     sbi.login({'s': 'v'}, site='e-shiten')
+    with pytest.warns(UserWarning, match='undecided'):
+        assert sbi.connect().wait().timing_contribution is None
+    briskapi.consent(accept=True, contributor='owner')
     feed = sbi.connect(codes=['7203']).wait()
     assert feed.source == 'eshiten_live' and briskapi.Ticker('7203').quote()['last_price'] == 10160.0
+    assert feed.timing_contribution == {'status': 'published'} and feed.contribution is None
+    assert eshiten_host['timing'][0]['source'] == 'eshiten_live' and not eshiten_host['market']
+    assert 'e-shiten' in capfd.readouterr().err
+    feed = sbi.connect(share_market_data=True).wait()
+    assert feed.contribution == {'status': 'published'}
+    assert eshiten_host['market'][0]['summary']['source'] == 'eshiten_live'
+    assert sbi.connect(share_market_data=True, contribute=False).wait().contribution is None
+    monkeypatch.setenv('BRISK_CONTRIBUTE', '0')
+    feed = sbi.connect(share_market_data=True).wait()
     assert feed.contribution is None and feed.timing_contribution is None
-    assert capfd.readouterr().err.strip() == 'e-shiten'
-    with pytest.raises(briskapi.BriskError, match='Only SBI market recordings can be shared'):
-        sbi.connect(share_market_data=True)
+    assert len(eshiten_host['market']) == 1 and len(eshiten_host['timing']) == 2
 
 
-def test_cli_live_e_shiten_asks_nothing(eshiten_host, monkeypatch, capsys):
+@pytest.mark.parametrize('answer,shared', [('\n', True), ('n\n', False)])
+def test_cli_asks_for_each_e_shiten_capture_like_sbi(eshiten_host, monkeypatch, capsys, answer, shared):
     monkeypatch.setenv('BRISK_ESHITEN_COOKIES', '{"s": "v"}')
+    briskapi.consent(accept=True, contributor='owner')
     monkeypatch.setattr(cli, 'interactive', lambda: True)
-    monkeypatch.setattr(cli, 'ask_consent', lambda: pytest.fail('nothing to consent to'))
+    monkeypatch.setattr(cli.sys, 'stdin', io.StringIO(answer))
     cli.main(['live', '--site', 'e-shiten', '--codes', '7203'])
-    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert lines[-1]['last_price'] == 10160.0 and cli.load_consent() is None
+    out = capsys.readouterr()
+    assert json.loads(out.out.splitlines()[-1])['last_price'] == 10160.0
+    assert 'Share this e-shiten capture publicly?' in out.err
+    assert len(eshiten_host['market']) == shared and len(eshiten_host['timing']) == 1
+    monkeypatch.setenv('BRISK_CONTRIBUTE', '0')
+    cli.main(['live', '--site', 'e-shiten', '--no-share-market-data'])
+    assert len(eshiten_host['timing']) == 1, 'the environment opt-out keeps even timing local'
     with pytest.raises(SystemExit):
-        cli.main(['live', '--site', 'e-shiten', '--share-market-data'])
-    assert '--share-market-data requires --sbi' in capsys.readouterr().err
+        cli.main(['live', '--web', '--share-market-data'])
+    assert '--share-market-data requires --sbi or --site' in capsys.readouterr().err

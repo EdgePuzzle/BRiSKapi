@@ -13,8 +13,9 @@ every clean and complete demo session (`brisk record`, `brisk live`, `briskapi.c
 session is written to a temporary file while it runs; the file is deleted after
 the upload. Python API calls never prompt.
 
-SBI market-data sharing is a separate choice for each capture. With contribution
-enabled, the interactive CLI asks at the beginning of every SBI session; pressing
+Market-data sharing for a broker session (SBI or Tachibana e-shiten) is a separate
+choice for each capture. With contribution enabled, the interactive CLI asks at the
+beginning of every broker session; pressing
 Enter opts in for that session. This choice is never saved. Non-interactive CLI
 runs require `--share-market-data`, and Python calls require
 `sbi.connect(share_market_data=True)`. Declining market-data sharing still permits
@@ -34,7 +35,7 @@ Opting out:
   until you turn it back on with `brisk consent --accept`;
 - `BRISK_CONTRIBUTE=0` disables uploads for any process with that environment;
 - `--no-upload` skips one run.
-- `--no-share-market-data` declines market sharing for one SBI capture without a
+- `--no-share-market-data` declines market sharing for one broker capture without a
   prompt; `contribute=False` on `sbi.connect()` keeps both market data and timing local.
 
 ## What a contribution contains
@@ -42,9 +43,9 @@ Opting out:
 Each published recording consists of `events.jsonl.gz` and `manifest.json`:
 
 - **Market data you recorded**: the BRiSK demo's securities master and decoded
-  auction quotes, or an explicitly opted-in SBI session's decoded securities
-  master and auction quotes (prices, quantities, codes, flags and source clocks).
-  Demo content is checked against the pinned reference replay. SBI content is
+  auction quotes, or an explicitly opted-in broker session's (SBI or e-shiten) decoded
+  securities master and auction quotes (prices, quantities, codes, flags and source
+  clocks). Demo content is checked against the pinned reference replay. Broker content is
   contributor-declared, with exact field and continuity checks rather than a
   reference replay.
 - **Local timing measurements**: per-frame decode time (`decode_ns`), your
@@ -57,9 +58,10 @@ Each published recording consists of `events.jsonl.gz` and `manifest.json`:
   redistribution declaration, and a summary (source, trading date, securities
   covered, clock range, counts, sizes and SHA-256).
 
-SBI packages include per-frame receipt/decode timing and session duration. They
-retain only the fixed SBI WebSocket origin as transport provenance; connection
-and decoder diagnostics are removed before packaging.
+Broker packages include per-frame receipt/decode timing and session duration. They
+retain only the site's fixed WebSocket origin as transport provenance (`sbi.brisk.jp`
+or `next.e-shiten.brisk.jp`); connection and decoder diagnostics are removed before
+packaging.
 
 The default alias is random (`anon-` followed by eight hexadecimal characters) and
 is the same for all your contributions until you change it. Choose a different
@@ -71,7 +73,7 @@ or email address unless you want it public.
 The tool sends nothing about brokerage or BRiSK accounts, cookies, session tokens,
 passkeys, orders, usernames, hostnames, file paths, environment variables or hardware
 identifiers. The archive service accepts only the fields listed above and rejects
-any recording that contains other fields. SBI market content and redistribution
+any recording that contains other fields. Broker market content and redistribution
 permission are supplied by the contributor and cannot be independently verified.
 
 ## SBI BRiSK
@@ -104,12 +106,12 @@ from your own browser. They are credentials:
   without a data client are kept in an owner-only file under `~/.config/brisk/cookies/`. The Chrome profile used for sign-in is
   temporary and deleted afterwards (one left by a force-killed run is removed at the next start),
   and only the BRiSK host's cookies are taken from it.
-- SBI market data is published only after an explicit opt-in at the start of that
+- Broker market data (SBI or e-shiten) is published only after an explicit opt-in at the start of that
   capture (Enter accepts the interactive question), `--share-market-data`, or
   `sbi.connect(share_market_data=True)`, together with current contribution consent.
   It is published under your alias and selected license after a clean session end.
   Closing before the clean end keeps the market recording local.
-- With contribution on, an SBI session contributes one **timing summary** when it
+- With contribution on, a broker session (SBI or e-shiten) contributes one **timing summary** when it
   ends (or when you close it after at least 100 frames): the p50/p90/p99/max of
   per-frame decode time, of the feed clock's age at local receipt and of the
   spacing between frames; the number of gaps over one second; the frame count;
@@ -118,7 +120,6 @@ from your own browser. They are credentials:
   public archive, permanently. `contribute=False` on `sbi.connect()` or
   `BRISK_CONTRIBUTE=0` keeps both the summary and any market recording local.
   The environment opt-out suppresses the interactive sharing questions as well.
-- An e-shiten session contributes nothing: no market data and no timing summary.
 
 ## Network metadata
 
