@@ -6,7 +6,9 @@ briskapi が返す Parquet（および CSV と JSON）の中身を、列ごと�
 2つあります。
 
 - **クラウド API**（`briskapi.Historical`、`brisk query`）：Databento の形のレコードで、
-  リクエストごとに1つのスキーマ。[クラウド API のレコード](#クラウド-api-のレコード)。
+  リクエストごとに1つのスキーマ。[クラウド API のレコード](#クラウド-api-のレコード)。`briskapi.Live` は
+  バーを除く同じレコードを、お使いのコンピューターのフィードからライブで返します。同じセッションなら、
+  列、型、値は同じです。
 - **お使いのコンピューター上の記録**（`brisk record`、`brisk pull`、`brisk live --output`）：
   NautilusTrader v2 の構成の Parquet テーブル4つのフォルダーで、デコーダーが出力したすべてを
   含みます。[記録](#記録)。
@@ -48,7 +50,8 @@ briskapi が返す Parquet（および CSV と JSON）の中身を、列ごと�
 | `symbol` | string | JPX の銘柄コード（`map_symbols=False` では省かれます） |
 
 レコードは時刻順（`ts_event`、次に `instrument_id`、次に `sequence`）に並びます。自分の複数の記録が
-重なっている場合も、各レコードは1回だけ現れます。
+重なっている場合も、各レコードは1回だけ現れます。`briskapi.Live` は、フィードがバッチを受け取った
+順に、各バッチのレコードをこの順で届けます。
 
 ### `trades`
 

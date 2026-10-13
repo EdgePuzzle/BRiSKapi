@@ -6,7 +6,9 @@ What the Parquet (and CSV and JSON) that briskapi gives you contains, column by 
 from two places:
 
 - **The cloud API** (`briskapi.Historical`, `brisk query`): records in Databento's shapes, one
-  schema per request. [Cloud API records](#cloud-api-records).
+  schema per request. [Cloud API records](#cloud-api-records). `briskapi.Live` gives the same
+  records, but the bars, live from the feed on your computer: the same columns, types and
+  values for the same session.
 - **Recordings on your computer** (`brisk record`, `brisk pull`, `brisk live --output`): a
   folder of four Parquet tables in NautilusTrader v2's layout, everything the decoder produced.
   [Recordings](#recordings).
@@ -47,7 +49,8 @@ Every schema but the bars starts with the same four columns and ends with `symbo
 | `symbol` | string | The JPX code (left out with `map_symbols=False`) |
 
 Records are in time order (`ts_event`, then `instrument_id`, then `sequence`). Where several
-of your recordings overlap, each record appears once.
+of your recordings overlap, each record appears once. `briskapi.Live` delivers them as the feed
+receives its batches, each batch's records in that order.
 
 ### `trades`
 

@@ -8,8 +8,9 @@ recordings. Status: phase 1 is built for 1.0 (see [Phases](#phases)); phases 2 a
 plans. It answers once `infra/deploy.py` has deployed the `brisk-recorder-query` function.
 Facts about Databento below were checked against its documentation and the `databento-python`
 source on 2026-10-13. The code is `query_engine.py`, `query_service.py` and
-`briskapi/_historical.py`; [ARCHITECTURE.md](../ARCHITECTURE.md) describes how it works inside
-and the [README](../README.md) how to use it.
+`briskapi/_historical.py`, with the schemas and their projections in `briskapi/records.py`
+(shared with `briskapi.Live`); [ARCHITECTURE.md](../ARCHITECTURE.md) describes how it works
+inside and the [README](../README.md) how to use it.
 
 Decided (2026-10-13):
 - our own formats (Parquet, CSV, JSON), not Databento's binary DBN;
@@ -34,7 +35,8 @@ Decided (2026-10-13):
   uploads.
 - **Cheap to run.** Serverless, reading only the Parquet row groups a request needs; no database.
 
-Non-goals: live streaming (the feed is `briskapi.connect`), other owners' records, SQL, DBN for
+Non-goals: live streaming from the cloud (live records come from the feed on your own computer,
+through `briskapi.Live`, in these same schemas but the bars), other owners' records, SQL, DBN for
 now.
 
 ## What Databento's historical API is, and what is built

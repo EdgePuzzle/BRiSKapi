@@ -9,19 +9,25 @@
     briskapi.pull(prefix)                      # or briskapi.load(path) / briskapi.record(...)
     briskapi.Ticker("7203").quote(at="08:59:59")
     briskapi.Market().imbalances(top=10).to_pandas()
+
+    live = briskapi.Live()                     # Databento-style records from `brisk live` on this computer
+    live.subscribe(dataset="XTKS.BRISK", schema="imbalance", symbols=["7203"])
+    for record in live: ...
+    briskapi.Historical().timeseries.get_range(...)   # the same records from your archive in the cloud
 """
 from __future__ import annotations
 
 from briskapi import cli as _cli
 from briskapi._archive import Archive
+from briskapi._gateway import Live, Record
 from briskapi._historical import Historical
 from briskapi._live import Feed, connect as _connect, record as _record, stream
 from briskapi._market import Market, Ticker
 from briskapi._recording import JST, BriskError, NotFoundError, Recording, Table
 
 __version__ = '1.0.1'
-__all__ = ['JST', 'Archive', 'BriskError', 'Feed', 'Historical', 'Market', 'NotFoundError', 'Recording', 'Table', 'Ticker',
-           'connect', 'consent', 'current', 'load', 'pull', 'record', 'recordings', 'stream']
+__all__ = ['JST', 'Archive', 'BriskError', 'Feed', 'Historical', 'Live', 'Market', 'NotFoundError', 'Record', 'Recording',
+           'Table', 'Ticker', 'connect', 'consent', 'current', 'load', 'pull', 'record', 'recordings', 'stream']
 
 _current: Recording | Feed | None = None
 

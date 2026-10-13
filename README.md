@@ -2,10 +2,10 @@
 
 [English](https://github.com/honvl/BRiSKapi/blob/main/README.md) | [日本語](https://github.com/honvl/BRiSKapi/blob/main/README.ja.md) | [Documentation](https://honvl.github.io/BRiSKapi/)
 
-An unofficial, pybrisk-style Python API and `brisk` command line for BRiSK auction
-data. Consume a live feed, query recordings at any point in time, keep them in your own
-private archive, and use BRiSK at SBI Securities or Tachibana e-shiten (BRiSK Next)
-with your own account, signing in with a passkey if you like. This
+An unofficial Python API and `brisk` command line for BRiSK auction data, with
+Databento-style `Live` and `Historical` clients. Consume a live feed, query recordings at any
+point in time, keep them in your own private archive, and use BRiSK at SBI Securities or
+Tachibana e-shiten (BRiSK Next) with your own account, signing in with a passkey if you like. This
 is an independent project, not affiliated with or endorsed by BRiSK, Tachibana,
 SBI, TSE or JPX.
 
@@ -22,6 +22,7 @@ SBI, TSE or JPX.
 | You want | Use | It reads |
 | --- | --- | --- |
 | Quotes, trades and auctions as they happen | `briskapi.connect()`, then `Ticker`/`Market` | Your live feed |
+| The same as Databento-style records (`trades`, `mbp-10`, `imbalance`, ...), in any program on this computer | `briskapi.Live()` | The feed `brisk live` runs here (no login of its own) |
 | A recording you have, offline or in NautilusTrader | `briskapi.load(dir)` or `briskapi.pull(prefix)`, then `Ticker`/`Market`; `brisk export` | That recording, exactly as recorded |
 | History across days, or OHLCV bars, without downloading | `briskapi.Historical()`, `brisk query` | Your uploads in the cloud (the demo for everyone) |
 | BRiSK's own bars, margin, turnover, lists, events | `Ticker.candles()`, `.margin()`, `Market().turnover()` and the like | Your broker's BRiSK servers (needs a login) |
@@ -42,7 +43,7 @@ recordings, across days, use `Historical` (`ohlcv-1s` to `ohlcv-1d`).
 
 The local calls and the cloud API name the same data differently (`indicative_price` locally,
 `ind_match_price` in the cloud, for example). [docs/data-format.md](https://github.com/honvl/BRiSKapi/blob/main/docs/data-format.md#local-and-cloud-names)
-maps one to the other.
+maps one to the other. `briskapi.Live` uses the cloud API's names and records.
 
 ## Install
 
@@ -79,6 +80,9 @@ What you record is then read through the other two APIs:
   you uploaded, merged across days, with OHLCV bars. Demo recordings aren't in `XTKS.BRISK`;
   everyone can query the same demo as `XTKS.BRISKDEMO`.
 
+While it runs, `brisk live` also serves its feed to `briskapi.Live()` on this computer
+([Live records](#live-records-databento-style)): the records as they arrive, not a recording.
+
 Without `--output`, `brisk live` keeps nothing on disk: each finished day goes to your
 [archive](#your-private-archive) and its local copy is removed. With uploads off as well
 (`--no-upload`, or `--no-upload-market-data` for a broker's market recording), that day isn't
@@ -111,6 +115,47 @@ the demo assets), `codes`, `speed` (`1` real time, `0` as fast as possible) and
 `history=True` (keep updates for `Ticker.history()`). Callbacks and iterators
 first receive each security's current quote, then every update in order. A slow
 consumer slows the feed instead of losing updates.
+
+## Live records (Databento-style)
+
+`brisk live` also serves its feed to other programs on this computer, as the records the
+cloud API returns. `briskapi.Live` is shaped like Databento's live client and needs no key or
+sign-in: only the feed signs in to your broker.
+
+```sh
+brisk live --sbi --quiet        # records, uploads and serves XTKS.BRISK until you stop it (--web: the demo, XTKS.BRISKDEMO)
+```
+
+```python
+import briskapi
+
+live = briskapi.Live()          # finds the feed running on this computer
+live.subscribe(dataset="XTKS.BRISK", schema="imbalance", symbols=["7203", "6758"])
+live.subscribe(dataset="XTKS.BRISK", schema="trades", symbols=["7203"], start=0)   # the day so far, then live
+for record in live:             # or live.add_callback(fn); live.start(); live.block_for_close()
+    print(record.schema, record.symbol, record.ts_event)
+```
+
+- **Schemas:** `trades`, `mbp-10`, `imbalance`, `definition` and `brisk-quotes`, with the same
+  columns and values as `Historical` returns for the same session. OHLCV bars come only from
+  the cloud.
+- **Where a session starts:** with the day's definitions, then each update as it arrives.
+  `start` (a time, a date, UTC nanoseconds, or 0 for everything the feed has) first replays
+  the feed's trading day from then: the feed has the day from when it started, plus the day's
+  trades its snapshot restored. `snapshot=True` begins `mbp-10`, `imbalance` or `brisk-quotes`
+  with each security's current quote (`flags` 32).
+- **Records** are dicts, also readable as attributes (`record.price`), with `record.schema`.
+  They come in the order the feed receives its batches; within a batch, in `Historical`'s
+  order. `add_callback(fn, exception_callback)` and `add_stream(path)` (JSON lines; Databento
+  writes DBN) take them too. `block_for_close(timeout)` waits for the session's end, and
+  `stop()` ends it. A session's subscriptions share one dataset and start together, so
+  subscribe before `start()`. `symbology_map` maps `instrument_id` to the code.
+- **Only this computer:** the feed listens on 127.0.0.1 and admits a session only with the key
+  it keeps, with its port, in an owner-only file (`~/.config/brisk/gateway/XTKS.BRISK.json`),
+  which `Live()` reads. Nothing it serves leaves your computer. A session that falls more than
+  1 GB behind is dropped rather than slowing the feed or its recording.
+- **Serving:** `brisk live` serves unless you pass `--no-gateway`; one feed per dataset at a
+  time. In Python, pass `gateway=True` to `briskapi.connect()` or `briskapi.brisk.connect()`.
 
 ## Recordings and your archive
 
@@ -310,7 +355,8 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 
 | Call | Returns |
 | --- | --- |
-| `briskapi.connect(...)` | Live `Feed`; becomes the default source |
+| `briskapi.connect(...)` | Live `Feed`; becomes the default source (`gateway=True` also serves it to `Live`) |
+| `briskapi.Live()` | Databento-style live records from the feed on this computer: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False)`, then iteration or `add_callback(fn)` / `add_stream(path)` with `start()` and `block_for_close(timeout)`; `stop()`, `symbology_map` ([above](#live-records-databento-style)) |
 | `Ticker(code).info()` | Name, lot size, tick type, base price and daily limits |
 | `Ticker(code).quote(at=None)` | Bid/ask with their quantities and orders, the ten best book levels per side (`bids`, `asks`) and of the closing-condition orders (`closing_bids`, `closing_asks`), the board's order totals, indicative price/volume, market-order and closing quantities, last trade, turnover, issue status and `special_quote` (side, price, when its timer ends) |
 | `Ticker(code).auction(at=None, closing=False)` | The auction's indicative state, market orders and board totals with `market_order_imbalance` (market buy minus sell); `closing=True` for the closing auction |
@@ -356,6 +402,7 @@ brisk sites | enroll | login | forget       # sign in to your broker's BRiSK wit
 brisk live --sbi --codes 7203               # BRiSK at SBI Securities; cookies from BRISK_SBI_COOKIES (JSON) or `brisk login`; --trace-protocol shows the handshake, wire details in BRISK_PROFILE
 brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; cookies from BRISK_ESHITEN_COOKIES (JSON) or `brisk login`
 brisk live --sbi --output days              # runs day after day; keeps each finished day in days/ (e.g. sbi_live_20261013_085800-153512) and prints a {"day": {...}} line on stderr
+brisk live --sbi --quiet                    # prints no quotes: records, uploads and serves briskapi.Live() (--no-gateway: serves nothing)
 brisk record --web --output recordings/s1   # record a replay (uploaded unless you opt out)
 brisk list --date 20210927 --source historical_mock   # your recordings (--timing: your timing reports; --deleted: what you deleted in the last 30 days)
 brisk pull PREFIX --output recordings/downloaded   # use a prefix returned by brisk list
@@ -376,8 +423,8 @@ Each command is the command-line form of a Python call:
 
 | Command | Python |
 | --- | --- |
-| `brisk live --web` (or `--cache DIR`) | `briskapi.connect(web=True)` |
-| `brisk live --sbi`, `--site e-shiten` | `brisk.login()`, then `brisk.connect()` |
+| `brisk live --web` (or `--cache DIR`) | `briskapi.connect(web=True, gateway=True)` (`--no-gateway`: without `gateway`) |
+| `brisk live --sbi`, `--site e-shiten` | `brisk.login()`, then `brisk.connect(gateway=True)` |
 | `brisk record` | `briskapi.record()` |
 | `brisk query` | `briskapi.Historical().timeseries.get_range()` |
 | `brisk list` (`--deleted`, `--timing`) | `briskapi.recordings()` (`Archive().deleted()`, `.timing()`) |
@@ -389,7 +436,9 @@ Each command is the command-line form of a Python call:
 `brisk live --sbi` and `--site e-shiten` run until you stop them, one recording per trading
 day. Unless you opt out, they upload each finished day's market recording and timing summary
 without asking; `--no-upload-market-data` stops uploading the recordings and `--no-upload` both
-(add `--output DIR` to keep them on disk). `brisk list --source sbi_live` (or `eshiten_live`) lists your broker recordings.
+(add `--output DIR` to keep them on disk). `brisk list --source sbi_live` (or `eshiten_live`) lists
+your broker recordings. Every `brisk live` also serves its feed to `briskapi.Live()` on this computer
+([Live records](#live-records-databento-style)) unless you pass `--no-gateway`.
 
 ## Your private archive
 
@@ -514,7 +563,9 @@ brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13 > toy
 ```
 
 The HTTP API behind both is described in
-[docs/cloud-api.md](https://github.com/honvl/BRiSKapi/blob/main/docs/cloud-api.md).
+[docs/cloud-api.md](https://github.com/honvl/BRiSKapi/blob/main/docs/cloud-api.md). The same
+records stream live, from the feed on your computer, through `briskapi.Live`
+([above](#live-records-databento-style)).
 
 ## More documentation
 

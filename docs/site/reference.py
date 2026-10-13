@@ -225,7 +225,8 @@ PYTHON = [
            'On the command line: `brisk live --web` (see [Recording](/guides/recording.md)).',
            'briskapi.connect(\n    web: bool = False,\n    cache: str | Path | None = None,\n    codes: list[str] | None = None,\n'
            '    speed: float = 1,\n    limit_frames: int | None = None,\n    upload: bool | None = None,\n    history: bool = False,\n'
-           '    node: str = "node",\n    timeout: float = 60,\n    output: str | Path | None = None,\n    on_day: Callable | None = None,\n) -> Feed',
+           '    node: str = "node",\n    timeout: float = 60,\n    output: str | Path | None = None,\n    on_day: Callable | None = None,\n'
+           '    gateway: bool = False,\n) -> Feed',
            [P('web', 'bool', 'Download the demo\'s assets from BRiSK\'s website.'),
             P('cache', 'str | Path | None', 'Use demo assets already downloaded here instead.'),
             P('codes', 'list[str] | None', 'Securities to decode (default: the whole market).'),
@@ -235,7 +236,8 @@ PYTHON = [
             P('history', 'bool', 'Keep every update and trade, for `Ticker.history()` and `.trades()`.'),
             P('timeout', 'float', 'Seconds to wait for the initial state.'),
             P('output', 'str | Path | None', 'Also keep the finished recording here.'),
-            P('on_day', 'Callable | None', 'Called with each finished day\'s result (kept, uploaded).')],
+            P('on_day', 'Callable | None', 'Called with each finished day\'s result (kept, uploaded).'),
+            P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).')],
            'A [`Feed`](/reference/python/feed_quotes.md), already holding every selected security\'s state.',
            {'Python': 'import briskapi\n\nfeed = briskapi.connect(web=True, codes=["7203"], upload=False)\n'
             'print(feed)\nprint(briskapi.Ticker("7203").quote()["indicative_price"])\nfeed.close()',
@@ -507,13 +509,15 @@ BROKER = [
            '`brisk live --sbi` or `--site e-shiten` (see [Recording](/guides/recording.md)).',
            'briskapi.brisk.connect(\n    codes: list[str] | None = None,\n    history: bool = False,\n    upload: bool | None = None,\n'
            '    upload_market_data: bool | None = None,\n    output: str | Path | None = None,\n    on_day: Callable | None = None,\n'
-           '    trace_protocol: bool = False,\n    timeout: float = 120,\n) -> Feed',
+           '    trace_protocol: bool = False,\n    timeout: float = 120,\n    gateway: bool = False,\n) -> Feed',
            [P('codes', 'list[str] | None', 'Securities to decode.'), P('history', 'bool', 'Keep every update and trade.'),
             P('upload', 'bool | None', '`False` keeps everything local.'),
             P('upload_market_data', 'bool | None', '`False` keeps the market recording local (the timing summary still uploads).'),
             P('output', 'str | Path | None', 'Keep each finished day here as `SOURCE_YYYYMMDD_FROM-TO`.'),
             P('on_day', 'Callable | None', 'Called with each finished day.'),
-            P('trace_protocol', 'bool', 'Print the connection steps, tokens redacted.')], 'A [`Feed`](/reference/python/feed_quotes.md).',
+            P('trace_protocol', 'bool', 'Print the connection steps, tokens redacted.'),
+            P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).')],
+           'A [`Feed`](/reference/python/feed_quotes.md).',
            {'Python': 'from briskapi import brisk\n\nbrisk.login()\nfeed = brisk.connect(codes=["7203"], output="days")\n'
             'for quote in feed.quotes("7203"):\n    print(quote["time"], quote["last_price"])',
             'CLI': 'brisk live --sbi --codes 7203 --output days'},

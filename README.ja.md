@@ -2,8 +2,8 @@
 
 [English](README.md) | [日本語](README.ja.md) | [ドキュメント](https://honvl.github.io/BRiSKapi/ja/)
 
-BRiSK の板寄せデータを扱う、非公式の pybrisk 風 Python API と `brisk`
-コマンドラインツールです。ライブフィードの購読、記録データの任意時点での照会、
+BRiSK の板寄せデータを扱う、非公式の Python API と `brisk` コマンドラインツールです。
+Databento 風の `Live` と `Historical` クライアントを備えています。ライブフィードの購読、記録データの任意時点での照会、
 自分専用の非公開アーカイブへの保存に加え、ご自身の口座で SBI証券や立花証券
 e支店（BRiSK Next）の BRiSK も利用できます（パスキーでのサインインにも対応）。本プロジェクトは独立したもので、BRiSK、立花証券、SBI証券、
 東京証券取引所（TSE）、日本取引所グループ（JPX）とは提携しておらず、承認も
@@ -22,6 +22,7 @@ e支店（BRiSK Next）の BRiSK も利用できます（パスキーでのサ�
 | したいこと | 使うもの | 読むもの |
 | --- | --- | --- |
 | 気配・約定・板寄せをリアルタイムで | `briskapi.connect()` のあと `Ticker`/`Market` | ライブフィード |
+| 同じものを Databento 風のレコード（`trades`、`mbp-10`、`imbalance` など）として、このコンピューター上のどのプログラムからでも | `briskapi.Live()` | このコンピューターで `brisk live` が動かしているフィード（自身のログインは不要） |
 | 手元の記録をオフラインで、または NautilusTrader で | `briskapi.load(dir)` か `briskapi.pull(prefix)` のあと `Ticker`/`Market`、`brisk export` | その記録（記録したとおり） |
 | 複数日にわたる履歴や OHLCV バーを、ダウンロードせずに | `briskapi.Historical()`、`brisk query` | クラウドにある自分のアップロード（デモは誰でも） |
 | BRiSK 自身のローソク足、信用残、売買代金、リスト、イベント | `Ticker.candles()`、`.margin()`、`Market().turnover()` など | 証券会社の BRiSK のサーバー（ログインが必要） |
@@ -42,7 +43,8 @@ e支店（BRiSK Next）の BRiSK も利用できます（パスキーでのサ�
 
 手元の呼び出しとクラウド API では、同じデータでも名前が異なります（たとえば手元の
 `indicative_price` はクラウドでは `ind_match_price`）。対応表は
-[docs/data-format.ja.md](docs/data-format.ja.md#手元とクラウドの名前)にあります。
+[docs/data-format.ja.md](docs/data-format.ja.md#手元とクラウドの名前)にあります。`briskapi.Live` は
+クラウド API の名前とレコードを使います。
 
 ## インストール
 
@@ -80,6 +82,9 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
   証券会社の記録の全日を日をまたいでまとめて読み、OHLCV バーも返します。デモの記録は
   `XTKS.BRISK` に入りません。同じデモは誰でも `XTKS.BRISKDEMO` として照会できます。
 
+動いている間、`brisk live` はフィードをこのコンピューターの `briskapi.Live()` にも配信します
+（[ライブのレコード](#ライブのレコードdatabento-風)。記録ではなく、いま流れているレコードです）。
+
 `--output` を指定しないと、`brisk live` はディスクに何も残しません。終わった日は
 [自分のアーカイブ](#自分専用のアーカイブ)に送られ、手元のコピーは削除されます。さらにアップロードも
 オフにすると（`--no-upload`、または証券会社の市場データの記録なら `--no-upload-market-data`）、
@@ -113,6 +118,48 @@ feed.wait()           # または feed.close()。`with briskapi.connect(...) as 
 イテレーターは、まず各銘柄の現在の気配を受け取り、その後すべての更新を順番
 どおりに受け取ります。受け取る側の処理が遅い場合、更新を捨てずにフィードの
 ほうが待ちます。
+
+## ライブのレコード（Databento 風）
+
+`brisk live` は、そのフィードをこのコンピューター上の他のプログラムにも、クラウド API が返すのと
+同じレコードとして配信します。`briskapi.Live` は Databento のライブクライアントと同じ形で、
+キーもサインインも要りません。証券会社にサインインするのはフィードだけです。
+
+```sh
+brisk live --sbi --quiet        # 止めるまで記録・アップロードし、XTKS.BRISK を配信（--web ならデモの XTKS.BRISKDEMO）
+```
+
+```python
+import briskapi
+
+live = briskapi.Live()          # このコンピューターで動いているフィードを見つける
+live.subscribe(dataset="XTKS.BRISK", schema="imbalance", symbols=["7203", "6758"])
+live.subscribe(dataset="XTKS.BRISK", schema="trades", symbols=["7203"], start=0)   # その日のここまで、続けてライブ
+for record in live:             # または live.add_callback(fn); live.start(); live.block_for_close()
+    print(record.schema, record.symbol, record.ts_event)
+```
+
+- **スキーマ:** `trades`、`mbp-10`、`imbalance`、`definition`、`brisk-quotes`。同じセッションなら
+  `Historical` が返すのと同じ列・同じ値です。OHLCV バーはクラウドからのみ得られます。
+- **セッションの始まり:** その日の銘柄定義、続いて届いた更新を順に受け取ります。`start`（時刻、
+  日付、UTC ナノ秒、またはフィードが持つすべてを表す 0）を指定すると、まずフィードのその取引日を
+  その時点から再生します。フィードが持っているのは、起動してからの分と、スナップショットが復元
+  したその日の約定です。`snapshot=True` を指定すると、`mbp-10`、`imbalance`、`brisk-quotes` を
+  各銘柄の現在の気配から始めます（`flags` は 32）。
+- **レコード**は辞書で、属性としても読めます（`record.price`）。スキーマは `record.schema` です。
+  フィードがバッチを受け取った順に届き、バッチ内は `Historical` と同じ順です。
+  `add_callback(fn, exception_callback)` と `add_stream(path)`（JSON Lines。Databento では DBN）
+  でも受け取れます。`block_for_close(timeout)` はセッションの終わりを待ち、`stop()` は終わらせます。
+  1つのセッションの購読は同じデータセットを共有し、一緒に始まるので、`start()` の前に購読して
+  ください。`symbology_map` は `instrument_id` から銘柄コードへの対応です。
+- **このコンピューターだけ:** フィードは 127.0.0.1 でのみ待ち受け、所有者だけが読めるファイル
+  （`~/.config/brisk/gateway/XTKS.BRISK.json`）にポート番号とともに保存したキーを持つセッション
+  だけを受け入れます。`Live()` はこのファイルを読みます。配信する内容がこのコンピューターの外に
+  出ることはありません。1 GB を超えて遅れたセッションは、フィードやその記録を遅らせる代わりに
+  切断されます。
+- **配信:** `brisk live` は `--no-gateway` を指定しない限り配信します。1つのデータセットを配信できる
+  フィードは同時に1つです。Python では `briskapi.connect()` か `briskapi.brisk.connect()` に
+  `gateway=True` を渡します。
 
 ## 記録データと自分のアーカイブ
 
@@ -314,7 +361,8 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 
 | 呼び出し | 戻り値 |
 | --- | --- |
-| `briskapi.connect(...)` | ライブの `Feed`（既定のデータ源になる） |
+| `briskapi.connect(...)` | ライブの `Feed`（既定のデータ源になる。`gateway=True` で `Live` にも配信） |
+| `briskapi.Live()` | このコンピューターのフィードから Databento 風のライブのレコード: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False)` のあと、イテレーション、または `add_callback(fn)` / `add_stream(path)` と `start()`、`block_for_close(timeout)`。`stop()`、`symbology_map`（[上記](#ライブのレコードdatabento-風)） |
 | `Ticker(code).info()` | 銘柄名、売買単位、呼値の種別、基準値、値幅制限 |
 | `Ticker(code).quote(at=None)` | 買い・売り気配とその数量・件数、板の各側の上位10本（`bids`、`asks`）と引け条件付き注文の上位10本（`closing_bids`、`closing_asks`）、板全体の注文合計、予想約定価格・数量、成行・引け条件付きの数量、直近の約定、売買代金、銘柄の状態、`special_quote`（特別気配の側・価格・タイマーの終了時刻） |
 | `Ticker(code).auction(at=None, closing=False)` | 板寄せの予想状態、成行注文、板の合計と `market_order_imbalance`（成行の買い数量 − 売り数量）。`closing=True` で引けの板寄せ |
@@ -360,6 +408,7 @@ brisk sites | enroll | login | forget       # Chrome 経由のパスキーで証
 brisk live --sbi --codes 7203               # SBI証券の BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_PROFILE）
 brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）または `brisk login` が保存したもの
 brisk live --sbi --output days              # 日をまたいで動き続け、終わった日ごとに days/ に残し（例: sbi_live_20261013_085800-153512）、stderr に {"day": {...}} を1行出力
+brisk live --sbi --quiet                    # 気配を出力せず、記録・アップロードと briskapi.Live() への配信だけ（--no-gateway で配信しない）
 brisk record --web --output recordings/s1   # デモを記録（オプトアウトしない限りアップロード）
 brisk list --date 20210927 --source historical_mock   # 自分の記録（--timing で自分のタイミングレポート、--deleted で過去30日間に削除したもの）
 brisk pull PREFIX --output recordings/downloaded   # brisk list が返した prefix を使う
@@ -380,8 +429,8 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 
 | コマンド | Python |
 | --- | --- |
-| `brisk live --web`（または `--cache DIR`） | `briskapi.connect(web=True)` |
-| `brisk live --sbi`、`--site e-shiten` | `brisk.login()` のあと `brisk.connect()` |
+| `brisk live --web`（または `--cache DIR`） | `briskapi.connect(web=True, gateway=True)`（`--no-gateway` なら `gateway` なし） |
+| `brisk live --sbi`、`--site e-shiten` | `brisk.login()` のあと `brisk.connect(gateway=True)` |
 | `brisk record` | `briskapi.record()` |
 | `brisk query` | `briskapi.Historical().timeseries.get_range()` |
 | `brisk list`（`--deleted`、`--timing`） | `briskapi.recordings()`（`Archive().deleted()`、`.timing()`） |
@@ -394,7 +443,8 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 オプトアウトしない限り、終わった日ごとの市場データの記録とタイミングの要約を確認なしで
 アップロードします。`--no-upload-market-data` で記録を、`--no-upload` で両方をアップロードしなくなります
 （ディスクに残すには `--output DIR`）。`brisk list --source sbi_live`（または `eshiten_live`）で自分の証券会社の記録を
-一覧できます。
+一覧できます。どの `brisk live` も、`--no-gateway` を指定しない限り、このコンピューターの
+`briskapi.Live()` にフィードを配信します（[ライブのレコード](#ライブのレコードdatabento-風)）。
 
 ## 自分専用のアーカイブ
 
@@ -513,7 +563,8 @@ path=None)` はストアを返します。`path` を指定すると Parquet フ�
 brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13 > toyota-1m.csv
 ```
 
-その裏にある HTTP API は [docs/cloud-api.ja.md](docs/cloud-api.ja.md)に説明があります。
+その裏にある HTTP API は [docs/cloud-api.ja.md](docs/cloud-api.ja.md)に説明があります。同じ
+レコードは、手元のフィードから `briskapi.Live` でライブでも受け取れます（[上記](#ライブのレコードdatabento-風)）。
 
 ## その他のドキュメント
 

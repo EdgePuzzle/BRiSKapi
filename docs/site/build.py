@@ -39,6 +39,7 @@ SECTIONS = [
     ('guides/install.md', 'Install', 'インストール'),
     ('guides/recording.md', 'Recording', '記録する'),
     ('guides/live-feed.md', 'Live feed', 'ライブフィード'),
+    ('guides/live-records.md', 'Live records', 'ライブのレコード'),
     ('guides/recordings.md', 'Recordings', '記録データ'),
     ('guides/broker.md', 'Your broker\'s BRiSK', '証券会社の BRiSK'),
     ('guides/passkey.md', 'Passkey sign-in', 'パスキーでのサインイン'),
@@ -359,7 +360,7 @@ def nav_yaml():
 
     guides = {s[0].removeprefix('guides/').removesuffix('.md'): item(s[1], s[0], 1) for s in SECTIONS if s}
     lines = [item('Home', 'index.md', 0), '- "Getting started":']
-    lines += [guides[name] for name in ('which-api', 'install', 'recording', 'live-feed', 'recordings', 'broker', 'passkey')]
+    lines += [guides[name] for name in ('which-api', 'install', 'recording', 'live-feed', 'live-records', 'recordings', 'broker', 'passkey')]
     lines += ['- "Your archive":', guides['archive'], guides['cloud']]
     lines += ['- "Reference":', guides['cli'], guides['api-overview'], item(DOCUMENTS[0][2], DOCUMENTS[0][1], 1)]
     for title, methods in reference.REFERENCE:

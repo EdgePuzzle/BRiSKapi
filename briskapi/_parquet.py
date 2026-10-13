@@ -304,14 +304,22 @@ class Columns:
         except (TypeError, OverflowError) as error:  # Arrow's own type errors are TypeErrors
             raise ValueError(f'Invalid recording value: {error}') from None
 
-    def trade_ids(self):
-        """v2 trade IDs: the issue's frame number and the trade's place among that frame's trades."""
+    def trade_ids(self, carry=None):
+        """v2 trade IDs: the issue's frame number and the trade's place among that frame's trades. `carry`
+        ({issue_id: (frame, place)}, updated) continues the places of a stream read a batch at a time."""
         if getattr(self, '_trade_ids', None) is None:
             ids, key, place = [], None, 0
             for issue, frame in zip(self.t['issue_id'].tolist(), self.t['frame'].tolist()):
-                place = place + 1 if (issue, frame) == key else 0
+                if (issue, frame) == key:
+                    place += 1
+                elif carry is not None and carry.get(issue, (None,))[0] == frame:
+                    place = carry[issue][1] + 1
+                else:
+                    place = 0
                 key = (issue, frame)
                 ids.append(f'{frame}-{place}')
+                if carry is not None:
+                    carry[issue] = (frame, place)
             self._trade_ids = np.array(ids, dtype=object)
         return self._trade_ids
 
@@ -608,6 +616,24 @@ def check(directory):
 def write(batches, directory):
     """Encode decoder batches (in order) as a recording directory."""
     Columns.from_batches(batches).write(directory)
+
+
+def stream_tables(batches, carry=None, depths=True, trades=True):
+    """(depths, trades) tables of decoder batches, the first a bootstrap (its master may be empty), as a
+    recording holds their rows but in arrival order; None for a table not asked for. `carry` continues
+    trade IDs across calls (see Columns.trade_ids)."""
+    columns = Columns.from_batches(batches)
+    midnight = midnight_ns(columns.trading_date)
+    if trades:
+        columns.trade_ids(carry)
+    return (columns._depths(midnight) if depths else None,
+            columns._trades(midnight, slice(None)) if trades else None)
+
+
+def equity_table(bootstrap):
+    """The equity table of a bootstrap batch's master."""
+    master = sorted(bootstrap['master'], key=lambda m: m['issue_id'])
+    return Columns(None, None, None, master, [bootstrap], None, None)._equity(midnight_ns(bootstrap['trading_date']))
 
 
 def read(directory):

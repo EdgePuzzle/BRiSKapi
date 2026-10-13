@@ -14,7 +14,7 @@ import threading
 from typing import Callable, Iterator
 import warnings
 
-from briskapi import _parquet, cli, schema
+from briskapi import _gateway, _parquet, cli, schema
 from briskapi._recording import BriskError, NotFoundError, Recording, Table, micros, quote_view
 from briskapi.timing import TimingStats
 
@@ -88,14 +88,17 @@ class Feed:
     Consumers apply backpressure: a slow `quotes()` iterator or callback slows the
     feed instead of dropping updates. A complete session is uploaded to your private
     archive automatically, by default or as you chose with briskapi.consent (see
-    PRIVACY.md); pass upload=False to keep it local.
+    PRIVACY.md); pass upload=False to keep it local. gateway=True also serves the feed to
+    briskapi.Live on this computer (see briskapi._gateway); `feed.gateway` is then that
+    server, or None (with a warning) if another feed already serves the same dataset.
     """
 
     manifest = None
+    gateway = None
 
     def __init__(self, web=False, cache=None, codes=None, speed=1, limit_frames=None, upload=None,
                  history=False, node='node', *, command=None, env=None, timing=None, upload_market_data=None, output=None,
-                 on_day=None):
+                 on_day=None, gateway=False):
         # A broker session (SBI, e-shiten) uploads its timing summary and its market recording;
         # upload_market_data=False keeps the market recording local.
         if upload_market_data is not None and (command is None or timing not in schema.BROKER_TRANSPORT):
@@ -127,10 +130,17 @@ class Feed:
         self._changed = threading.Condition()
         self._closing = False
         self.status, self.error, self.seq, self.uploaded = 'starting', None, -1, None
-        self._tmp = tempfile.TemporaryDirectory() if self._package or self._output else None
+        # The day's batches are kept in a file while it runs: to package it, and for a gateway's replays.
+        self._tmp = tempfile.TemporaryDirectory() if self._package or self._output or gateway else None
         self._worker = ThreadPoolExecutor(1, thread_name_prefix='brisk-day')
         self._process = (subprocess.Popen(command, stdout=subprocess.PIPE, env=env) if command
                          else _decoder(web, cache, codes, speed, limit_frames, node))
+        if gateway:
+            try:
+                # A broker's stream is XTKS.BRISK, as its recordings are in the cloud API; the demo's XTKS.BRISKDEMO.
+                self.gateway = _gateway.Gateway('XTKS.BRISK' if command else 'XTKS.BRISKDEMO')
+            except BriskError as error:
+                warnings.warn(str(error))
         self._thread = threading.Thread(target=self._run, name='brisk-feed', daemon=True)
         self._thread.start()
 
@@ -314,10 +324,14 @@ class Feed:
                     self._stats = TimingStats(self._timing) if self._timing else None
                 if day:
                     day[1].write(line)
+                    if self.gateway:
+                        day[1].flush()   # a replay reads the file up to this batch
                 ended = batch['type'] == 'end'
                 if self._stats:
                     self._stats.add(batch)
                 self._apply(batch, new_day=first and days > 1)
+                if self.gateway:
+                    self.gateway.publish(batch, line, day and day[0] / 'events.jsonl')
                 if ended:
                     if day:
                         day[1].close()
@@ -379,12 +393,14 @@ class Feed:
         for *_, end in listeners:
             if end:
                 end()
+        if self.gateway:
+            self.gateway.close(self.status, self.error)
 
     def _finish_day(self, directory, stats):
         """Package a finished day, keep it in `output` and upload it and its timing summary, as chosen."""
         result = {'trading_date': self.trading_date, 'name': None, 'path': None, 'uploaded': None, 'timing_uploaded': None}
         try:
-            if directory:
+            if directory and (self._package or self._output):
                 package = directory / 'package'
                 try:
                     m = cli.package(directory / 'events.jsonl', package)
@@ -425,10 +441,12 @@ class Feed:
 
 
 def connect(web=False, cache=None, codes=None, speed=1, limit_frames=None, upload=None, history=False,
-            node='node', timeout=60, output=None, on_day=None) -> Feed:
+            node='node', timeout=60, output=None, on_day=None, gateway=False) -> Feed:
     """Start a live feed and return once its bootstrap state is available. `output` keeps the finished
-    recording there (as SOURCE_YYYYMMDD_FROM-TO); `on_day(result)` is called once it is kept and uploaded."""
-    feed = Feed(web, cache, codes, speed, limit_frames, upload, history, node, output=output, on_day=on_day)
+    recording there (as SOURCE_YYYYMMDD_FROM-TO); `on_day(result)` is called once it is kept and uploaded.
+    gateway=True also serves it to briskapi.Live on this computer."""
+    feed = Feed(web, cache, codes, speed, limit_frames, upload, history, node, output=output, on_day=on_day,
+                gateway=gateway)
     try:
         return feed.ready(timeout)
     except BaseException:

@@ -7,7 +7,8 @@
 記録を照会できます。状況: フェーズ 1 は 1.0 向けに実装済みで（[フェーズ](#フェーズ)を参照）、
 フェーズ 2 と 3 は計画です。`infra/deploy.py` が `brisk-recorder-query` 関数をデプロイすると応答します。
 以下の Databento に関する事実は、2026-10-13 に Databento のドキュメントと `databento-python` の
-ソースで確認しました。コードは `query_engine.py`、`query_service.py`、`briskapi/_historical.py` です。
+ソースで確認しました。コードは `query_engine.py`、`query_service.py`、`briskapi/_historical.py` で、
+スキーマとその射影は `briskapi/records.py`（`briskapi.Live` と共通）にあります。
 内部の仕組みは [ARCHITECTURE.md](../ARCHITECTURE.md)（英語）、使い方は [README](../README.ja.md) に
 あります。
 
@@ -35,7 +36,8 @@
 - **低コストで運用できる。** サーバーレスで、リクエストに必要な Parquet の行グループだけを読み、
   データベースはありません。
 
-対象外: ライブストリーミング（フィードは `briskapi.connect`）、ほかの owner の記録、SQL、当面は DBN も。
+対象外: クラウドからのライブストリーミング（ライブのレコードは、お使いのコンピューターのフィードから
+`briskapi.Live` で、バーを除く同じスキーマで届きます）、ほかの owner の記録、SQL、当面は DBN も。
 
 ## Databento の履歴データ API と、実装した範囲
 
