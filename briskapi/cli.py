@@ -30,7 +30,7 @@ DECODER = PACKAGE / 'decoder' / 'decoder.cjs'
 MIN_NODE = 22
 LICENSES = ('CC0-1.0', 'CC-BY-4.0')
 # Bump with any PRIVACY.md change to what is collected; saved choices then lapse.
-POLICY_VERSION = 4
+POLICY_VERSION = 5
 NOTICE = '''\
 Sessions are contributed to the shared public BRiSK archive automatically.
 After each clean, complete demo replay the contribution contains:
@@ -43,7 +43,8 @@ time, data age and frame spacing percentiles, stalls, frame count, date and star
 minute. At the start of each interactive broker capture, a separate question asks
 whether to publish its decoded market recording too; Enter accepts for that session
 only. Scripts can opt in with --share-market-data or sbi.connect(share_market_data=True). This
-publishes its securities master, prices, quantities, codes and per-frame timing.
+publishes its securities master, prices, quantities, the ten best order-book levels on
+each side, codes and per-frame timing.
 Cookies, tokens and connection diagnostics are never published.
 Contributions are public and permanent. Your IP address is used only for
 upload rate limiting. No account, file, hostname or system details are sent.

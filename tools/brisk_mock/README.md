@@ -113,15 +113,27 @@ must be measured before production use.
 ## Data and timing
 
 Each quote preserves `issue_id`, the complete master `code`, frame and source
-time, plus bid/ask, indicative price and matched volume, indicative opening price,
-market-buy/sell quantities, separate closing-condition market quantities, special
-quote flags/time, auction reference price and traded volume. Prices suffixed
-`price10` are tenths of a yen; a zero price is the vendor's unavailable sentinel.
-The indicative matching price excludes closing-condition orders; closing
-indicative fields remain separate. `auction_reference_price10` is a reference
-field, not a second estimate of the opening price. Buy/sell and quote enums are
-preserved as raw vendor values; no unverified tradability or execution rule is
-derived from them. This is compact auction data, not a full-depth export.
+time, plus bid/ask with the quantity and order count at each, indicative price and
+matched volume, indicative opening price, market-buy/sell quantities, separate
+closing-condition market quantities, special quote flags/time, the reference price,
+traded volume and turnover (`turnover10`, tenths of a yen: price times shares, so
+`turnover10 / volume / 10` is the VWAP in yen), and the issue status (0-7, the
+decoder's; 1 is pre-open, 2 the morning session). `bid_levels` and `ask_levels` hold
+each side's ten best prices that have orders, best first, as `[price10, quantity,
+orders]`. Prices suffixed `price10` are tenths of a yen; a zero price is the vendor's
+unavailable sentinel. The indicative matching price excludes closing-condition
+orders; closing indicative fields remain separate. `reference_price10` is the price
+the decoder's indicative matching starts from (the special quote's price, otherwise
+the last, otherwise the base price), not a second estimate of the opening price; in
+continuous trading it equals the last price. `indicative_imbalance_side` and
+`closing_indicative_imbalance_side` are 1 when the sell quantity at that indicative
+price exceeds the buy quantity (or nothing matches), else 0. Buy/sell and quote enums
+are preserved as raw vendor values; no unverified tradability or execution rule is
+derived from them. Policy version 5 renamed `auction_reference_price10` and
+`indicative_side` to these names, and added the book, turnover, the closing
+imbalance side and SBI's issue status. An issue whose quote the decoder can't read
+(its state for that issue is inconsistent) is listed in the batch's
+`skipped_issues` instead, until it updates.
 
 `source_time_us` is microseconds since JST midnight on `trading_date`. Its origin
 is the decoder's feed clock, not an independently established exchange clock.

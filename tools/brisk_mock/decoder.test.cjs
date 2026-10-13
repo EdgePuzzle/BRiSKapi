@@ -5,7 +5,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { Decoder, QuoteHistory, frames, u64, looseU64, parseMasterFile, checkMasterFile, loadAssets, replay, main, parseStockView, stockViewShift } = require('../../briskapi/decoder/decoder.cjs');
+const { Decoder, QuoteHistory, frames, u64, looseU64, parseMasterFile, checkMasterFile, loadAssets, replay, main, parseStockView, stockViewShift,
+  scheduleArgs, SCHEDULE_FIELDS } = require('../../briskapi/decoder/decoder.cjs');
 const cache = process.env.BRISK_MOCK_CACHE;
 
 function frame(time, bytes = Buffer.from([1])) {
@@ -123,17 +124,20 @@ test('CLI emits JSON only and reports failures', { skip: !cache }, () => {
 // literally, from two independent parsers, so they cross-check the shift used by the code:
 //   16000: the vendor client's own getStockView (public Next demo bundle), n = 6 * ohlcLength
 //   18000: an independent parser of SBI's current build, which reads the same
-//          fields one word lower (the header word is gone)
-const FIELDS_16000 = n => ({ last_price10: [1], open_price10: [2], volume: [n + 3, n + 4], bid_price10: [n + 7],
-  ask_price10: [n + 8], indicative_price10: [n + 9], indicative_volume: [n + 10, n + 11], indicative_side: [n + 12],
-  closing_indicative_price10: [n + 13], closing_indicative_volume: [n + 14, n + 15], source_time_us: [n + 17, n + 18],
+//          fields one word lower (the header word, the numeric code, is gone), as SBI's
+//          March build's own _getStockView writes them (turnover and the closing side too)
+const FIELDS_16000 = n => ({ last_price10: [1], open_price10: [2], volume: [n + 3, n + 4], turnover10: [n + 5, n + 6],
+  bid_price10: [n + 7], ask_price10: [n + 8], indicative_price10: [n + 9], indicative_volume: [n + 10, n + 11],
+  indicative_imbalance_side: [n + 12], closing_indicative_price10: [n + 13], closing_indicative_volume: [n + 14, n + 15],
+  closing_indicative_imbalance_side: [n + 16], source_time_us: [n + 17, n + 18],
   frame: [n + 19], max_frame: [n + 20], quote_flag: [n + 21], quote_side: [n + 22],
-  special_quote_time_us: [n + 23, n + 24], indicative_open_price10: [n + 32], auction_reference_price10: [n + 35] });
-const FIELDS_18000 = n => ({ last_price10: [0], open_price10: [1], volume: [n + 2, n + 3], bid_price10: [n + 6],
-  ask_price10: [n + 7], indicative_price10: [n + 8], indicative_volume: [n + 9, n + 10], indicative_side: [n + 11],
-  closing_indicative_price10: [n + 12], closing_indicative_volume: [n + 13, n + 14], source_time_us: [n + 16, n + 17],
+  special_quote_time_us: [n + 23, n + 24], indicative_open_price10: [n + 32], reference_price10: [n + 35] });
+const FIELDS_18000 = n => ({ last_price10: [0], open_price10: [1], volume: [n + 2, n + 3], turnover10: [n + 4, n + 5],
+  bid_price10: [n + 6], ask_price10: [n + 7], indicative_price10: [n + 8], indicative_volume: [n + 9, n + 10],
+  indicative_imbalance_side: [n + 11], closing_indicative_price10: [n + 12], closing_indicative_volume: [n + 13, n + 14],
+  closing_indicative_imbalance_side: [n + 15], source_time_us: [n + 16, n + 17],
   frame: [n + 18], max_frame: [n + 19], quote_flag: [n + 20], quote_side: [n + 21],
-  special_quote_time_us: [n + 22, n + 23], indicative_open_price10: [n + 31], auction_reference_price10: [n + 34] });
+  special_quote_time_us: [n + 22, n + 23], indicative_open_price10: [n + 31], reference_price10: [n + 34] });
 
 function readWith(fields, words) {
   return Object.fromEntries(Object.entries(fields).map(([name, at]) =>
@@ -273,7 +277,7 @@ test('boot base prices change the master limits; counts are reported', { skip: !
   assert.equal(decoder.applyBasePrice(), 0, 'nothing is queued afterwards');
 });
 
-test('malformed or unknown boot data fails loudly; a special quote for a lettered code is listed, not sent',
+test('malformed or unknown boot data fails loudly; a special quote for an issue not in the master is listed, not sent',
   { skip: !cache }, async () => {
   const assets = loadAssets(cache);
   const base = { issue_code: '7203', base_price10: 1, limit_down10: 1, limit_up10: 2 };
@@ -281,10 +285,143 @@ test('malformed or unknown boot data fails loudly; a special quote for a lettere
     /base_prices names issue code 0000, which is not in the master/);
   await assert.rejects(Decoder.create(assets, { boot: { base_prices: [{ ...base, limit_up10: undefined }] } }),
     /Boot limit_up10 is not a number/);
-  // How the decoder takes 130A is not known; failing would stop every session whose boot names one.
+  // The demo's 2021 master has no 130A; failing would stop every session whose boot names a stale issue.
   const decoder = await Decoder.create(assets, { boot: { exceptional_sq: [{ buy_sell: 'S', jump_range: 1, jump_sec: 1,
     issue_code: '130A', quote_limit_down: 1, quote_limit_up: 2 }] } });
   assert.deepEqual(decoder.boot, { exceptional_sq: 0, base_prices: 0, applied: 0, skipped_exceptional_sq: ['130A'] });
+});
+
+test('a special quote names its issue by code in the demo\'s build and by index in the 2026 builds', () => {
+  const master = [{ code: '1301', issue_id: 0 }, { code: '167A', issue_id: 1 }, { code: '7203', issue_id: 2 }];
+  const sq = issue_code => ({ buy_sell: 'B', jump_range: 1, jump_sec: 180, issue_code, quote_limit_down: 1, quote_limit_up: 2 });
+  const push = sqIssue => {
+    const issues = [];
+    const host = { master, id: 7, sqIssue, stderr: { invalidIssueCode: 0 }, basePriceQueue: new Set(), applyBasePrice: () => 0,
+      w: { _pushSQ: (id, issue) => issues.push(issue) } };
+    const boot = Decoder.prototype.applyBoot.call(host, { exceptional_sq: ['167A', '7203', '1301', '9999'].map(sq) });
+    return { issues, skipped: boot.skipped_exceptional_sq };
+  };
+  // Given a code, a 2026 build attaches the special quote to the issue at that index (1301 to 8283's).
+  assert.deepEqual(push('index'), { issues: [1, 2, 0], skipped: ['9999'] });
+  assert.deepEqual(push('code'), { issues: [7203, 1301], skipped: ['167A', '9999'] });
+});
+
+test('a special quote the decoder can\'t place stops the session', { skip: !cache }, async () => {
+  // The decoder reports it only on stderr ("Invalid Issue Code"); here the demo's build is given an index.
+  const decoder = await Decoder.create(loadAssets(cache));
+  decoder.sqIssue = 'index';
+  assert.throws(() => decoder.applyBoot({ exceptional_sq: [{ buy_sell: 'B', jump_range: 1, jump_sec: 180, issue_code: '1301',
+    quote_limit_down: 1, quote_limit_up: 2 }] }), /rejected 1 of the boot's special quotes as an invalid issue code/);
+});
+
+test('a frame the decoder can\'t parse becomes one readable error', { skip: !cache }, async () => {
+  // A parse error escapes the decoder as a bare number (the address of the C++ exception).
+  const assets = loadAssets(cache);
+  const decoder = await Decoder.create(assets);
+  decoder.start(frames(assets['ws.dat']).next().value.data);
+  assert.throws(() => decoder.feed(Buffer.from('<html>')), /^Error: A 6-byte frame starting 3c68746d6c3e: the decoder failed \(Invalid Header\)$/);
+});
+
+test('a decoder that stops decoding stops the session, naming the frame after which it did', { skip: !cache }, async () => {
+  // SBI's recording holds this frame every 40 s; after it the decoder's parser never finds a message again.
+  const assets = loadAssets(cache);
+  const decoder = await Decoder.create(assets);
+  const stream = frames(assets['ws.dat']);
+  decoder.start(stream.next().value.data);
+  decoder.feed(Buffer.from('99eb2c6a07adca97a179aaed6de6ad', 'hex'));
+  assert.throws(() => { for (let n = 0; n < 10; n++) decoder.feed(stream.next().value.data); },
+    /The decoder stopped decoding after a 15-byte frame starting 99eb2c6a07adca97a179aaed6de6ad: the frames since apply no update/);
+});
+
+test('a decoder trap names the issue and leaves the decoder\'s stack where it was', { skip: !cache }, async () => {
+  // Without its snapshot, an issue's updates take its order quantities below zero, and reading them traps.
+  // (Its book, garbage too, can take the decoder seconds to read, and isn't what is tested here.)
+  const assets = loadAssets(cache);
+  const decoder = await Decoder.create({ ...assets, 'snapshot.dat': Buffer.alloc(0) });
+  decoder.book = () => ({});
+  const stream = frames(assets['ws.dat']);
+  decoder.feed(stream.next().value.data);
+  decoder.begin();
+  const stack = decoder.w.stackSave();
+  let error = null;
+  for (let n = 0; n < 50 && !error; n++) {
+    decoder.feed(stream.next().value.data);
+    for (const id of decoder.changed()) { try { decoder.quote(id); } catch (e) { error = e; break; } }
+  }
+  assert.match(error?.message, /^The quote for \d+: the decoder trapped \(float unrepresentable in integer range\); its state is inconsistent/);
+  assert.equal(decoder.w.stackSave(), stack);
+});
+
+test('an issue whose quote traps is skipped, and read again only once its frame number moves', { skip: !cache }, async () => {
+  const assets = loadAssets(cache);
+  const decoder = await Decoder.create(assets);
+  const stream = frames(assets['ws.dat']);
+  decoder.start(stream.next().value.data);
+  const toyota = decoder.master.find(m => m.code === '7203').issue_id;
+  // A trap as the decoder raises it, on Toyota only, counting the attempts.
+  let reads = 0;
+  const readQuote = decoder.readQuote.bind(decoder);
+  decoder.readQuote = (id, m) => {
+    if (id !== toyota) return readQuote(id, m);
+    reads++;
+    throw Object.assign(new Error('float unrepresentable in integer range'), { name: 'RuntimeError' });
+  };
+  const { quotes, skipped } = decoder.quotes([toyota, 0, 1]);
+  assert.deepEqual([quotes.map(q => q.issue_id), skipped, reads], [[0, 1], [toyota], 1]);
+  assert.deepEqual(decoder.quotes([toyota]).skipped, [toyota]);
+  assert.equal(reads, 1, 'not read again at the same frame: the decoder would return stale fields');
+  const frame = decoder.frameNumbers()[toyota];
+  while (decoder.frameNumbers()[toyota] === frame) decoder.feed(stream.next().value.data);
+  decoder.readQuote = readQuote;
+  assert.deepEqual(decoder.quotes([toyota]), { quotes: [decoder.quote(toyota)], skipped: [] }, 'read again once it updates');
+  // Any other error still ends the session.
+  decoder.readQuote = () => { throw new Error('Stock view unavailable: 7203'); };
+  assert.throws(() => decoder.quotes([toyota]), /Stock view unavailable/);
+});
+
+test('a quote\'s book holds the best ten prices of each side, as reading the whole board gives them', { skip: !cache }, async () => {
+  const assets = loadAssets(cache);
+  const decoder = await Decoder.create(assets);
+  const stream = frames(assets['ws.dat']);
+  decoder.start(stream.next().value.data);
+  for (let n = 0; n < 2500; n++) { decoder.feed(stream.next().value.data); decoder.changed(); }
+  let crossed = 0, full = 0;
+  for (let issue = 0; issue < decoder.master.length; issue += 7) {
+    const m = decoder.master[issue], q = decoder.quote(issue);
+    const index = price => decoder.w._getTickPrice10ToIndex(decoder.id, m.tick_type, price);
+    const low = index(m.limit_down10);
+    const { rows } = decoder.rows(issue, low, index(m.limit_up10) - low + 1);
+    assert.deepEqual(q.bid_levels, rows.filter(r => r[1]).reverse().slice(0, 10).map(r => [r[0], r[1], r[2]]), m.code);
+    assert.deepEqual(q.ask_levels, rows.filter(r => r[3]).slice(0, 10).map(r => [r[0], r[3], r[4]]), m.code);
+    const at = rows.find(r => r[0] === q.bid_price10);
+    assert.deepEqual([q.bid_quantity, q.bid_orders], at ? [at[1], at[2]] : [0, 0], m.code);
+    crossed += q.bid_levels.length > 0 && q.ask_levels.length > 0 && q.bid_levels[0][0] >= q.ask_levels[0][0];
+    full += q.bid_levels.length === 10;
+  }
+  assert.ok(crossed > 10 && full > 100, `crossed ${crossed}, full ${full}`);
+});
+
+test('a catch-up must bring exactly the lagging issues to the stream\'s first frame', () => {
+  const lagging = [{ issue_id: 1, from: 10, to: 12 }, { issue_id: 3, from: 5, to: 9 }];
+  const catchUp = after => {
+    let pushed = false;
+    const host = { push() { pushed = true; }, frameNumbers: () => (pushed ? after : [7, 10, 4, 5]) };
+    return () => Decoder.prototype.catchUp.call(host, Buffer.alloc(0), lagging);
+  };
+  assert.doesNotThrow(catchUp([7, 12, 4, 9]));
+  assert.throws(catchUp([7, 12, 4, 8]), /^Error: Catch-up left 1 issues behind the stream \(first: issue 3, frame 8, stream starts at 9\)$/);
+  // The decoder takes a reply twice, or a stray update, without complaint.
+  assert.throws(catchUp([7, 14, 4, 13]), /Catch-up took issue 1 to frame 14, but the stream starts at 12: the reply repeats or misplaces updates/);
+  assert.throws(catchUp([7, 12, 5, 9]), /Catch-up took issue 2 to frame 5, but it was not behind \(frame 4\)/);
+});
+
+test('the schedule\'s sq_jump_interval reaches the decoder in microseconds', () => {
+  const schedule = Object.fromEntries(SCHEDULE_FIELDS.map((key, k) => [key, (8 + k) * 3600e6]));
+  assert.deepEqual(scheduleArgs({ ...schedule, sq_jump_interval: 180 }), [...SCHEDULE_FIELDS.slice(0, -1).map(key => schedule[key]), 180e6]);
+  // A value already in microseconds (or none) is refused rather than scaled into days.
+  for (const sq_jump_interval of [180e6, 0]) {
+    assert.throws(() => scheduleArgs({ ...schedule, sq_jump_interval }), /sq_jump_interval .* is not a number of seconds/);
+  }
 });
 
 test('a host\'s master check runs before boot data is matched to the master', { skip: !cache }, async () => {
@@ -300,9 +437,9 @@ test('a host\'s master check runs before boot data is matched to the master', { 
 });
 
 // A master file record as the demo's and SBI's files hold them (self-authored values).
-function masterRecord({ code, base, up, down, type = '0111', lot }) {
+function masterRecord({ code, tick = 1, base, up, down, type = '0111', lot }) {
   const r = Buffer.alloc(180, 0x20);
-  r.writeUInt32LE(0x1e000018, 0); r.writeUInt32LE(base, 4); r.writeUInt32LE(up, 8); r.writeUInt32LE(down, 12);
+  r.writeUInt32LE((0x18000018 | (tick << 25)) >>> 0, 0); r.writeUInt32LE(base, 4); r.writeUInt32LE(up, 8); r.writeUInt32LE(down, 12);
   r.write(type, 40, 'latin1'); r.write(code, 50, 'latin1');
   r.write(String(lot).padStart(15), 124, 'latin1');
   return r;
@@ -320,12 +457,12 @@ function decoderRecord({ code, tick = 1, base, up, down, lot, type = 111, name =
 
 test('master file records: header prices and fixed-width text', () => {
   const records = [
-    masterRecord({ code: '167A', base: 1700, up: 2200, down: 1200, lot: 100 }),
-    masterRecord({ code: '25935', base: 2350, up: 3050, down: 1650, type: '0115', lot: 1 }),
+    masterRecord({ code: '167A', tick: 3, base: 1700, up: 2200, down: 1200, lot: 100 }),
+    masterRecord({ code: '25935', tick: 0, base: 2350, up: 3050, down: 1650, type: '0115', lot: 1 }),
   ];
   const expected = [
-    { issue_id: 0, code: '167A', base_price10: 1700, limit_up10: 2200, limit_down10: 1200, lot_size: 100, issue_type: 111 },
-    { issue_id: 1, code: '25935', base_price10: 2350, limit_up10: 3050, limit_down10: 1650, lot_size: 1, issue_type: 115 },
+    { issue_id: 0, code: '167A', tick_type: 3, base_price10: 1700, limit_up10: 2200, limit_down10: 1200, lot_size: 100, issue_type: 111 },
+    { issue_id: 1, code: '25935', tick_type: 0, base_price10: 2350, limit_up10: 3050, limit_down10: 1650, lot_size: 1, issue_type: 115 },
   ];
   assert.deepEqual(parseMasterFile(Buffer.concat(records), 2), expected);
   // Records are counted from the end, so a preamble (the demo's file has one) is skipped.
@@ -346,6 +483,10 @@ test('the demo decoder\'s master agrees with its master file on every issue, and
   file.writeUInt32LE(file.readUInt32LE(at + 4) + 10, at + 4);
   assert.throws(() => checkMasterFile(master, file),
     /disagrees with its master file on 1 of 4131 issues \(issue 5: base_price10 \d+, file \d+\); its record layout may have changed/);
+  // The tick type is the first word's bits 25-26 in the file and its own field in the decoder's record.
+  const ticks = Buffer.from(assets['master.dat']);
+  ticks.writeUInt32LE((ticks.readUInt32LE(at) ^ (1 << 26)) >>> 0, at);
+  assert.throws(() => checkMasterFile(master, ticks), /on 1 of 4131 issues \(issue 5: tick_type \d, file \d\)/);
 });
 
 test('an 18000 master: text codes, the decoder\'s own names and tick types, limits re-read after a change', () => {

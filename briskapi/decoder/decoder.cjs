@@ -9,6 +9,8 @@ const { setTimeout: delay } = require('node:timers/promises');
 const manifest = require('./assets.json');
 const { verifyAsset, loadWebAssets } = require('./web.cjs');
 const BUFFER = 4 * 1024 * 1024;
+const LEVELS = 10;   // price levels kept on each side of a quote's book
+const WINDOW = 32;   // book rows read per call while walking away from the best price
 
 function u64(words, i) {
   const value = words[i] + 4294967296 * words[i + 1];
@@ -20,6 +22,36 @@ function u64(words, i) {
 function looseU64(words, i) {
   const value = words[i] + 4294967296 * words[i + 1];
   return Number.isSafeInteger(value) ? value : NaN;
+}
+
+const head = data => `${data.length}-byte frame starting ${Buffer.from(data.subarray(0, 16)).toString('hex')}`;
+
+// One call into the decoder, with its failures made readable. A C++ exception that isn't a
+// std::exception (a parse error such as "Invalid Header") escapes as a bare number, the address of
+// { vtable, message }. A WebAssembly trap, such as "float unrepresentable in integer range" (an order
+// quantity gone negative, converted to an unsigned one), leaves the decoder's stack 16 bytes down;
+// std::exceptions arrive as Errors. The stack is restored either way.
+function call(w, what, fn) {
+  const stack = w.stackSave?.();
+  try {
+    return fn();
+  } catch (error) {
+    if (stack !== undefined) w.stackRestore(stack);
+    if (typeof error === 'number') throw new Error(`${what}: the decoder failed (${exceptionText(w.HEAPU8, error)})`);
+    if (error?.name === 'RuntimeError') {
+      throw Object.assign(new Error(`${what}: the decoder trapped (${error.message}); its state is inconsistent, as `
+        + 'after a lost, repeated or reordered update or one applied without the snapshot under it'), { trap: true });
+    }
+    throw error;
+  }
+}
+
+function exceptionText(heap, address) {
+  const view = new DataView(heap.buffer);
+  const text = address > 0 && address + 8 <= heap.length ? view.getUint32(address + 4, true) : 0;
+  if (!text || text >= heap.length) return `C++ exception at ${address}`;
+  const end = heap.indexOf(0, text);
+  return Buffer.from(heap.subarray(text, Math.min(end < 0 ? heap.length : end, text + 200))).toString('latin1');
 }
 
 function* frames(data) {
@@ -59,11 +91,17 @@ function loadAssets(cache) {
 }
 
 // Position of the stock view's fields, relative to a version's base. Protocol 16000 (the 2021
-// demo, and the vendor client's own parse of it) puts a header word first. 18000 (SBI's current
-// build, as an independent parser of it reads the same view) drops that word, so every index is
-// one lower. The fields and their order are otherwise identical. Any other version is refused
-// rather than read at a guessed offset.
+// demo, and the vendor client's own parse of it) puts the numeric security code first. 18000 (SBI's
+// build of March 2026, whose code is text) drops that word, so every index is one lower: its
+// _getStockView writes the same fields in the same order, and with the demo's snapshot all 4,131
+// issues read the demo's words one lower. The fields and their order are otherwise identical. Any
+// other version is refused rather than read at a guessed offset.
 const STOCK_VIEW_SHIFT = { 16000: 0, 18000: -1 };
+
+// What _pushSQ takes as its issue. The demo's build takes the security code as a number and looks
+// it up; the 2026 builds take the issue index and read the code (167A too) from their own record.
+// Given a code, a 2026 build attaches the special quote to whichever issue has that index.
+const SQ_ISSUE = { 16000: 'code', 18000: 'index' };
 
 function stockViewShift(protocolVersion) {
   if (!(protocolVersion in STOCK_VIEW_SHIFT)) {
@@ -73,14 +111,17 @@ function stockViewShift(protocolVersion) {
 }
 
 // `words` is the raw _getStockView buffer; `ohlc` the number of OHLC bars ahead of the quote fields.
+// The imbalance sides are 1 when the sell quantity at that indicative price exceeds the buy quantity
+// (or nothing matches), else 0. The reference price is the one the decoder's indicative matching
+// starts from (see ARCHITECTURE.md); in continuous trading it is the last price.
 function parseStockView(words, ohlc, shift) {
   const a = words.subarray(6 * ohlc + shift);
   return { frame: a[19], max_frame: a[20], source_time_us: u64(a, 17), last_price10: words[1 + shift],
     open_price10: words[2 + shift], bid_price10: a[7], ask_price10: a[8], indicative_price10: a[9],
-    indicative_volume: u64(a, 10), indicative_side: a[12], closing_indicative_price10: a[13],
-    closing_indicative_volume: u64(a, 14), quote_flag: a[21], quote_side: a[22],
-    special_quote_time_us: u64(a, 23), indicative_open_price10: a[32], auction_reference_price10: a[35],
-    volume: u64(a, 3) };
+    indicative_volume: u64(a, 10), indicative_imbalance_side: a[12], closing_indicative_price10: a[13],
+    closing_indicative_volume: u64(a, 14), closing_indicative_imbalance_side: a[16], quote_flag: a[21],
+    quote_side: a[22], special_quote_time_us: u64(a, 23), indicative_open_price10: a[32], reference_price10: a[35],
+    volume: u64(a, 3), turnover10: u64(a, 5) };
 }
 
 // The decoder's own master records (_getStockMaster), in issue order. 16000 (the demo) is the vendor
@@ -96,7 +137,9 @@ const MASTER_LAYOUT = { 16000: { size: 144, shift: 0 }, 18000: { size: 148, shif
 // ("deque"); a snapshot whose bar count differs from the schedule's is refused ("Invalid
 // unserialize"). The arguments are schedule_info's fields in the boot's own order, as integers in
 // microseconds after midnight; _createSchedule counts (morning close - open) / 5 min + (afternoon
-// close - open) / 5 min bars (66 for 9:00-11:30 and 12:30-15:30).
+// close - open) / 5 min bars (66 for 9:00-11:30 and 12:30-15:30). sq_jump_interval comes in seconds
+// (180), but the decoder adds it to a special quote's time in microseconds, as the demo's build
+// does with its fixed 180,000,000, so it is passed in microseconds.
 const SCHEDULE_FIELDS = ['morning_session_pre_open_time', 'morning_session_open_time', 'morning_session_close_time',
   'afternoon_session_pre_open_time', 'afternoon_session_open_time', 'afternoon_session_pre_close_time',
   'afternoon_session_close_time', 'sq_jump_interval'];
@@ -106,7 +149,10 @@ function scheduleArgs(schedule) {
   // _createSchedule truncates each value to an unsigned integer: a negative or missing one traps the WASM.
   const missing = SCHEDULE_FIELDS.filter(key => !Number.isFinite(schedule[key]) || schedule[key] < 0);
   if (missing.length) throw new Error(`The boot schedule_info has no usable ${missing.join(', ')}`);
-  return SCHEDULE_FIELDS.map(key => schedule[key]);
+  if (!(schedule.sq_jump_interval >= 1 && schedule.sq_jump_interval <= 3600)) {
+    throw new Error(`The boot schedule_info's sq_jump_interval (${schedule.sq_jump_interval}) is not a number of seconds`);
+  }
+  return SCHEDULE_FIELDS.map(key => (key === 'sq_jump_interval' ? schedule[key] * 1e6 : schedule[key]));
 }
 
 function masterLayout(protocolVersion) {
@@ -142,14 +188,16 @@ function parseMasterFile(data, count) {
   const integer = value => (/^\d+$/.test(value) ? Number(value) : NaN);
   return Array.from({ length: count }, (_, issue_id) => {
     const r = data.subarray(start + MASTER_RECORD * issue_id, start + MASTER_RECORD * (issue_id + 1));
-    return { issue_id, code: text(r, 50, 55), base_price10: r.readUInt32LE(4), limit_up10: r.readUInt32LE(8),
-      limit_down10: r.readUInt32LE(12), lot_size: integer(text(r, 124, 139)), issue_type: integer(text(r, 40, 44)) };
+    // The first word is the record's message tag (0x18) and flags; bits 25-26 are the tick type.
+    return { issue_id, code: text(r, 50, 55), tick_type: (r.readUInt32LE(0) >>> 25) & 3, base_price10: r.readUInt32LE(4),
+      limit_up10: r.readUInt32LE(8), limit_down10: r.readUInt32LE(12), lot_size: integer(text(r, 124, 139)),
+      issue_type: integer(text(r, 40, 44)) };
   });
 }
 
 // The decoder's master must agree with the file it loaded. A record layout that no longer fits a
 // build shows here as a disagreement, and is refused rather than read.
-const CHECKED = ['code', 'base_price10', 'limit_up10', 'limit_down10', 'lot_size', 'issue_type'];
+const CHECKED = ['code', 'tick_type', 'base_price10', 'limit_up10', 'limit_down10', 'lot_size', 'issue_type'];
 
 function checkMasterFile(master, data) {
   const file = parseMasterFile(data, master.length);
@@ -180,22 +228,28 @@ class Decoder {
       crypto: crypto.webcrypto, TextDecoder, TextEncoder, setTimeout, clearTimeout,
     });
     vm.runInContext(assets['fita.js'].toString('utf8'), context, { filename: 'brisk-demo-fita.js' });
+    // A special quote the decoder can't place is reported only on stderr, so that line is counted.
+    const stderr = { invalidIssueCode: 0 };
     const { wasm } = await new Promise((resolve, reject) => {
-      context.module.exports({ wasmBinary: assets['fita.wasm'],
-        print() {}, printErr() {}, onAbort: reject,
+      context.module.exports({ wasmBinary: assets['fita.wasm'], print() {},
+        printErr: line => { if (String(line).includes('Invalid Issue Code')) stderr.invalidIssueCode++; }, onAbort: reject,
       }).then(wasm => resolve({ wasm }));
     });
     options.check?.(wasm);
-    return new Decoder(wasm, assets, options);
+    return new Decoder(wasm, assets, { ...options, stderr });
   }
 
   // options.schedule: the boot's schedule_info. Used only by decoders that take one (the 2026
   //   builds export _createSchedule; the 2021 demo's doesn't); null there is an error.
-  constructor(w, assets, { protocolVersion = manifest.protocol_version, callbacks = {}, boot = {}, checkMaster, schedule } = {}) {
+  constructor(w, assets, { protocolVersion = manifest.protocol_version, callbacks = {}, boot = {}, checkMaster, schedule,
+    stderr = { invalidIssueCode: 0 } } = {}) {
     this.w = w;
+    this.stderr = stderr;
     this.layoutShift = stockViewShift(protocolVersion);
     this.layout = masterLayout(protocolVersion);
+    this.sqIssue = SQ_ISSUE[protocolVersion];
     this.basePriceQueue = new Set();
+    this.unreadable = new Map();   // issue -> frame number at which its quote trapped
     this.authError = false;
     this.marketFinished = false;
     this.initialFrames = null;
@@ -249,17 +303,27 @@ class Decoder {
       if (!Number.isFinite(value)) throw new Error(`Boot ${what} is not a number: ${JSON.stringify(value)}`);
       return value;
     };
-    // The decoder takes a special quote's issue as a number. How it takes a code such as 167A
-    // (issued since 2024) is not known, so those are left out and listed rather than guessed.
+    // A special quote names its issue by code or by index (SQ_ISSUE). One whose code is not in the
+    // master, or by code isn't a number, is left out and listed: the decoder would drop it or misplace it.
     const skipped = [];
+    const rejectedBefore = this.stderr.invalidIssueCode;
     for (const sq of exceptional_sq) {
-      if (!/^\d+$/.test(String(sq.issue_code))) {
-        skipped.push(String(sq.issue_code));
+      const code = String(sq.issue_code);
+      const issue = byCode.get(code);
+      if (issue === undefined || (this.sqIssue === 'code' && !/^\d+$/.test(code))) {
+        skipped.push(code);
         continue;
       }
-      this.w._pushSQ(this.id, Number(sq.issue_code), sq.buy_sell === 'B' ? 0 : 1, 10 * number(sq.jump_range, 'jump_range'),
+      this.w._pushSQ(this.id, this.sqIssue === 'index' ? issue : Number(code), sq.buy_sell === 'B' ? 0 : 1, 10 * number(sq.jump_range, 'jump_range'),
         number(sq.jump_sec, 'jump_sec'), 10 * number(sq.quote_limit_down, 'quote_limit_down'),
         10 * number(sq.quote_limit_up, 'quote_limit_up'));
+    }
+    // Every special quote sent names an issue in the master. If the decoder still can't place one,
+    // this build names issues another way, and the others may sit on the wrong issue.
+    const rejected = this.stderr.invalidIssueCode - rejectedBefore;
+    if (rejected) {
+      throw new Error(`The decoder rejected ${rejected} of the boot's special quotes as an invalid issue code; `
+        + `this build may name a special quote's issue differently`);
     }
     for (const change of base_prices) {
       const issue = byCode.get(String(change.issue_code));
@@ -294,7 +358,29 @@ class Decoder {
     for (let offset = 0; offset < data.length; offset += BUFFER) {
       const part = data.subarray(offset, offset + BUFFER);
       this.w.HEAPU8.set(part, this.buf);
-      this.w._push(this.id, this.buf, part.length);
+      call(this.w, `Data pushed to the decoder (${data.length} bytes)`, () => this.w._push(this.id, this.buf, part.length));
+    }
+  }
+
+  // Push the catch-up reply for `lagging` (from laggingIssues) and check what it did: each issue in
+  // it must now be exactly at the stream's first frame, and every other issue where it was. The
+  // decoder applies whatever it is given, so a reply pushed twice, a repeated or stray update or
+  // one for other issues would otherwise pass, leaving quotes off by those updates.
+  catchUp(reply, lagging) {
+    const before = this.frameNumbers();
+    this.push(reply);
+    const after = this.frameNumbers();
+    const behind = lagging.filter(({ issue_id, to }) => after[issue_id] < to);
+    if (behind.length) {
+      const [first] = behind;
+      throw new Error(`Catch-up left ${behind.length} issues behind the stream (first: issue ${first.issue_id}, `
+        + `frame ${after[first.issue_id]}, stream starts at ${first.to})`);
+    }
+    const to = new Map(lagging.map(l => [l.issue_id, l.to]));
+    const moved = after.findIndex((frame, issue) => frame !== (to.has(issue) ? to.get(issue) : before[issue]));
+    if (moved >= 0) {
+      throw new Error(`Catch-up took issue ${moved} to frame ${after[moved]}, but ${to.has(moved)
+        ? `the stream starts at ${to.get(moved)}` : `it was not behind (frame ${before[moved]})`}: the reply repeats or misplaces updates`);
     }
   }
 
@@ -302,7 +388,7 @@ class Decoder {
     let start = 0, size = 0, first = 0, count = 0;
     const flush = () => {
       this.w.HEAPU8.set(data.subarray(start, start + size), this.buf);
-      this.w._unserialize(this.id, this.buf, size, first, first + count);
+      call(this.w, 'The snapshot', () => this.w._unserialize(this.id, this.buf, size, first, first + count));
       start += size; first += count; size = 0; count = 0;
     };
     for (let offset = 0; offset < data.length;) {
@@ -331,12 +417,35 @@ class Decoder {
     return u64(new Uint32Array(this.w.HEAPU8.buffer, this.aux, 2), 0);
   }
 
+  // _pushWs writes the latest source time of the updates it applied (u64 at aux) and how many it
+  // applied (u32 at aux + 8): none for pings, clock messages and frames held until begin().
   feed(data) {
     if (data.length > BUFFER) throw new Error('Frame exceeds decoder buffer');
     this.w.HEAPU8.set(data, this.buf);
-    this.w._pushWs(this.id, this.buf, data.length, this.aux, this.aux + 8);
+    call(this.w, `A ${head(data)}`, () => this.w._pushWs(this.id, this.buf, data.length, this.aux, this.aux + 8));
     this.w._applyBasePriceQueue(this.id);
     if (this.authError) throw new Error('Decoder rejected session');
+    if (this.began && data[0] & 1) this.watch(data);
+  }
+
+  // After begin(), every frame of stock updates (odd first byte) applies at least one: so it is through
+  // the demo's recording and SBI's. One that applies none leaves its bytes held for the next frame;
+  // when the frames after it apply none either, the decoder's parser has lost the messages' boundaries
+  // and will decode nothing more, with no error or callback (nor ping replies). In SBI's recording a
+  // 15-byte frame does this every 40 s, though the browser's decoder kept going; whether a live
+  // stream carries one is not known, so the session stops at once and names it.
+  watch(data) {
+    if (new DataView(this.w.HEAPU8.buffer).getUint32(this.aux + 8, true)) {
+      this.idleFrames = 0;
+      if (++this.goodFrames >= 3) this.suspect = null;
+      return;
+    }
+    this.goodFrames = 0;
+    this.suspect ??= head(data);
+    if (++this.idleFrames >= 2) {
+      throw new Error(`The decoder stopped decoding after a ${this.suspect}: the frames since apply no update `
+        + '(run with --trace-protocol to see what the server sent)');
+    }
   }
 
   // Feed one frame; true once the decoder has reported its initial frame numbers
@@ -366,10 +475,12 @@ class Decoder {
     return lagging;
   }
 
-  // Mark the API data complete and start tracing quote changes.
+  // Mark the API data complete and start tracing quote changes. The decoder then applies the frames
+  // it held, skipping updates the snapshot already has.
   begin() {
-    this.w._apiRecieved(this.id);
+    call(this.w, 'The frames received before the catch-up', () => this.w._apiRecieved(this.id));
     this.trace = this.w._addTraceUpdate(this.id);
+    Object.assign(this, { began: true, idleFrames: 0, goodFrames: 0, suspect: null });
   }
 
   changed() {
@@ -381,29 +492,131 @@ class Decoder {
     return ids;
   }
 
+  // Quotes for `ids`. An issue whose quote traps the decoder (its state for that issue is inconsistent)
+  // is skipped and listed, and not read again until its frame number moves: read again at the same
+  // frame, the decoder returns stale derived fields instead of trapping.
+  quotes(ids) {
+    const quotes = [], skipped = [];
+    let frames = null;
+    const frame = id => (frames ??= this.frameNumbers())[id];
+    for (const id of ids) {
+      if (this.unreadable.has(id) && this.unreadable.get(id) === frame(id)) {
+        skipped.push(id);
+        continue;
+      }
+      try {
+        quotes.push(this.quote(id));
+        this.unreadable.delete(id);
+      } catch (error) {
+        if (!error.trap) throw error;
+        this.unreadable.set(id, frame(id));
+        skipped.push(id);
+      }
+    }
+    return { quotes, skipped };
+  }
+
   quote(issue_id) {
     const m = this.master[issue_id];
     if (!m) throw new Error(`Unknown issue ID: ${issue_id}`);
+    return call(this.w, `The quote for ${m.code}`, () => this.readQuote(issue_id, m));
+  }
+
+  readQuote(issue_id, m) {
     if (!this.w._getStockView(this.id, issue_id, this.buf)) throw new Error(`Stock view unavailable: ${m.code}`);
     const words = new Uint32Array(this.w.HEAPU8.buffer, this.buf, this.viewWords);
     const quote = { issue_id, code: m.code, ...parseStockView(words, this.ohlc, this.layoutShift) };
-    // SBI's build has no portfolio export, so its quotes carry no issue_status.
+    // The demo's build gives the issue status through _getPortfolio. SBI's has none; its view holds the
+    // status one word after the demo's last, plus 8 (the same values once 8 is taken off).
     if (this.w._getPortfolio) {
       if (!this.w._getPortfolio(this.id, Number(m.code), this.buf)) throw new Error(`Portfolio unavailable: ${m.code}`);
       quote.issue_status = new Uint32Array(this.w.HEAPU8.buffer, this.buf, 22 + this.ohlc)[this.ohlc + 15];
+    } else {
+      quote.issue_status = words[6 * this.ohlc + this.layoutShift + 37] - 8;
+      if (!(quote.issue_status >= 0 && quote.issue_status <= 7)) throw new Error(`Issue status unrecognised: ${m.code}`);
     }
-    // Request one price row solely to obtain the market/over/under rows in the
-    // documented ABI. Row 0 is market orders, not the top-of-book depth.
+    // _getItaRows(id, issue, first row index, rows, price rows, market row, OVER, UNDER, light) writes
+    // 204-byte rows; one price row is asked for here only to get the market row, whose buy and sell
+    // groups (quantity at +20 and +112) and closing groups (+64, +156) are the market orders. It always
+    // returns 1; a window off the board throws. light = 0 keeps the closing groups.
     const price = quote.indicative_price10 || quote.bid_price10 || quote.ask_price10 || m.base_price10;
     const index = this.w._fitItaViewRowPrice10(this.id, issue_id, price, 1);
-    if (!this.w._getItaRows(this.id, issue_id, index, 1, this.buf + 612,
-      this.buf, this.buf + 204, this.buf + 408, 0)) throw new Error(`Book unavailable: ${m.code}`);
+    this.w._getItaRows(this.id, issue_id, index, 1, this.buf + 612, this.buf, this.buf + 204, this.buf + 408, 0);
     const row = new Uint32Array(this.w.HEAPU8.buffer, this.buf, 51);
     quote.market_buy_quantity = u64(row, 5);
     quote.market_sell_quantity = u64(row, 28);
     quote.closing_market_buy_quantity = u64(row, 16);
     quote.closing_market_sell_quantity = u64(row, 39);
+    Object.assign(quote, this.book(issue_id, m, quote));
     return quote;
+  }
+
+  // The quantity and orders at the quote's bid and ask prices, and the book's best LEVELS prices that
+  // hold orders on each side, best first, as [price10, quantity, orders]. Row indices step one tick
+  // between the issue's limits (_getTickPrice10ToIndex takes the tick type, not the issue).
+  book(issue_id, m, quote) {
+    const index = price => this.w._getTickPrice10ToIndex(this.id, m.tick_type, price);
+    const low = index(m.limit_down10), high = index(m.limit_up10);
+    const inside = price => price >= m.limit_down10 && price <= m.limit_up10;
+    const bid_levels = this.levels(issue_id, low, high, true, inside(quote.bid_price10) ? index(quote.bid_price10) : high);
+    const ask_levels = this.levels(issue_id, low, high, false, inside(quote.ask_price10) ? index(quote.ask_price10) : low);
+    const at = (levels, price, buy) => {
+      const level = levels.find(([p]) => p === price);
+      if (level) return level.slice(1);
+      // A price the walk passed, or every order on the side having been read, means none there.
+      const passed = levels.length < LEVELS || (buy ? price >= levels.at(-1)[0] : price <= levels.at(-1)[0]);
+      if (!price || !inside(price) || passed) return [0, 0];
+      const [row] = this.rows(issue_id, index(price), 1).rows;
+      return buy ? [row[1], row[2]] : [row[3], row[4]];
+    };
+    const [bid_quantity, bid_orders] = at(bid_levels, quote.bid_price10, true);
+    const [ask_quantity, ask_orders] = at(ask_levels, quote.ask_price10, false);
+    return { bid_quantity, bid_orders, ask_quantity, ask_orders, bid_levels, ask_levels };
+  }
+
+  // One side's best LEVELS prices with orders. `hint` is where the best price should be (the quote's).
+  // Reads walk from there to worse prices a window at a time, until there are enough levels or nothing
+  // lies beyond. If the first window shows orders at better prices than the hint (OVER for buys, UNDER
+  // for sells, as in a crossed auction book), every row beyond the hint is read first, in one call:
+  // each read sums the whole board for OVER and UNDER, so one long read beats a search of short ones.
+  levels(issue_id, low, high, buy, hint) {
+    const quantity = r => (buy ? r[1] : r[3]), orders = r => (buy ? r[2] : r[4]);
+    const better = w => (buy ? w.over.buy : w.under.sell), worse = w => (buy ? w.under.buy : w.over.sell);
+    const window = from => {
+      const to = buy ? Math.max(low, from - WINDOW + 1) : Math.min(high, from + WINDOW - 1);
+      const first = Math.min(from, to);
+      return { first, last: Math.max(from, to), ...this.rows(issue_id, first, Math.abs(from - to) + 1) };
+    };
+    const levels = [];
+    const take = rows => {
+      for (const r of buy ? rows.slice().reverse() : rows) {
+        if (quantity(r) && levels.length < LEVELS) levels.push([r[0], quantity(r), orders(r)]);
+      }
+    };
+    let w = window(hint);
+    if (better(w)) {
+      const first = buy ? hint + 1 : low, last = buy ? high : hint - 1;
+      take(this.rows(issue_id, first, last - first + 1).rows);
+    }
+    for (;;) {
+      take(w.rows);
+      if (levels.length >= LEVELS || !worse(w)) return levels;
+      w = window(buy ? w.first - 1 : w.last + 1);
+    }
+  }
+
+  // Price rows first..first + count - 1 of an issue's book as [price10, buy quantity, buy orders, sell
+  // quantity, sell orders], and the quantities on each side above (OVER) and below (UNDER) them.
+  // light = 1: the closing groups, traded volume and cumulative columns aren't needed here.
+  rows(issue_id, first, count) {
+    const buf = this.buf;
+    // Boards run to a few thousand rows (3,521 at most in the demo's market); the buffer holds 20,000.
+    if (612 + 204 * count > BUFFER) throw new Error(`A book read of ${count} rows exceeds the decoder buffer`);
+    this.w._getItaRows(this.id, issue_id, first, count, buf + 612, buf, buf + 204, buf + 408, 1);
+    const u = new Uint32Array(this.w.HEAPU8.buffer, buf, 153 + 51 * count);
+    const row = b => [u[b], u64(u, b + 5), u64(u, b + 9), u64(u, b + 28), u64(u, b + 32)];
+    return { rows: Array.from({ length: count }, (_, k) => row(153 + 51 * k)),
+      over: { buy: u64(u, 56), sell: u64(u, 79) }, under: { buy: u64(u, 107), sell: u64(u, 130) } };
   }
 }
 
@@ -425,10 +638,12 @@ async function replay({ cache, web = false, codes = [], speed = 1, limitFrames =
   if (!first) throw new Error('Empty mock recording');
   if (!decoder.start(first.data)) throw new Error('Missing frame-number bootstrap');
   let seq = 0;
+  const skippedIssues = skipped => (skipped.length ? { skipped_issues: skipped.sort((a, b) => a - b) } : {});
+  const bootstrap = decoder.quotes(master.map(m => m.issue_id));
   await emit({ type: 'bootstrap', seq: seq++, source: 'historical_mock', trading_date: decoder.date, input_transport,
     source_timestamp_origin: 'brisk_decoder_unverified', exchange_delay_ms: null,
     source_time_us: decoder.time(), market_issue_count: decoder.master.length, master,
-    quotes: master.map(m => decoder.quote(m.issue_id)) });
+    quotes: bootstrap.quotes, ...skippedIssues(bootstrap.skipped) });
   const start = performance.now();
   let frameCount = 1, updateCount = 0;
   for (const frame of iter) {
@@ -444,12 +659,12 @@ async function replay({ cache, web = false, codes = [], speed = 1, limitFrames =
       performance.now() - start - (frame.time - first.time) / speed) : null;
     const began = process.hrtime.bigint();
     decoder.feed(frame.data);
-    const quotes = decoder.changed().filter(id => ids.has(id)).map(id => decoder.quote(id));
+    const { quotes, skipped } = decoder.quotes(decoder.changed().filter(id => ids.has(id)));
     const decode_ns = Number(process.hrtime.bigint() - began);
     // Include empty batches: sequence continuity and feed health differ from a
     // quiet security's last update. No fixed polling interval or dropped deltas.
     await emit({ type: 'quotes', seq: seq++, source_time_us: decoder.time(),
-      received_unix_ms, decode_ns, replay_lateness_ms, quotes });
+      received_unix_ms, decode_ns, replay_lateness_ms, quotes, ...skippedIssues(skipped) });
     updateCount += quotes.length; frameCount++;
   }
   const summary = { type: 'end', seq, source_time_us: decoder.time(), frames: frameCount,

@@ -19,14 +19,19 @@ MAX_EXPANDED = 1024 * 1024 * 1024
 MAX_LINE = 16 * 1024 * 1024
 SCHEMA = 'brisk-decoded-jsonl-v1'
 SOURCES = {'historical_mock', 'synthetic_test', 'sbi_live', 'eshiten_live'}
-QUOTE_KEYS = set('issue_id code frame source_time_us max_frame last_price10 open_price10 bid_price10 ask_price10 indicative_price10 indicative_volume indicative_side closing_indicative_price10 closing_indicative_volume quote_flag quote_side special_quote_time_us indicative_open_price10 auction_reference_price10 volume issue_status market_buy_quantity market_sell_quantity closing_market_buy_quantity closing_market_sell_quantity'.split())
-SBI_QUOTE_KEYS = QUOTE_KEYS - {'issue_status'}
+QUOTE_KEYS = set('issue_id code frame source_time_us max_frame last_price10 open_price10 bid_price10 ask_price10 indicative_price10 indicative_volume indicative_imbalance_side closing_indicative_price10 closing_indicative_volume closing_indicative_imbalance_side quote_flag quote_side special_quote_time_us indicative_open_price10 reference_price10 volume turnover10 issue_status market_buy_quantity market_sell_quantity closing_market_buy_quantity closing_market_sell_quantity bid_quantity bid_orders ask_quantity ask_orders bid_levels ask_levels'.split())
+# A side of the book: up to LEVELS [price10, quantity, orders], best price first.
+BOOK_KEYS = {'bid_levels', 'ask_levels'}
+LEVELS = 10
 MASTER_KEYS = set('issue_id code tick_type base_price10 limit_up10 limit_down10 lot_size issue_type name'.split())
 BATCH_KEYS = {
     'bootstrap': set('type seq source trading_date input_transport source_timestamp_origin exchange_delay_ms source_time_us market_issue_count master quotes'.split()),
     'quotes': set('type seq source_time_us received_unix_ms decode_ns replay_lateness_ms quotes'.split()),
     'end': set('type seq source_time_us frames quote_updates replay_wall_ms'.split()),
 }
+# Issues whose quote could not be read (the decoder's state for them was inconsistent) are listed
+# instead, on the batches that would have carried them.
+SKIPPED = 'skipped_issues'
 SUMMARY_KEYS = {'source', 'trading_date', 'first_source_time_us', 'last_source_time_us', 'codes', 'batches', 'quote_updates', 'expanded_bytes'}
 DEMO_ORIGIN = 'https://next-demo.brisk.jp/'
 # Broker-hosted BRiSK (SBI, Tachibana e-shiten): the same app and decoder, so the same rules; each
@@ -61,6 +66,16 @@ def code(value):
     require(isinstance(value, str) and re.fullmatch(r'[A-Z0-9]{4,8}', value), 'Invalid security code')
     return value
 
+def book(levels, descending):
+    """One side of a quote's book: up to LEVELS [price10, quantity, orders], best price first."""
+    require(isinstance(levels, list) and len(levels) <= LEVELS, 'Invalid book side')
+    for level in levels:
+        require(isinstance(level, list) and len(level) == 3, 'Invalid book level')
+        for value in level:
+            integer(value)
+    prices = [level[0] for level in levels]
+    require(prices == sorted(set(prices), reverse=descending), 'Book prices out of order')
+
 def _nonfinite(_):
     raise ValueError('Nonfinite JSON')
 
@@ -90,6 +105,8 @@ def canonical_lines(source):
         for key in ('master', 'quotes'):
             if isinstance(b.get(key), list):
                 b[key].sort(key=_issue)
+        if isinstance(b.get(SKIPPED), list) and all(type(issue) is int for issue in b[SKIPPED]):
+            b[SKIPPED].sort()
         for holder, key in ((b, 'replay_lateness_ms'), (b, 'replay_wall_ms'), (b.get('input_transport'), 'asset_fetch_ms')):
             if isinstance(holder, dict) and type(holder.get(key)) is float:
                 holder[key] = round(holder[key], 3)
@@ -147,7 +164,8 @@ def _scan(stream):
         # escapes, key order or number spellings that could carry other data.
         require(isinstance(b, dict) and encode(b) == line, 'Non-canonical encoding')
         kind = b.get('type')
-        require(kind in BATCH_KEYS and set(b) == BATCH_KEYS[kind], 'Unknown or missing batch fields')
+        require(kind in BATCH_KEYS and set(b) - {SKIPPED} == BATCH_KEYS[kind]
+                and (SKIPPED not in b or kind != 'end'), 'Unknown or missing batch fields')
         require(integer(b['seq']) == seq, 'Sequence gap')
         now = integer(b['source_time_us'], 86_400_000_000 - 1)
         require(now >= last, 'Market clock regression')
@@ -200,8 +218,7 @@ def _scan(stream):
         require(isinstance(quotes, list) and len(quotes) <= len(identities), 'Invalid quote count')
         previous_issue = -1
         for q in quotes:
-            keys = SBI_QUOTE_KEYS if source in BROKER_TRANSPORT else QUOTE_KEYS
-            require(isinstance(q, dict) and set(q) == keys, 'Unknown or missing quote fields')
+            require(isinstance(q, dict) and set(q) == QUOTE_KEYS, 'Unknown or missing quote fields')
             issue = integer(q['issue_id'], 2**32-1)
             require(issue > previous_issue and identities.get(issue) == code(q['code']), 'Quote identity mismatch/duplicate')
             previous_issue = issue
@@ -210,11 +227,17 @@ def _scan(stream):
             require(frame >= previous[0] and clock >= previous[1], 'Quote frame/time regression')
             clocks[issue] = (frame, clock)
             for key, value in q.items():
-                if key != 'code':
+                if key in BOOK_KEYS:
+                    book(value, descending=key == 'bid_levels')
+                elif key != 'code':
                     integer(value)
             fingerprint.quote(seq, q)
+        skipped = b.get(SKIPPED, [])
+        require(isinstance(skipped, list) and skipped and all(issue in identities for issue in skipped)
+                and skipped == sorted(set(skipped)) and not set(skipped) & {q['issue_id'] for q in quotes}
+                if SKIPPED in b else True, 'Invalid skipped issues')
         if seq == 0:
-            require(len(quotes) == len(identities), 'Incomplete bootstrap')
+            require(len(quotes) + len(skipped) == len(identities), 'Incomplete bootstrap')
         if kind == 'end':
             frames = integer(b['frames'])
             require((frames >= seq - 1 if source in BROKER_TRANSPORT else frames == seq)
@@ -243,7 +266,7 @@ def synthetic_recording():
     """The only accepted synthetic_test recording: a one-issue publication probe."""
     master = {**dict.fromkeys(MASTER_KEYS, 0), 'issue_id': 0, 'code': '0000', 'lot_size': 100, 'name': 'Synthetic fixture'}
     quote = {**dict.fromkeys(QUOTE_KEYS, 0), 'issue_id': 0, 'code': '0000', 'frame': 1, 'max_frame': 1,
-             'source_time_us': 100, 'indicative_price10': 1230, 'indicative_volume': 100}
+             'source_time_us': 100, 'indicative_price10': 1230, 'indicative_volume': 100, 'bid_levels': [], 'ask_levels': []}
     return [dict(type='bootstrap', seq=0, source='synthetic_test', trading_date='20210927', source_time_us=100,
                  input_transport={'kind': 'local_cache'}, source_timestamp_origin='brisk_decoder_unverified',
                  exchange_delay_ms=None, market_issue_count=1, master=[master], quotes=[quote]),
@@ -265,9 +288,10 @@ def validate_stream(stream, references=None):
     """Validate canonical fields/continuity, plus reference content for demo/synthetic data.
 
     Broker live content (SBI, e-shiten) is contributor-declared and has no reference
-    replay. Its quotes omit issue_status (not exported by the broker decoder), its
-    transport is exactly its BROKER_TRANSPORT, and replay_lateness_ms must be null. End
-    frames include pre-bootstrap catch-up frames as well as the emitted quote batches.
+    replay. Its transport is exactly its BROKER_TRANSPORT, and replay_lateness_ms must
+    be null. End frames include pre-bootstrap catch-up frames as well as the emitted
+    quote batches. A batch lists in skipped_issues the issues whose quote could not be
+    read; a bootstrap's quotes and skipped issues together cover its master.
     """
     summary, fingerprint, market = _scan(stream)
     if summary['source'] in BROKER_TRANSPORT:

@@ -153,7 +153,12 @@ bundle) and in pybrisk's SBI research (`engineio.cjs` and `sbi.cjs`):
    caught up with `POST /api/stocks_update/{series}` (up to five retries, never for
    an expired session or an `x-error-reason: too-old` reply) and the reply is
    pushed into the WASM before quote tracing starts. Frames that arrive meanwhile
-   are not lost.
+   are not lost: the decoder holds them until `_apiRecieved`, then applies them,
+   skipping updates the snapshot already has. The decoder applies whatever reply it
+   is given, so afterwards each caught-up issue must be exactly at the stream's first
+   frame and every other issue where it was; a reply pushed twice, or a repeated or
+   stray update, stops the session (on SBI's March data the real reply passes and a
+   second push of it is refused).
 4. The server heartbeat, decoded by the WASM, is watched: no beat for 7 s after the
    first one is a connection failure, as in the vendor client. A second rule is the
    vendor's too: during trading hours (08:00-15:00 JST, not 11:30-12:10) the
@@ -165,22 +170,88 @@ bundle) and in pybrisk's SBI research (`engineio.cjs` and `sbi.cjs`):
    it is read (below). The boot response's `exceptional_sq` and `base_prices` are
    pushed into the WASM after that and before the snapshot, as the vendor client does, and the master's
    limits are re-read after every frame in case the decoder changes them (a pushed base price
-   moves the record's limits; in both builds its base price field keeps the loaded value). A special quote for a code with a
-   letter (`167A`) is not sent: how the decoder takes such a code is not known, so it is listed in
-   `boot_applied.skipped_exceptional_sq`.
+   moves the record's limits; in both builds its base price field keeps the loaded value). A special
+   quote names its issue differently by build: the demo's `_pushSQ` takes the security code as a
+   number and looks it up, while the 2026 builds take the issue index and read the code (`167A`
+   too) from their own record. Given a code, a 2026 build files the quote under whichever issue
+   has that index (1301's under 8283), or rejects it, which it reports only on stderr ("Invalid
+   Issue Code"). The host sends the index at 18000 and the code at 16000. A special quote whose
+   code is not in the master is not sent and is listed in `boot_applied.skipped_exceptional_sq`.
+   If the decoder still rejects one, the session stops: the build would be naming issues in yet
+   another way. On SBI's March build, boot special quotes for 167A, 1301, 25935 and 7203 each land
+   on their own issue and no other (`tools/brisk_mock/sbi_master_layout.py`).
 
 The ping loop is the WASM's own. In the real decoder, market and sync frames never
-trigger a ping; each heartbeat frame (`0xF0` and an 8-byte little-endian clock)
-triggers one reply ping carrying the server clock as the decoder estimates it. The
-loop therefore sustains itself once the server starts it, and the host only has to
+trigger a ping; each heartbeat frame (`0xF0`, `0xF2`, `0xF4` or `0xF6` and an 8-byte
+little-endian clock in nanoseconds) triggers one reply: the same nine bytes, echoed.
+The loop therefore sustains itself once the server starts it, and the host only has to
 forward the bytes.
+
+The decoder reads its input as one byte stream, so frame boundaries don't matter to it;
+`_pushWs` returns nothing, but writes the latest source time of the updates it applied
+and how many it applied (none for pings, clock messages and frames held before
+`_apiRecieved`). After `begin()`, every frame of stock updates (odd first byte) applies
+at least one, through the demo's recorded day and SBI's recording. One that applies none
+leaves its bytes held for the next frame, and if the frames after it apply none either,
+the parser has lost the messages' boundaries: it decodes nothing more, raises no error,
+calls nothing back and answers no ping. The host then stops the session at once, naming
+the frame after which it happened, rather than waiting for the heartbeat rule. Decoder
+failures are made readable too: a parse error (an unknown message header, an HTML page
+pushed as data) escapes the WASM as a bare number, the address of a C++ exception whose
+message the host reads, and a WebAssembly trap leaves the decoder's stack 16 bytes down,
+which the host restores; either way the error names the frame or the issue.
 
 The stock view and the master are read at version-specific positions. Protocol
 16000 (the demo) is the vendor client's own layout. For 18000 (SBI) the stock
-view has the same fields in the same order with the leading word dropped, so every
-index is one lower; this comes from a single independent parser of SBI's current
-build and is not confirmed against SBI itself. Any other protocol version is refused
-rather than read at guessed offsets.
+view has the same fields in the same order with the leading word, the numeric
+security code, dropped (the code is text there), so every index is one lower.
+SBI's decoder of March 2026 confirms it: its `_getStockView` writes the demo's fields
+in the demo's order, and with the demo's snapshot loaded (below) every word of all
+4,131 issues' views equals the demo decoder's word one place on. Any other protocol
+version is refused rather than read at guessed offsets.
+
+What some recorded fields hold, read from both builds and checked on the demo's data
+(the values stay the vendor's raw ones). `quote_flag` 2 is a special quote, the only flag
+that starts the decoder's 180 s timer (`special_quote_time_us` is its start plus 180 s);
+3 is priced like it without the timer; 1, a mark with no effect on prices, occurs only at
+16000 (SBI's build drops it, so the same frames give 0 there). `quote_side` is 0 for the
+buy side and 1 for the sell side, and means nothing when the flag is 0.
+`reference_price10` (named `auction_reference_price10` before policy version 5) is the
+price the decoder's indicative matching starts from:
+the special quote's price while there is one, otherwise the last price, otherwise the base
+price (at 18000 a price the server sends with the issue's status comes first, and after
+the morning close the morning's last price holds until the afternoon trades). In
+continuous trading it therefore equals `last_price10`. `indicative_imbalance_side`
+(formerly `indicative_side`), and `closing_indicative_imbalance_side` for the closing
+auction, are 1 when the sell quantity at that indicative price exceeds the buy quantity
+(or nothing matches), else 0. `turnover10` is price times shares in tenths of a yen; its
+bars' turnovers sum to it and its VWAP lies between the day's low and high on all 3,774
+traded demo issues. `issue_status` takes the same values in both builds (1 pre-open, 2
+the morning session, 5 the afternoon's; 3, 4, 6 and 7 are the lunch break, the
+afternoon pre-open, the closing auction and the close as far as the code shows): the
+demo's from `_getPortfolio`, SBI's from its view, less 8.
+
+The book comes from `_getItaRows(id, issue, first row, rows, price rows, market row, OVER,
+UNDER, light)`, which writes 204-byte rows: price (tenths of a yen) at byte 0, then buy,
+closing-buy, sell and closing-sell groups of quantity (u64) and order count (u64, 16 bytes
+on) at 20, 64, 112 and 156. Row indices step one tick from the lower limit to the upper
+(`_getTickPrice10ToIndex(id, tick type, price)`; the tick type is not the issue); OVER and
+UNDER sum every row above and below the window read, and the market row holds the market
+orders and, in its closing groups, the market-on-close orders. Its layout is the same in
+both builds, which return byte-identical books for every issue of the demo's snapshot. A
+quote keeps each side's ten best prices that hold orders, and the quantity and order count
+at its own bid and ask: the host reads 32 rows from the quote's bid (or ask) toward worse
+prices, and on until ten are found or nothing lies beyond; when OVER (UNDER for sells)
+shows orders at better prices, as in crossed auction books, it reads every row beyond
+first, in one call, since each call sums the whole board. On the demo's data this equals
+reading the whole board on every issue at several times, in both builds, and costs about
+22 µs per quote (a quote about 47 µs in all; boards run to 3,521 rows).
+
+An issue whose quote traps the decoder (its state for that issue is inconsistent: see
+below) is skipped, listed in the batch's `skipped_issues`, and not read again until its
+frame number moves, because read again at the same frame the decoder returns stale
+derived fields instead of trapping. A bootstrap's quotes and skipped issues together cover
+its master; a skipped issue is quoted once it updates and reads.
 
 The master is read from the decoder's own records (`_getStockMaster`), as the vendor
 client does, at the version's layout (`MASTER_LAYOUT` in `decoder.cjs`). 16000's is the
@@ -199,11 +270,13 @@ code's position. The 2021 demo's file has the same records after a 444-byte prea
 reading it equals the demo decoder's own master on all 4,131 issues, which places issue
 type at byte 40, the code at 50 (five wide, for some preferred shares) and the lot size
 right-aligned up to 139. Records are counted back from the end with the decoder's issue
-count. If any issue disagrees on those six fields, the session stops: a build whose
+count. The tick type is bits 25-26 of the record's first word, whose low byte is the
+master record's message tag (`0x18`); it equals the decoder's on all 4,131 demo and
+4,445 SBI issues. If any issue disagrees on those seven fields, the session stops: a build whose
 record layout has changed, or a file that does not line up with the decoder's issues,
-can't pair quotes with the wrong codes. Names and tick types are not compared, because the
-file's differ (the decoder keeps `Ｕ－ＮＥＸＴ` whole but drops a market prefix such as
-`Ｍ－`, and SBI's tick types follow no single column). The master is also refused if it
+can't pair quotes with the wrong codes. Names are not compared, because the file's
+differ (the decoder keeps `Ｕ－ＮＥＸＴ` whole but drops a market prefix such as
+`Ｍ－`). The master is also refused if it
 does not look like a market (security codes, base prices inside their limits, plausible
 lot sizes, names).
 
@@ -212,7 +285,13 @@ take an eighth `_initialize` argument that the demo's doesn't: the session sched
 made by `_createSchedule` from the boot's `schedule_info` (seven session times in
 microseconds after midnight, then `sq_jump_interval`, in the boot's order). The host
 passes it whenever the decoder exports `_createSchedule`; the demo's build starts as
-before. `_createSchedule` stores the eight values as integers and counts the bars as
+before. The boot gives `sq_jump_interval` in seconds (180), but the decoder adds it to a
+special quote's time in microseconds, where the demo's build has a fixed 180,000,000, so
+the host passes it in microseconds and refuses a value outside 1-3,600 s. Passed as 180,
+a special quote's next time came 180 µs after the quote instead of three minutes (no
+broker session had streamed yet, so no recording carries such times). In microseconds, the first 3,000 frames of the
+demo's stream replayed through the March build under 2021's hours give the demo decoder's
+special quote time on all 141,281 updates (4,738 of them with one). `_createSchedule` stores the eight values as integers and counts the bars as
 (morning close - open) / 5 min + (afternoon close - open) / 5 min; every stock keeps a
 pointer to the schedule, and a trade's time is turned into its bar through it. Without
 a schedule these decoders keep no price bars (`_ohlcLength` is 0), can't return a stock
@@ -229,29 +308,42 @@ entry per issue whose snapshot is behind the stream. The binary reply is pushed 
 the decoder as it comes.
 
 What is verified: the decoder SBI served in pybrisk's March 2026 capture exports
-the demo's interface apart from `_getPortfolio` (so SBI quotes have no
-`issue_status`), and it initializes under Node with protocol 18000. Offline, it loads
+the demo's interface apart from `_getPortfolio`, and it initializes under Node with
+protocol 18000. (Its stock view carries the issue status one word after the demo's
+last, as the status plus 8; minus 8 it equals the demo's `_getPortfolio` status on all
+731,251 views of the demo's stream replayed through both builds. SBI quotes record it
+from there.) Offline, it loads
 that capture's master, schedule and catch-up reply: the catch-up advances each of its
-1,552 issues by the updates requested, briskapi's request for them is the one the
-vendor client sent, and 1,549 stock views read back the decoder's frame numbers (the
-other three, the busiest, trap in the decoder's own arithmetic with no snapshot under
-them); started without the schedule, none does. Given the demo's assets, the same tool
+1,552 issues by exactly the updates requested, briskapi's request for them is the one the
+vendor client sent, and 1,549 stock views read back the decoder's frame numbers; started
+without the schedule, none does. The other three trap: with no snapshot under the
+catch-up, an update takes an order quantity below zero, and the decoder traps converting
+it to an unsigned integer (`float unrepresentable in integer range`). Full quotes, which
+also read the order book, trap on 292 of the 1,552. With the demo's snapshot under it, no
+view or quote traps; a live session reaches this only with a missing snapshot or a lost,
+repeated or reordered update, and the issue is then skipped (above). Given the demo's assets, the same tool
 also loads the demo's snapshot as above (`tools/brisk_mock/sbi_master_layout.py`). The
 October build did the same in a one-off check. The demo
 decoder is tested against the vendor client's own indices on real data, and its
 heartbeat, ping reply and callbacks through its function table; the ping loop and
 the whole flow run offline against fake servers (plain, Engine.IO 3 and 4) using it.
-Replayed through SBI's March decoder, the 30,505 messages of the archive's copy of
-pybrisk's SBI stream (2026-03-11, the `sample_data` wire capture) are all accepted
-without an error; the decoder reads the server heartbeat (12:12:40-12:13:15 JST that
-day) and its first eight ping replies are byte for byte the browser's. The recording
-starts partway into the connection, without the opening frame-number message, so the
-decoder applies no stock update from it on its own. Given one made in the demo's layout
-(`0x88`, a 16-bit issue count, a 32-bit update number per issue, here all 0), which the
-2026 builds accept, it applies 14,160 quote changes to 1,949 issues. The values are
-relative to the missing snapshot (Toyota's bid and ask read 0), and it still answers
-only the first eight of the 60 server pings, each echoing its ping. The offline check
-(`tools/brisk_mock/sbi_master_layout.py`) replays this too.
+Replayed through SBI's March decoder, the archive's copy of pybrisk's SBI stream
+(2026-03-11, the `sample_data` wire capture: 30,505 messages from 12:12:40 JST) starts
+partway into the connection, without the opening frame-number message, so the decoder
+applies no stock update from it on its own. Given one made in the demo's layout (`0x88`,
+a 16-bit issue count, a 32-bit update number per issue, here all 0; it is the only
+opening message either build knows), the recording stalls the decoder: every 40 s, after
+every eighth ping, it holds the same 15-byte frame (`99eb2c6a…`), from which the decoder
+can't complete a message. It misreads the frames after it (its clock jumps ten hours;
+in the demo's build that frame takes 5 s), then finds no message boundary again, so it
+answered only the first eight of the 60 pings and applied 14,160 quote changes. The host
+now stops there and names the frame. Without those seven frames, every message is taken,
+all 60 pings are answered with themselves, as the browser's were, and 84,160 quote changes
+apply to 3,279 issues (values relative to the missing snapshot: Toyota's bid and ask read
+0). The browser's decoder, the same build, answered all 60 pings, so it was probably not
+given those frames as recorded: its client may drop them, they may come from another
+connection, or the capture may have damaged them. A live session will tell. The offline
+check (`tools/brisk_mock/sbi_master_layout.py`) replays the stream both ways.
 (pybrisk's own `capture_summary.json` has wrong bytes in 2,478 of these messages; the
 archive's copy matches pybrisk's per-message files.)
 What is not verified against a live session: any of the above on SBI itself, the
@@ -495,7 +587,7 @@ is contributor-declared:
   rejected. Local timing values must be plausible: decode ≤ 10 s, receipt clock
   monotonic within 24 h, millisecond values with at most microsecond precision,
   and pacing consistent throughout. End-of-stream counts must match.
-  SBI quotes omit `issue_status`, which its decoder does not export, and use null
+  SBI quotes use null
   replay lateness. Its end frame count includes pre-bootstrap catch-up frames,
   so it can exceed the number of emitted quote batches. SBI packaging removes
   connection/decoder diagnostics and publishes only

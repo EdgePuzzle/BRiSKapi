@@ -459,9 +459,6 @@ def sbi_batches(source='sbi_live'):
     records = batches()
     records[0].update(source=source, trading_date='20260311',
                       input_transport={**schema.BROKER_TRANSPORT[source], 'decoder': '/private/decoder.js', 'session': 'secret'})
-    for batch in records:
-        for q in batch.get('quotes', []):
-            q.pop('issue_status')
     records[1]['replay_lateness_ms'] = None
     records[-1]['frames'] = 5  # Includes frames used to catch up before bootstrap.
     return records
@@ -498,7 +495,15 @@ def test_broker_market_recording_publish_and_pull(tmp_path, source):
 @pytest.mark.parametrize('change', [
     lambda b: b[0].update(cookies={'session': 'secret'}),
     lambda b: b[0]['input_transport'].update(token='secret'),
-    lambda b: b[0]['quotes'][0].update(issue_status=0),
+    lambda b: b[0]['quotes'][0].update(auction_reference_price10=0),   # renamed reference_price10
+    lambda b: b[1]['quotes'][0].update(bid_levels=[[1000, 1, 1], [1010, 1, 1]]),   # bids best (highest) first
+    lambda b: b[1]['quotes'][0].update(ask_levels=[[1000, 1, 1]] * 2),
+    lambda b: b[1]['quotes'][0].update(ask_levels=[[1000 + k, 1, 1] for k in range(11)]),
+    lambda b: b[1]['quotes'][0].update(bid_levels=[[1000, 1]]),
+    lambda b: b[1].update(skipped_issues=[0]),     # also quoted in the same batch
+    lambda b: b[1].update(skipped_issues=[]),
+    lambda b: b[1].update(skipped_issues=[5]),     # not in the master
+    lambda b: b[-1].update(skipped_issues=[0]),
     lambda b: b[1]['quotes'][0].update(token='secret'),
     lambda b: b[1]['quotes'][0].pop('volume'),
     lambda b: b[1].update(replay_lateness_ms=0),
@@ -510,6 +515,19 @@ def test_sbi_market_recording_rejects_unknown_fields_and_bad_continuity(change):
     records[0]['input_transport'] = dict(schema.SBI_TRANSPORT)
     change(records)
     with pytest.raises(ValueError):
+        schema.validate_stream(stream(records))
+
+
+def test_books_and_skipped_issues_validate():
+    # An issue the decoder could not read at the start is listed in place of its quote, and quoted
+    # once it updates; a book side holds up to ten levels, best price first.
+    records = sbi_batches()
+    records[0]['input_transport'] = dict(schema.SBI_TRANSPORT)
+    records[0]['skipped_issues'] = [records[0]['quotes'].pop()['issue_id']]
+    records[1]['quotes'][0].update(bid_levels=[[1230, 300, 2], [1220, 100, 1]], ask_levels=[[1240 + k, 100, 1] for k in range(10)])
+    assert schema.validate_stream(stream(records))['quote_updates'] == 1
+    records[0].pop('skipped_issues')
+    with pytest.raises(ValueError, match='Incomplete bootstrap'):
         schema.validate_stream(stream(records))
 
 class HTTP:

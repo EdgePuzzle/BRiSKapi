@@ -13,7 +13,7 @@ from briskapi.schema import canonical_lines, validate_stream
 
 JST = dt.timezone(dt.timedelta(hours=9), 'JST')
 PRICES = ('last_price10', 'open_price10', 'bid_price10', 'ask_price10', 'indicative_price10',
-          'closing_indicative_price10', 'indicative_open_price10', 'auction_reference_price10')
+          'closing_indicative_price10', 'indicative_open_price10', 'reference_price10')
 MASTER_PRICES = ('base_price10', 'limit_up10', 'limit_down10')
 
 
@@ -74,11 +74,19 @@ def micros(date: str, at) -> int | None:
 
 
 def quote_view(quote: dict, date: str) -> dict:
-    """Yen prices (None for the vendor's zero sentinel), JST times and the raw quantities/enums."""
+    """Yen prices (None for the vendor's zero sentinel), JST times and the raw quantities/enums.
+
+    The book sides become `bids` and `asks`: the best prices holding orders, best first, as
+    {'price', 'quantity', 'orders'}. `turnover10` (tenths of a yen) becomes `turnover` in yen.
+    """
     view = {'code': quote['code'], 'issue_id': quote['issue_id'], 'time': timestamp(date, quote['source_time_us'])}
     for key, value in quote.items():
         if key in PRICES:
             view[key[:-2]] = value / 10 if value else None
+        elif key in ('bid_levels', 'ask_levels'):
+            view[key[:3] + 's'] = [{'price': p / 10, 'quantity': q, 'orders': n} for p, q, n in value]
+        elif key == 'turnover10':
+            view['turnover'] = value / 10
         elif key == 'special_quote_time_us':
             view['special_quote_time'] = timestamp(date, value) if value else None
         elif key not in view and key != 'source_time_us':

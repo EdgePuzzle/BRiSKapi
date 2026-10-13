@@ -220,7 +220,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     marketFinished: () => { marketFinished = true; },
   } });
   trace?.(`master: ${decoder.master.length} issues, ${decoder.layout.size}-byte records, agreeing with the master file`
-    + (decoder.boot.skipped_exceptional_sq ? `; special quotes not sent for ${decoder.boot.skipped_exceptional_sq.join(',')}` : '')
+    + (decoder.boot.skipped_exceptional_sq ? `; special quotes not sent for ${decoder.boot.skipped_exceptional_sq.join(',')} (not in the master)` : '')
     + (decoder.scheduled ? `; schedule applied (${decoder.ohlc} price bars)` : ''));
   const selected = new Set(codes);
   const master = decoder.master.filter(m => !selected.size || selected.has(m.code));
@@ -251,16 +251,18 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     clearTimeout(timer);
     decoder.begin();
     const now = decoder.time();
-    const quotes = master.map(m => decoder.quote(m.issue_id));
+    const { quotes, skipped } = decoder.quotes(master.map(m => m.issue_id));
     // The stock view layout is unverified for the broker build: refuse implausible values.
-    if (quotes.some(q => q.frame > q.max_frame || q.source_time_us > now)) {
+    if (!quotes.length || quotes.some(q => q.frame > q.max_frame || q.source_time_us > now)) {
       throw new Error(`${where.name} stock view layout not recognised (ohlcLength=${decoder.ohlc})`);
     }
+    if (skipped.length) trace?.(`unreadable (skipped until they update): ${skipped.map(id => decoder.master[id].code).join(',')}`);
     started = true;
     const batch = { type: 'bootstrap', seq: seq++, source: where.source, trading_date: String(app.date).replaceAll('-', ''),
       input_transport: { ...input_transport, dialect: link.mode, engineio: link.version, caught_up_issues: caughtUp },
       source_timestamp_origin: 'brisk_decoder_unverified', exchange_delay_ms: null,
-      source_time_us: now, market_issue_count: decoder.master.length, master, quotes };
+      source_time_us: now, market_issue_count: decoder.master.length, master, quotes,
+      ...(skipped.length && { skipped_issues: skipped.sort((a, b) => a - b) }) };
     work = work.then(() => failure || emit(batch)).catch(fail);
   };
 
@@ -272,12 +274,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     trace?.(`catch-up needed for ${lagging.length} issues`);
     work = work.then(async () => {
       if (failure) return;
-      decoder.push(await requestCatchUp(lagging));
-      const left = decoder.laggingIssues();
-      if (left.length) {
-        throw new Error(`Catch-up left ${left.length} issues behind the stream (first: issue ${left[0].issue_id}, `
-          + `frame ${left[0].from}, stream starts at ${left[0].to})`);
-      }
+      decoder.catchUp(await requestCatchUp(lagging), lagging);
       finishStart(lagging.length);
     }).catch(fail);
   };
@@ -286,10 +283,11 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     const t0 = process.hrtime.bigint();
     decoder.feed(frame);
     decoder.applyBasePrice();
-    const quotes = decoder.changed().filter(id => ids.has(id)).map(id => decoder.quote(id));
+    const { quotes, skipped } = decoder.quotes(decoder.changed().filter(id => ids.has(id)));
     updates += quotes.length;
     await emit({ type: 'quotes', seq: seq++, source_time_us: decoder.time(), received_unix_ms,
-      decode_ns: Number(process.hrtime.bigint() - t0), replay_lateness_ms: null, quotes });
+      decode_ns: Number(process.hrtime.bigint() - t0), replay_lateness_ms: null, quotes,
+      ...(skipped.length && { skipped_issues: skipped.sort((a, b) => a - b) }) });
   };
 
   const onFrame = frame => {

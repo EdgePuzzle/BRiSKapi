@@ -17,8 +17,8 @@ TOYOTA = {'issue_id': 1, 'code': '7203', 'tick_type': 3, 'base_price10': 101000,
 
 
 def quote(issue, code, frame, at, **fields):
-    return {**dict.fromkeys(schema.QUOTE_KEYS, 0), 'issue_id': issue, 'code': code, 'frame': frame,
-            'max_frame': frame, 'source_time_us': at, **fields}
+    return {**dict.fromkeys(schema.QUOTE_KEYS, 0), 'bid_levels': [], 'ask_levels': [], 'issue_id': issue, 'code': code,
+            'frame': frame, 'max_frame': frame, 'source_time_us': at, **fields}
 
 
 def market():

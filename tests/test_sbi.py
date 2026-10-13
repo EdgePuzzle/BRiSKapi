@@ -175,7 +175,7 @@ MIDNIGHT_MS = int(dt.datetime(2026, 3, 11, tzinfo=JST).timestamp() * 1000)
 
 def sbi_session(frames=150):
     """Bootstrap, `frames` one-quote batches 100 ms apart (20 ms old on receipt, one 1.5 s stall) and end."""
-    q = {**dict.fromkeys(schema.QUOTE_KEYS - {'issue_status'}, 0),
+    q = {**dict.fromkeys(schema.QUOTE_KEYS, 0), 'bid_levels': [], 'ask_levels': [],
          'issue_id': 0, 'code': '7203', 'frame': 1, 'max_frame': 1, 'source_time_us': OPEN_US,
          'indicative_price10': 101500, 'market_buy_quantity': 3, 'market_sell_quantity': 1}
     master = {**dict.fromkeys(schema.MASTER_KEYS, 0), 'issue_id': 0, 'code': '7203', 'name': 'Toyota', 'lot_size': 100}

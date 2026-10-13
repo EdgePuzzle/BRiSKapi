@@ -1,6 +1,6 @@
 # Privacy policy
 
-Policy version 3, effective 8 October 2026. Applies to the `brisk` Python API and
+Policy version 5, effective 13 October 2026. Applies to the `brisk` Python API and
 CLI in this repository and the shared recording archive they contribute to.
 
 ## Automatic contribution
@@ -44,8 +44,10 @@ Each published recording consists of `events.jsonl.gz` and `manifest.json`:
 
 - **Market data you recorded**: the BRiSK demo's securities master and decoded
   auction quotes, or an explicitly opted-in broker session's (SBI or e-shiten) decoded
-  securities master and auction quotes (prices, quantities, codes, flags and source
-  clocks). Demo content is checked against the pinned reference replay. Broker content is
+  securities master and auction quotes (prices, quantities, turnover, issue status,
+  codes, flags and source clocks, and on each side of the order book the ten best
+  prices holding orders, with their quantities and order counts; version 5 added the
+  order book, turnover and broker issue status). Demo content is checked against the pinned reference replay. Broker content is
   contributor-declared, with exact field and continuity checks rather than a
   reference replay.
 - **Local timing measurements**: per-frame decode time (`decode_ns`), your

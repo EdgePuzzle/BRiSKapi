@@ -246,7 +246,7 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | --- | --- |
 | `briskapi.connect(...)` | ライブの `Feed`（既定のデータ源になる） |
 | `Ticker(code).info()` | 銘柄名、売買単位、呼値の種別、基準値、値幅制限 |
-| `Ticker(code).quote(at=None)` | 買い・売り気配、予想約定価格・数量、成行・引け条件付きの数量、直近の約定 |
+| `Ticker(code).quote(at=None)` | 買い・売り気配とその数量・件数、板の各側の上位10本（`bids`、`asks`）、予想約定価格・数量、成行・引け条件付きの数量、直近の約定、売買代金、銘柄の状態 |
 | `Ticker(code).auction(at=None)` | 板寄せの予想状態と `market_order_imbalance`（成行の買い数量 − 売り数量） |
 | `Ticker(code).history(start, end)` | すべての更新（時系列順） |
 | `Market().stocks()` | 全銘柄のマスター |

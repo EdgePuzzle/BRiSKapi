@@ -239,7 +239,7 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | --- | --- |
 | `briskapi.connect(...)` | Live `Feed`; becomes the default source |
 | `Ticker(code).info()` | Name, lot size, tick type, base price and daily limits |
-| `Ticker(code).quote(at=None)` | Bid/ask, indicative price/volume, market-order and closing quantities, last trade |
+| `Ticker(code).quote(at=None)` | Bid/ask with their quantities and orders, the ten best book levels per side (`bids`, `asks`), indicative price/volume, market-order and closing quantities, last trade, turnover, issue status |
 | `Ticker(code).auction(at=None)` | Indicative auction state with `market_order_imbalance` (market buy minus sell) |
 | `Ticker(code).history(start, end)` | Every update in order |
 | `Market().stocks()` | Master for every security |

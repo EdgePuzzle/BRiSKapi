@@ -55,7 +55,7 @@ class Ticker:
     def auction(self, at=None) -> dict:
         """Indicative auction price/volume and market-order quantities at a time."""
         q = self.quote(at)
-        return {key: q[key] for key in ('code', 'time', 'indicative_price', 'indicative_volume', 'indicative_side',
+        return {key: q[key] for key in ('code', 'time', 'indicative_price', 'indicative_volume', 'indicative_imbalance_side',
                                         'indicative_open_price', 'market_buy_quantity', 'market_sell_quantity')} | {
             'market_order_imbalance': q['market_buy_quantity'] - q['market_sell_quantity']}
 
