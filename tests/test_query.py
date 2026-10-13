@@ -1,5 +1,6 @@
-"""The cloud API: query_engine over stored recordings, the central bars, query_service and briskapi.Historical."""
+"""The cloud API: query_engine over stored recordings, owners' bars, query_service and briskapi.Historical."""
 import base64
+import copy
 import datetime as dt
 import io
 import json
@@ -18,7 +19,7 @@ import briskapi.cli as cli
 import briskapi.schema as schema
 import query_engine as engine
 import query_service
-from briskapi import _historical
+from briskapi import _historical, identity
 from test_archive import (DB, OTHER, OWNER, S3, SECRET, isolated, packaged, stream, ticket_for, upload,  # noqa: F401
                           stored)
 
@@ -155,15 +156,15 @@ def bars(s3, owner, schema_, **params):
     return query(s3, owner, dataset='XTKS.BRISK', schema=schema_, start='2026-10-13', **params)
 
 
-def test_central_bars_are_shared_but_each_owner_gets_only_its_own_coverage(archive):
+def test_each_owner_gets_bars_built_from_its_own_recordings(archive):
     s3, db, put = archive
     mine = put(session(0, 150))               # 09:00:00 to 09:02:30
-    theirs = put(session(0, 300), OTHER)      # 09:00:00 to 09:05:00
-    root = f'{engine.CENTRAL}/{DATE}'
-    assert sorted(k.rsplit('/', 1)[1] for k in s3.objects if k.startswith(f'{root}/sources/')) == \
-        sorted(f"{p.split('/')[1]}-{p.rsplit('/', 1)[1]}" for p in (mine, theirs))
+    put(session(0, 300), OTHER)               # 09:00:00 to 09:05:00
+    root, theirs = engine.bars_root(OWNER, DATE), engine.bars_root(OTHER_OWNER, DATE)
+    assert sorted(k for k in s3.objects if k.startswith(engine.BARS_ROOT + '/')) == \
+        sorted(f'{r}/{name}.parquet' for r in (root, theirs) for name in engine.BARS)
     minute = bars(s3, OWNER, 'ohlcv-1m', symbols='7203').to_pylist()
-    # Whole minutes inside 09:00:00 to 09:02:30 only, from the deduplicated trades (not doubled).
+    # Whole minutes inside 09:00:00 to 09:02:30 only.
     assert [m['ts_event'].astimezone(JST).strftime('%H:%M') for m in minute] == ['09:00', '09:01']
     assert minute[0]['volume'] == sum(q for s in range(10, 60, 10) for i, _, q in trades_at(s) if i == 0)
     assert (minute[0]['open'], minute[0]['close']) == (3001.0, 3005.0)
@@ -175,19 +176,57 @@ def test_central_bars_are_shared_but_each_owner_gets_only_its_own_coverage(archi
     # An hour or a day needs the whole session part of it covered.
     assert bars(s3, OTHER_OWNER, 'ohlcv-1h').num_rows == 0 and bars(s3, OTHER_OWNER, 'ohlcv-1d').num_rows == 0
     assert bars(s3, THIRD_OWNER(), 'ohlcv-1m').num_rows == 0
-    # Deleting a recording takes it out of the day's bars at once; restoring brings it back.
-    assert service.api(_event('delete', theirs, OTHER), s3, db)['statusCode'] == 200
-    assert json.loads(s3.objects[f'{root}/sources/{OWNER}-{mine.rsplit("/", 1)[1]}'])['prefix'] == mine
-    built = pq.read_table(io.BytesIO(s3.objects[f'{root}/ohlcv-1m.parquet']))
-    assert pc.max(built.column('ts_event')).as_py().astimezone(JST).strftime('%H:%M') == '09:02'
+    # A second recording of the owner's own, overlapping the first: each trade counted once, and the other owner's
+    # bars untouched.
+    built = {k: v for k, v in s3.objects.items() if k.startswith(theirs)}
+    later = put(session(120, 300))
+    assert bars(s3, OWNER, 'ohlcv-1m', symbols='7203') == bars(s3, OTHER_OWNER, 'ohlcv-1m', symbols='7203')
+    assert {k: v for k, v in s3.objects.items() if k.startswith(theirs)} == built
+    # Deleting a recording rebuilds its owner's bars at once; restoring brings it back.
+    assert service.api(_event('delete', later, SECRET), s3, db)['statusCode'] == 200
+    assert bars(s3, OWNER, 'ohlcv-1m', symbols='7203').to_pylist() == minute
     service.api(_event('delete', mine, SECRET), s3, db)
     assert not [k for k in s3.objects if k.startswith(root)]
     service.api(_event('restore', mine, SECRET), s3, db)
     assert f'{root}/ohlcv-1m.parquet' in s3.objects and len(bars(s3, OWNER, 'ohlcv-1m', symbols='7203')) == 2
-    # Without central bars (not built yet), an owner's own recordings give the same.
-    for key in [k for k in s3.objects if k.startswith(f'{root}/ohlcv-')]:
+    # Without built bars (a rebuild failed), a query builds the same from the recordings.
+    for key in [k for k in s3.objects if k.startswith(root)]:
         del s3.objects[key]
     assert bars(s3, OWNER, 'ohlcv-1m', symbols='7203').to_pylist() == minute
+
+
+def made_up(price10=None):
+    """A made-up broker session that passes every check: a bootstrap at 09:00:00 and batches at 09:00:50 (with one
+    7203 print at `price10`, if given, in the frame of the real 09:00:50 print) and at 15:30:00, so that its clock
+    range spans the trading day."""
+    bootstrap, batch, end = session(0, 1)
+    out = [bootstrap]
+    for seq, second in enumerate((50, 23400), 1):
+        b, us = copy.deepcopy(batch), OPEN_US + second * 1_000_000
+        b.update(seq=seq, source_time_us=us, received_unix_ms=batch['received_unix_ms'] + (second - 1) * 1000, trades=[])
+        for q in b['quotes']:
+            q.update(source_time_us=us, frame=second + 1, max_frame=second + 1)
+        if price10:
+            b['quotes'][0].update(volume=100, turnover10=price10 * 100)
+            if second == 50:
+                b['trades'] = [{'issue_id': 0, 'code': '7203', 'frame': 51, 'time_us': us, 'price10': price10,
+                                'quantity': 100, 'side': 1}]
+        out.append(b)
+    return out + [{**end, 'seq': 3, 'source_time_us': OPEN_US + 23400 * 1_000_000, 'frames': 3, 'quote_updates': 4}]
+
+
+def test_no_upload_reveals_or_changes_another_owners_bars(archive):
+    """Both worked on 1.0.0's shared bars: covering the day with a made-up session to receive everyone's bars, and
+    a made-up price for a real print, from an owner ID that sorts first, replacing the real one in everyone's."""
+    s3, db, put = archive
+    put(session(0, 300))
+    honest = bars(s3, OWNER, 'ohlcv-1m', symbols='7203').to_pylist()
+    put(made_up(), OTHER)
+    assert bars(s3, OTHER_OWNER, 'ohlcv-1m', symbols='7203').num_rows == 0
+    attacker = next(s for s in iter(identity.new, None) if schema.owner(s) < OWNER)
+    put(made_up(price10=99990), attacker)
+    assert bars(s3, OWNER, 'ohlcv-1m', symbols='7203').to_pylist() == honest
+    assert [b['high'] for b in bars(s3, schema.owner(attacker), 'ohlcv-1m', symbols='7203').to_pylist()] == [9999.0]
 
 
 def THIRD_OWNER():
@@ -202,9 +241,10 @@ def _event(action, prefix, secret, method='POST'):
 def test_a_failed_rebuild_removes_the_days_bars(archive, monkeypatch):
     s3, db, put = archive
     mine = put(session(0, 120))
+    assert f'{engine.bars_root(OWNER, DATE)}/ohlcv-1m.parquet' in s3.objects
     monkeypatch.setattr(engine, 'rebuild_bars', lambda *a: 1 / 0)
     service.api(_event('delete', mine, SECRET), s3, db)
-    assert not [k for k in s3.objects if k.startswith(f'{engine.CENTRAL}/{DATE}/ohlcv-')]
+    assert not [k for k in s3.objects if k.startswith(engine.bars_root(OWNER, DATE))]
 
 
 def test_the_demo_is_open_to_every_identity(packaged, archive, monkeypatch):
@@ -305,6 +345,41 @@ def test_the_service(archive, monkeypatch):
     assert call('/v0/metadata.list_datasets', method='GET')['statusCode'] == 429
 
 
+def test_addresses_are_limited_before_keys_are_read(archive, monkeypatch):
+    """Requests without a valid key count against the address, and a fresh identity does not reset it."""
+    s3, _, put = archive
+    put(session(0, 150))
+    db = DB(enforce=True)
+    monkeypatch.setattr(query_service, 'ADDRESS', (3, 60))
+    call = lambda *a, ip='127.0.0.1', **k: query_service.api({**api_event(*a, **k), 'requestContext': {  # noqa: E731
+        'http': {'method': k.get('method', 'POST'), 'sourceIp': ip}}}, s3, db)
+    assert call('/v0/metadata.list_datasets', method='GET', secret=None)['statusCode'] == 400
+    assert call('/v0/metadata.list_datasets', method='GET', secret='brisk-id-v1-nope')['statusCode'] == 400
+    assert call('/v0/metadata.list_datasets', method='GET', secret=OTHER)['statusCode'] == 200
+    refused = call('/v0/metadata.list_datasets', method='GET', secret=THIRD)
+    assert refused['statusCode'] == 429 and 'from this address' in json.loads(refused['body'])['detail']
+    assert call('/v0/metadata.list_datasets', method='GET', ip='2001:db8::1')['statusCode'] == 200
+    # One address cannot use up the whole service's day of returned bytes, whatever identities it names.
+    monkeypatch.setattr(query_service, 'ADDRESS', (120, 60))
+    params = {'dataset': 'XTKS.BRISK', 'schema': 'trades', 'symbols': '7203', 'start': '2026-10-13'}
+    size = len(base64.b64decode(call('/v0/timeseries.get_range', params, ip='2001:db8::2')['body']))
+    monkeypatch.setattr(query_service, 'ADDRESS_BYTES', (size + 1, 86400))
+    refused = call('/v0/timeseries.get_range', params, ip='2001:db8::3', secret=OTHER)  # the same /64
+    assert refused['statusCode'] == 429 and 'for this address' in json.loads(refused['body'])['detail']
+    assert db.used[next(k for k in db.used if k.startswith('query-bytes-all:'))] == size
+    assert call('/v0/timeseries.get_range', params, ip='2001:db8:0:1::1')['statusCode'] == 200
+
+
+def test_times_out_of_range_are_refused(archive):
+    s3, db, _ = archive
+    for start in ('1' * 31, '0001-01-01', '9999-12-31T23:59:59-14:00'):
+        got = query_service.api(api_event('/v0/timeseries.get_range', {'dataset': 'XTKS.BRISK', 'start': start}), s3, db)
+        assert got['statusCode'] == 400, start
+    got = query_service.api(api_event('/v0/metadata.get_dataset_condition', {
+        'dataset': 'XTKS.BRISKDEMO', 'start_date': '9999-12-01', 'end_date': '9999-12-31'}, method='GET'), s3, db)
+    assert got['statusCode'] in (400, 404)
+
+
 class _Response(io.BytesIO):
     def __init__(self, body, headers):
         super().__init__(body)
@@ -337,6 +412,8 @@ def test_the_python_client(archive, monkeypatch, tmp_path):
     monkeypatch.setattr(_historical.urllib.request, 'build_opener', lambda *handlers: Opener())
     monkeypatch.setattr(_historical.urllib.request, 'urlopen',
                         lambda url, timeout: _Response(s3.objects[url.removeprefix('https://s3.test/')], {}))
+    with pytest.raises(ValueError, match='Refusing to send your identity'):
+        briskapi.Historical(gateway='http://query.test/')
     client = briskapi.Historical(gateway='https://query.test/')
     assert client.key == SECRET and client.metadata.list_datasets() == ['XTKS.BRISK', 'XTKS.BRISKDEMO']
     data = client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', symbols=['7203'], path=tmp_path / 't.parquet')
@@ -377,6 +454,11 @@ def test_the_python_client(archive, monkeypatch, tmp_path):
     assert client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', schema='ohlcv-1m').to_df().index.name == 'ts_event'
     monkeypatch.setattr(query_service, 'INLINE', 10)   # followed by hand, without the key
     assert len(client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', symbols='7203')) == 15
+    signed = s3.generate_presigned_url
+    monkeypatch.setattr(s3, 'generate_presigned_url', lambda *a, **k: signed(*a, **k).replace('https://', 'http://'))
+    with pytest.raises(briskapi.BriskError, match='HTTP 303'):    # only to https
+        client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', symbols='7203')
+    monkeypatch.setattr(s3, 'generate_presigned_url', signed)
     assert client.metadata.get_record_count('XTKS.BRISK', start='2026-10-13', symbols='7203') == 15
     assert client.metadata.get_cost('XTKS.BRISK', start='2026-10-13') == 0.0
     assert client.metadata.get_dataset_range('XTKS.BRISK')['start'] == '2026-10-13'

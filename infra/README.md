@@ -22,9 +22,9 @@ would create a second deployment) and, for the cloud API's function, role and lo
 CloudWatch Logs, DynamoDB and STS access. It does not modify default AWS regions.
 
 The execution role can read and write only staging, archive, timing, `reference/` and
-`central/` objects, list the bucket (so that a missing key answers 404, not 403) and object
+`bars/` objects, list the bucket (so that a missing key answers 404, not 403) and object
 versions only under `archive/` and `timing/`, delete current
-objects in staging, archive, timing and `central/`, and delete object versions only in staging (so an
+objects in staging, archive, timing and `bars/`, and delete object versions only in staging (so an
 owner's delete leaves noncurrent versions it cannot purge, and it can delete nothing under
 `reference/`). It also updates the quota table and writes its own logs. The function URL accepts requests
 without AWS credentials; each names its owner with an identity secret, and the function
@@ -46,7 +46,7 @@ sections of [ARCHITECTURE.md](../ARCHITECTURE.md)). The bucket's prefixes:
 | `archive/OWNER/YYYYMMDD/FROM-TO-SHA256/` | A recording's tables, `files.json` (where each is) and, written last, `manifest.json` |
 | `reference/SOURCE/TIMELINE/` | A demo or synthetic replay's market tables, kept once, and `complete.json` |
 | `timing/OWNER/YYYYMMDD/` | Timing reports |
-| `central/XTKS.BRISK/YYYYMMDD/` | The shared OHLCV bars of a trading day (`ohlcv-1s`, `-1m`, `-1h`, `-1d` `.parquet`) and `sources/OWNER-NAME`, a marker per live recording that backs them |
+| `bars/OWNER/YYYYMMDD/` | An owner's OHLCV bars of a trading day (`ohlcv-1s`, `-1m`, `-1h`, `-1d` `.parquet`), built from its live recordings of that day |
 | `results/OWNER/` | Cloud API results too large for a response, kept for a day |
 | `samples/`, `deploy/` | The legacy sample download; the dependency layer |
 
@@ -71,12 +71,14 @@ with an already-used ticket, is deleted on arrival. The deployer creates a rando
 `QUOTA_SALT` once and keeps it across redeploys, so per-IP quota entries are keyed
 hashes that cannot be reversed to addresses.
 
-The deployer reserves concurrency at four for the archive function when the regional account
-quota allows it (the cloud API's function has none reserved). The current small Tokyo account
-quota prevents reserving that capacity; AWS's
+The deployer reserves concurrency at four for the archive function and eight for the cloud
+API's when the regional account quota allows it, which caps what either can cost. The current
+small Tokyo account quota prevents reserving that capacity; AWS's
 account concurrency limit and application quotas still apply. This does not alter
-other functions' concurrency allocations. Upload quotas are intentionally modest
-and defined in `archive_service.py`; adjust them when usage warrants it.
+other functions' concurrency allocations. Every archive request counts against its address
+(120 a minute) before its identity is read, and deletes and restores against both (60 an hour).
+Upload quotas are intentionally modest and defined in `archive_service.py`; adjust them when
+usage warrants it.
 
 S3 can take a few minutes to apply a changed notification filter (0.9.0 changed it
 from `events.jsonl.gz` to `recording.zip`). An upload in that window is not ingested;
@@ -97,29 +99,31 @@ group (14 days) and function URL, which accepts requests without AWS credentials
 its owner with an identity secret as its API key. It runs Python 3.12 on arm64 with the same
 layer, 3,008 MB and a 300 second timeout; its environment is `ARCHIVE_BUCKET` and
 `QUOTA_TABLE` and the archive's `QUOTA_SALT` (so per-address entries are keyed hashes), and it
-has no bucket trigger. Its role can read `archive/`, `reference/`, the bar files under
-`central/` (not the source markers, which name owners) and `results/` objects, write `results/`, list the bucket (unconditionally, for the same 404 reason), update the
+has no bucket trigger. Its role can read `archive/`, `reference/`, `bars/` and `results/`
+objects, write `results/`, list the bucket (unconditionally, for the same 404 reason), update the
 quota table and write its own logs. It cannot write elsewhere or read staging or timing
 reports. Quotas: 60 requests a minute and 2 GB returned a UTC day per identity, and, since
-identities cost nothing to make, 120 requests a minute per IP address and 20 GB returned a day
-for everyone (`REQUESTS`, `RETURNED`, `ADDRESS` and `SERVED` in `query_service.py`), over which a
-request gets HTTP 429. The global byte cap bounds the data-transfer bill. Results of up to 4 MiB are returned
+identities cost nothing to make, 120 requests a minute and 4 GB returned a day per IP address
+(IPv6 by /64, counted before the key is read) and 20 GB returned a day for everyone (`REQUESTS`,
+`RETURNED`, `ADDRESS`, `ADDRESS_BYTES` and `SERVED` in `query_service.py`), over which a request
+gets HTTP 429. The global byte cap bounds the data-transfer bill; the per-address one keeps a
+single address from using it up. Results of up to 4 MiB are returned
 inline; larger ones are written to `results/OWNER/UUID.EXT` and fetched through a 303 to a
 15-minute presigned URL. The function prints nothing, so its log group holds only Lambda's
 own start, end and report lines.
 
-Live broker recordings also back the shared OHLCV bars under `central/XTKS.BRISK/YYYYMMDD/`.
-The archive function rebuilds a trading day's bars whenever a live recording of that day is
-stored, deleted or restored, inside that request or ingest: it reads the trades of every
-recording marked under the day's `sources/` and writes the four bar files, so a rebuild's
-time and memory grow with the day's uploads. A rebuild that fails removes the day's bars and
-logs `Central bars for DATE not rebuilt` in the archive function's log group; the next store,
-delete or restore of that day rebuilds them, and until then queries build an owner's bars from
-its own recordings. The role can delete current `central/` objects but no versions, so
-replaced or removed bars and markers remain as noncurrent versions until `ExpireReplacedBars`
-(below) removes them. No live recording was stored before the central bars existed, so every
-one has its marker. A rebuild that finds the day's markers changed while it ran (another upload
-or delete of that day) runs again, up to three times.
+Each owner's live broker recordings also have OHLCV bars built ahead, under
+`bars/OWNER/YYYYMMDD/`. The archive function rebuilds an owner's day of bars whenever one of its
+live recordings of that day is stored, deleted or restored, inside that request or ingest: it
+reads the trades of the owner's recordings of the day (about 0.8 s for a day of a million
+trades) and writes the four bar files. No other owner's recordings are read. A rebuild that
+fails removes that day's bars and logs `Bars for DATE not rebuilt` in the archive function's
+log group; the next store, delete or restore rebuilds them, and until then queries build them
+from the recordings. The role can delete current `bars/` objects but no versions, so replaced
+or removed bars remain as noncurrent versions until `ExpireReplacedBars` (below) removes them.
+A rebuild that finds the owner's recordings of the day changed while it ran (another upload,
+delete or restore) runs again, up to three times. 1.0.0 kept one set of shared bars per day
+under `central/`; none was ever built in this deployment, and nothing uses that prefix now.
 
 `XTKS.BRISKDEMO` reads the archive's copy of the demo replay under `reference/historical_mock/`
 and answers 404 until it exists. The first verified whole demo upload from any identity
@@ -147,7 +151,7 @@ restore window closes; S3 applies lifecycle rules asynchronously, so removal can
 a day. Staging has its own rule (`ExpireStaging`: two days), and so do the cloud API's
 prefixes: `ExpireResults` removes `results/` objects a day after they are written (and their
 noncurrent versions a day after they become so), and `ExpireReplacedBars` removes the
-noncurrent versions of `central/` objects a day after they become so, with expired delete
+noncurrent versions of `bars/` objects a day after they become so, with expired delete
 markers. Deployment replaces the bucket's
 whole lifecycle configuration, so a rule added by hand does not survive it, and the new rules
 also reach noncurrent versions that exist when they are first deployed: those older than 31

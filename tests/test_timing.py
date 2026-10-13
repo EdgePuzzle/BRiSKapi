@@ -91,7 +91,7 @@ def test_service_keeps_canonical_report_for_its_owner(monkeypatch, online):
     stale = {**r, 'trading_date': '20250101'}
     assert service.handler(event(body={'action': 'timing', 'report': stale}), None)['statusCode'] == 400
     db.reject = True
-    assert service.handler(event(body={'action': 'timing', 'report': r}), None)['statusCode'] == 400
+    assert service.handler(event(body={'action': 'timing', 'report': r}), None)['statusCode'] == 429
 
 
 def test_upload_timing_posts_report(monkeypatch):

@@ -360,15 +360,14 @@ Python), until you decide with `brisk consent --accept` or `--revoke`
   (about 0.4 MB instead of about 41 MB), the archive joins it to its verified copy of the
   demo's market tables, and `brisk pull` returns the complete recording, verified as before.
   (The very first demo upload to an archive sends the whole recording.) Your IP address is
-  used only to rate limit uploads.
+  used only for rate limits, as a keyed hash.
 - **What a broker session (SBI, e-shiten) uploads:** a timing summary (percentiles of
   decode time, data age at receipt and frame spacing, a stall count, the frame count, the
   trading date and the first and last minute; `briskapi.Archive().timing()` lists yours)
   and, once a trading day has ended, that day's decoded market recording: securities master,
   prices, quantities, books, trades, codes and local timing. Cookies, tokens and connection
-  diagnostics are never uploaded. The day's trades also go into the archive's shared OHLCV
-  bars, which hold no identity or local timing (see
-  [below](#querying-your-archive-in-the-cloud)).
+  diagnostics are never uploaded. The day's trades also give you OHLCV bars in the cloud,
+  built from your own recordings only (see [below](#querying-your-archive-in-the-cloud)).
 - **Opting out:** `--no-upload` for one run (`upload=False` in Python);
   `--no-upload-market-data` (`upload_market_data=False`) keeps only a broker capture's
   market recording local; `BRISK_UPLOAD=0` for every run in that environment;
@@ -408,7 +407,8 @@ path=None)` returns a store; `path` also writes its Parquet file. `client.metada
 `get_dataset_range(dataset)`, `get_dataset_condition(dataset, start_date, end_date)` (each date
 available or missing, and the clock windows your recordings cover, in JST),
 `get_record_count(...)` and `get_cost(...)`. `get_cost` is always 0: the cloud API is free,
-with quotas of 60 requests a minute and 2 GB a day per identity.
+with quotas of 60 requests a minute and 2 GB a day per identity, and 120 requests a minute and
+4 GB a day per IP address.
 
 - **Datasets** follow Databento's `VENUE.FEED` naming (XTKS is the Tokyo Stock Exchange).
   `XTKS.BRISK` is your own live recordings, whichever broker's BRiSK they came through.
@@ -424,14 +424,15 @@ with quotas of 60 requests a minute and 2 GB a day per identity.
 - **Symbols** are JPX codes. `instrument_id` is fixed per code: digits-only codes are their
   number (7203), others are 100,000 plus the code's base-36 value (`167A` is 154694).
 
-**OHLCV bars come only from the cloud.** The archive builds one set of bars per trading day
-from everyone's current uploads, counting each trade once (the shared bars). You receive a bar
-only when your own uploads cover that security and the bar's whole span within the trading
-sessions (09:00 to 11:30 and 12:30 to 15:30 JST). A recording from 08:55 to 11:31, for
-example, gets the morning's 1-minute and 1-hour bars but not the day bar. So uploading is how
-you get bars. (`XTKS.BRISKDEMO`'s bars are built from the demo's own trades.) The shared bars
-hold only prices, volumes and times, with no identity or local timing; see
-[PRIVACY.md](https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md) (policy version 7).
+**OHLCV bars come only from the cloud.** The archive builds your bars for each trading day
+from your own current live recordings of that day, counting each trade once, whenever you
+upload, delete or restore one, so a query reads them ready-made. They hold the bars your
+recordings cover: the security, and the bar's whole span within the trading sessions (09:00 to
+11:30 and 12:30 to 15:30 JST). A recording from 08:55 to 11:31, for example, gets the morning's
+1-minute and 1-hour bars but not the day bar. So uploading is how you get bars. No one else's
+uploads enter yours, and yours enter no one else's. (`XTKS.BRISKDEMO`'s bars are built from
+the demo's own trades.) See [PRIVACY.md](https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md)
+(policy version 7).
 `Ticker.candles()` is something else: BRiSK's own bars from your broker, which need a broker
 login.
 

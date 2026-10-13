@@ -20,7 +20,7 @@ Node tests and Rust tests/fmt/Clippy. CI supplies downloaded demo fixtures. Keep
 its Japanese translation README.ja.md, ARCHITECTURE.md (internals), docs/cloud-api.md,
 PRIVACY.md, infra/README.md, docs/data-format.md (a test checks it names every API column) and
 schema documentation synchronized; changes to collected
-data bump `POLICY_VERSION`, and PRIVACY.md also covers the shared OHLCV bars and who
+data bump `POLICY_VERSION`, and PRIVACY.md also covers how OHLCV bars are built and who
 receives them.
 
 `infra/deploy.py` mutates AWS resources and is reserved for explicit deployment

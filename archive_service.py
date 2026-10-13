@@ -4,6 +4,10 @@ Every request but a ticket's status names its owner with `Authorization: Bearer 
 the owner ID (a one-way hash of the secret, briskapi.schema.owner) scopes everything it uploads,
 lists, downloads or deletes. Only the samples under samples/ are public.
 
+Identities are never registered and cost nothing to make, so per-identity limits alone bound nothing:
+every request first counts against its source address (a keyed hash; IPv6 by /64), before its identity
+is read. With 128-bit secrets that already makes guessing one hopeless, and it bounds the cost of trying.
+
 A recording is stored as its four tables under archive/OWNER/YYYYMMDD/FROM-TO-SHA256/, listed in its
 files.json, with manifest.json written last as the commit marker. A demo (or synthetic) replay's market
 tables are the same for everyone, so the archive keeps them once, under reference/SOURCE/TIMELINE/, and
@@ -13,13 +17,14 @@ reference copy exists.
 Deleting leaves an owner's objects as noncurrent versions in the versioned bucket: the owner can restore
 them for RESTORE_DAYS days, and the bucket's lifecycle removes them a day after that (see PRIVACY.md).
 
-Live recordings also back the central OHLCV bars (query_engine): storing, deleting or restoring one
-rebuilds its trading day's bars from the live recordings that back it then.
+Each owner's live recordings also have OHLCV bars built ahead (query_engine): storing, deleting or
+restoring one rebuilds that owner's bars for its trading day from the owner's live recordings of the day.
 """
 import base64
 import datetime as dt
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -47,9 +52,11 @@ FINAL = {'stored', 'rejected'}
 PAGE = {'recordings': 50, 'timing': 500, 'deleted': 200}   # manifests carry their codes, so fewer per page
 RESTORE_DAYS = 30
 URL_SECONDS = 900
-# Malformed input of any kind: corrupt zips and Parquet files and deeply nested JSON included.
-INVALID = (ValueError, KeyError, TypeError, IndexError, NotImplementedError, EOFError, OSError, zlib.error,
-           RecursionError, zipfile.BadZipFile, pa.ArrowException)
+REQUESTS = (120, 60)    # per address: requests a minute, every action and ticket status included
+CHANGES = (60, 3600)    # per address and per owner: deletes and restores an hour (each may rebuild a day's bars)
+# Malformed input of any kind: corrupt zips and Parquet files, deeply nested JSON and out-of-range numbers included.
+INVALID = (ValueError, KeyError, TypeError, IndexError, NotImplementedError, EOFError, OSError, OverflowError,
+           zlib.error, RecursionError, zipfile.BadZipFile, pa.ArrowException)
 
 def clients():
     from botocore.config import Config
@@ -82,7 +89,10 @@ def discard(s3, key, version):
         if e.response['Error']['Code'] not in {'NoSuchKey', 'NoSuchVersion'}:
             raise
 
-def quota(db, scope, amount, limit, window):
+class Quota(ValueError):
+    """A request over one of the service's limits (HTTP 429)."""
+
+def quota(db, scope, amount, limit, window, message='Upload quota reached; retry later'):
     now = int(time.time())
     try:
         db.update_item(TableName=TABLE, Key={'id': {'S': f'{scope}:{now // window}'}},
@@ -92,8 +102,21 @@ def quota(db, scope, amount, limit, window):
                 ':amount': {'N': str(amount)}, ':remaining': {'N': str(limit - amount)}})
     except ClientError as e:
         if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
-            raise ValueError('Upload quota reached; retry later') from e
+            raise Quota(message) from e
         raise
+
+def address(event):
+    """A request's source address as a keyed hash (QUOTA_KEY), never the address itself. An IPv6 address counts
+    as its /64, the block one connection is usually given, so that moving within it does not escape a limit."""
+    require(QUOTA_KEY, 'Archive service is not configured')
+    source = event['requestContext']['http'].get('sourceIp', 'unknown')
+    try:
+        ip = ipaddress.ip_address(source)
+    except ValueError:
+        ip = None
+    if isinstance(ip, ipaddress.IPv6Address):
+        source = str(ip.ipv4_mapped or ipaddress.IPv6Network((ip, 64), strict=False))
+    return hmac.new(QUOTA_KEY, source.encode(), hashlib.sha256).hexdigest()
 
 class NotFound(Exception):
     pass
@@ -118,6 +141,9 @@ def response(status, value):
 
 def api(event, s3, db):
     method = event['requestContext']['http']['method']
+    ip = 'ip-' + address(event)
+    quota(db, 'requests-' + ip, 1, *REQUESTS, message=f'Too many requests from this address ({REQUESTS[0]} a minute); '
+                                                      'retry in a minute')
     if method == 'GET':
         ticket = parse_qs(event.get('rawQueryString', '')).get('ticket', [''])[0]
         require(str(uuid.UUID(ticket)) == ticket, 'Invalid ticket')
@@ -138,9 +164,13 @@ def api(event, s3, db):
     authorization = (event.get('headers') or {}).get('authorization', '')
     require(authorization.startswith('Bearer '), 'An identity is required (Authorization: Bearer <secret>)')
     who = owner(authorization[len('Bearer '):])
-    require(QUOTA_KEY, 'Archive service is not configured')
-    ip = 'ip-' + hmac.new(QUOTA_KEY, event['requestContext']['http'].get('sourceIp', 'unknown').encode(), hashlib.sha256).hexdigest()
     return ACTIONS[body['action']][1](body, who, ip, s3, db)
+
+def changes(db, who, ip):
+    """Count a delete or restore: each one may rebuild a day of the owner's bars."""
+    message = f'Too many deletes and restores ({CHANGES[0]} an hour); retry later'
+    quota(db, 'changes-' + ip, 1, *CHANGES, message=message)
+    quota(db, 'changes-owner-' + who, 1, *CHANGES, message=message)
 
 def upload(body, who, ip, s3, db):
     # Validate the complete manifest before retaining anything.
@@ -236,6 +266,7 @@ def delete(body, who, ip, s3, db):
     The objects' current versions are deleted, so the owner can no longer list or download them; their
     previous versions stay in the versioned bucket, the operator's copy, which this function cannot purge.
     """
+    changes(db, who, ip)
     target, summary = body['prefix'], None
     if isinstance(target, str) and TIMING_KEY.fullmatch(target):
         require(TIMING_KEY.fullmatch(target)[1] == who, 'Not your upload')
@@ -252,12 +283,13 @@ def delete(body, who, ip, s3, db):
     for key in sorted(keys, key=lambda k: not k.endswith('manifest.json')):
         s3.delete_object(Bucket=BUCKET, Key=key)
     if summary:
-        central_bars(s3, target, summary, backed=False)
+        owner_bars(s3, who, summary)
     return response(200, {'status': 'deleted', 'removed': len(keys),
                           'note': f'Removed from your archive; `brisk restore` brings it back within {RESTORE_DAYS} days.'})
 
 def restore(body, who, ip, s3, db):
     """Bring back one of the owner's recordings (or timing reports) deleted in the last RESTORE_DAYS days."""
+    changes(db, who, ip)
     target = body['prefix']
     if isinstance(target, str) and TIMING_KEY.fullmatch(target):
         require(TIMING_KEY.fullmatch(target)[1] == who, 'Not your upload')
@@ -270,26 +302,21 @@ def restore(body, who, ip, s3, db):
     for key in sorted(kept, key=lambda k: k.endswith('manifest.json')):
         s3.copy_object(Bucket=BUCKET, Key=key, CopySource={'Bucket': BUCKET, 'Key': key, 'VersionId': kept[key]})
     if not TIMING_KEY.fullmatch(target) and _exists(s3, f'{target}/manifest.json'):
-        central_bars(s3, target, json_get(s3, f'{target}/manifest.json')['summary'], backed=True)
+        owner_bars(s3, who, json_get(s3, f'{target}/manifest.json')['summary'])
     return response(200, {'status': 'restored', 'restored': len(kept)})
 
-def central_bars(s3, prefix, summary, backed):
-    """Keep a live recording's trading day of central bars in step: it backs them (stored, restored) or no
-    longer does (deleted). Bars are derived data: a failed rebuild removes the day's rather than keep any
-    a recording no longer backs."""
+def owner_bars(s3, who, summary):
+    """Rebuild the owner's bars for a live recording's trading day, after the recording was stored, deleted or
+    restored. Bars are derived data: a failed rebuild removes the day's (queries then build them from the
+    recordings) rather than keep any its recordings no longer match."""
     if summary['source'] not in query_engine.LIVE:
         return
     bucket, date = query_engine.Bucket(s3, BUCKET), summary['trading_date']
-    marker = query_engine.source_key(date, prefix)
-    if backed:
-        bucket.write(marker, json.dumps({'prefix': prefix}).encode(), 'application/json')
-    elif bucket.exists(marker):
-        bucket.delete(marker)
     try:
-        query_engine.rebuild_bars(bucket, date)
+        query_engine.rebuild_bars(bucket, who, date)
     except Exception as error:  # noqa: BLE001
-        print(f'Central bars for {date} not rebuilt ({type(error).__name__}); removed until the next rebuild')
-        for key in bucket.keys(f'{query_engine.CENTRAL}/{date}/ohlcv-'):
+        print(f'Bars for {date} not rebuilt ({type(error).__name__}); removed until the next rebuild')
+        for key in bucket.keys(query_engine.bars_root(who, date) + '/'):
             bucket.delete(key)
 
 EARLIEST = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
@@ -466,7 +493,7 @@ def store(data, m, part, who, s3):
              immutable=True)
     # Manifest is the commit marker. Readers list only committed datasets.
     json_put(s3, f'{prefix}/manifest.json', stored, immutable=True)
-    central_bars(s3, prefix, stored['summary'], backed=True)
+    owner_bars(s3, who, stored['summary'])
     return prefix, stored
 
 def handler(event, context):
@@ -479,5 +506,7 @@ def handler(event, context):
         return api(event, s3, db)
     except NotFound:
         return response(404, {'error': 'Not found'})
+    except Quota as e:
+        return response(429, {'error': str(e)})
     except INVALID as e:
         return response(400, {'error': str(e)[:160]})

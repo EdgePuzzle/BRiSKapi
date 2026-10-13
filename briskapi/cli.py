@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import warnings
@@ -36,9 +37,9 @@ Only you can list, download or delete your uploads. They are filed under your id
 random key made on this computer and never registered, kept in your system's credential
 store and in ~/.config/brisk/identity.json. The archive's operator can access what it
 stores. What you delete can be restored for 30 days and is then removed.
-Broker recordings also feed the archive's shared OHLC bars, built once from everyone's
-current uploads; the cloud API (`brisk query`) gives you bars only for the securities and
-times your own uploads cover. The bars hold no identity or local timing.
+The cloud API (`brisk query`) builds OHLC bars from your own broker recordings only, for
+the securities and times they cover: no one else's uploads enter your results, and yours
+enter no one else's.
 Every clean, complete session uploads automatically (the default; you can decline):
   - demo sessions: the decoded market data and local timing measurements (decode
     durations, replay lateness, asset download time and your computer's receipt clock,
@@ -182,9 +183,20 @@ def package(events, output):
     (output / 'manifest.json').write_text(json.dumps(m, indent=2) + '\n')
     return m
 
+def secure(url):
+    """Refuse to send the identity anywhere but HTTPS (or plain HTTP to this computer, for a local service)."""
+    parts = urllib.parse.urlsplit(url)
+    require(parts.scheme == 'https' or (parts.scheme == 'http' and parts.hostname in {'localhost', '127.0.0.1', '::1'}),
+            f'Refusing to send your identity to {parts.scheme}://{parts.hostname}: use an https URL')
+    return url
+
 def request_json(url, data=None, secret=None):
-    headers = {'Content-Type': 'application/json', **({'Authorization': f'Bearer {secret}'} if secret else {})}
-    request = urllib.request.Request(url, data=None if data is None else json.dumps(data).encode(), headers=headers)
+    request = urllib.request.Request(url, data=None if data is None else json.dumps(data).encode(),
+                                     headers={'Content-Type': 'application/json'})
+    if secret:
+        secure(url)
+        # Unredirected: urllib would copy an ordinary header to wherever a redirect points.
+        request.add_unredirected_header('Authorization', f'Bearer {secret}')
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.load(response)
 

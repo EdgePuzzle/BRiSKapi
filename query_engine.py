@@ -1,13 +1,15 @@
-"""The cloud API's engine: Databento-style records from stored recordings, and the central OHLCV bars.
+"""The cloud API's engine: Databento-style records from stored recordings, and their OHLCV bars.
 
 Server side only (the query and archive functions); not part of the briskapi package, so bars come
 from the cloud. Everything reads the archive bucket through `Bucket`, a boto3-style client.
 
 Datasets follow Databento's VENUE.FEED naming: XTKS.BRISK is an owner's live recordings (any broker's
 BRiSK: the same app and stream), XTKS.BRISKDEMO the public demo's market tables, kept once in the
-archive. OHLCV bars for XTKS.BRISK are central: one set per trading day, built from every current live
-upload of that day (deduplicated by trade), and an owner receives a bar only when its own current
-uploads cover that security and the bar's time span within the trading sessions.
+archive. OHLCV bars for XTKS.BRISK are an owner's own: built ahead from its current live recordings of
+each trading day (deduplicated by trade) whenever one of them is stored, deleted or restored, holding only
+the bars whose time span within the trading sessions those recordings cover. No one else's uploads enter
+them, and an owner's own are complete there: a stored recording accounts for every trade between its first
+and last quote of each security, or its cumulative volumes would refuse it.
 """
 from __future__ import annotations
 
@@ -37,10 +39,12 @@ SCHEMAS = ('trades', 'mbp-10', 'definition', 'imbalance', 'brisk-quotes', *BARS)
 ENCODINGS = {'parquet': ('application/vnd.apache.parquet', 'parquet'), 'csv': ('text/csv', 'csv'),
              'json': ('application/x-ndjson', 'json')}
 MAX_DAYS, MAX_SYMBOLS = 31, 2000
+# The times a request may name, as UTC nanoseconds: 2000 to 2100.
+EARLIEST, LATEST = 946_684_800 * 10**9, 4_102_444_800 * 10**9
 # The Tokyo Stock Exchange's trading sessions since 2024-11-05, as [start, end) seconds after JST midnight;
 # the end second holds the closing auction's prints.
 SESSIONS = ((9 * 3600, 11 * 3600 + 30 * 60 + 1), (12 * 3600 + 30 * 60, 15 * 3600 + 30 * 60 + 1))
-CENTRAL = 'central/XTKS.BRISK'
+BARS_ROOT = 'bars'    # bars/OWNER/YYYYMMDD/ohlcv-*.parquet
 LEVELS = 10
 TIME = pa.timestamp('ns', tz='UTC')
 
@@ -204,7 +208,10 @@ def timestamp(value, default=None) -> int:
         raise ValueError(f'Invalid time {value!r}: use ISO 8601, a date or UTC nanoseconds') from None
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=dt.timezone(dt.timedelta(hours=9)))
-    return int(moment.timestamp()) * 10**9 + moment.microsecond * 1000
+    try:
+        return int(moment.timestamp()) * 10**9 + moment.microsecond * 1000
+    except OverflowError:
+        raise ValueError(f'Invalid time {value!r}: out of range') from None
 
 
 def trading_dates(start, end):
@@ -244,7 +251,7 @@ def request(dataset, schema='trades', symbols=None, start=None, end=None, limit=
     require(stype_in in (None, '', 'raw_symbol'), 'Only stype_in=raw_symbol (JPX codes) is supported')
     begin = timestamp(start)
     finish = timestamp(end, default=(begin + JST_NS) // DAY_NS * DAY_NS - JST_NS + DAY_NS)
-    require(begin < finish, 'end must be after start')
+    require(EARLIEST <= begin < finish <= LATEST, 'end must be after start, both between 2000 and 2100')
     trading_dates(begin, finish)
     count = None if limit in (None, '', 0, '0') else int(limit)
     require(count is None or count > 0, 'limit must be positive')
@@ -499,64 +506,62 @@ def _trades_for_bars(bucket, rec):
                      'size': pc.cast(table.column('size'), pa.uint64())})
 
 
-def source_key(date, prefix):
-    owner, _, name = prefix.split('/', 3)[1:]
-    return f"{CENTRAL}/{date}/sources/{owner}-{name.split('/')[-1]}"
+def bars_root(owner, date):
+    return f'{BARS_ROOT}/{owner}/{date}'
 
 
-def rebuild_bars(bucket, date, attempts=3):
-    """Rebuild a trading day's central bars from the live recordings that currently back it (markers under
-    central/XTKS.BRISK/DATE/sources/); with none left, remove them. Rebuilds of one day are not serialized,
-    so one that finds the sources changed meanwhile (another upload or delete) runs again."""
+def rebuild_bars(bucket, owner, date, attempts=3):
+    """Build an owner's bars for a trading day from its current live recordings of that day, covered as `covered`
+    says; with none left, remove them. Rebuilds of one owner's day are not serialized, so one that finds its
+    recordings changed meanwhile (another upload, delete or restore) runs again."""
     for _ in range(attempts):
-        markers = bucket.keys(f'{CENTRAL}/{date}/sources/')
-        built = _rebuild(bucket, date, markers)
-        if bucket.keys(f'{CENTRAL}/{date}/sources/') == markers:
+        before = bucket.keys(f'archive/{owner}/{date}/')
+        built = _rebuild(bucket, owner, date, recordings(bucket, owner, [date]))
+        if bucket.keys(f'archive/{owner}/{date}/') == before:
             return built
     return built
 
 
-def _rebuild(bucket, date, markers):
-    root = f'{CENTRAL}/{date}'
-    sources = [bucket.json(key)['prefix'] for key in markers]
-    if not sources:
-        for key in bucket.keys(f'{root}/ohlcv-'):
+def _rebuild(bucket, owner, date, recs):
+    root = bars_root(owner, date)
+    if not recs:
+        for key in bucket.keys(f'{root}/'):
             bucket.delete(key)
         return 0
-    trades = []
-    for prefix in sources:
-        files = bucket.json(f'{prefix}/files.json')
-        trades.append(_trades_for_bars(bucket, Recording(prefix, date, 0, 0, frozenset(), files, True)))
-    for schema, bars in build_bars(trades).items():
+    for schema, bars in build_bars([_trades_for_bars(bucket, r) for r in recs]).items():
         out = io.BytesIO()
         # Sorted by symbol in 65,536-row groups: a query for a few securities reads only theirs.
-        pq.write_table(bars, out, compression='zstd', row_group_size=65_536)
+        pq.write_table(covered(bars, BARS[schema], recs), out, compression='zstd', row_group_size=65_536)
         bucket.write(f'{root}/{schema}.parquet', out.getvalue(), 'application/vnd.apache.parquet')
-    return len(sources)
+    return len(recs)
 
 
 def covered(bars, length, recs):
-    """The bars an owner may receive: those whose span, clipped to the trading sessions, lies within the owner's
-    own coverage of that security (the union of its recordings' clock ranges)."""
+    """The bars an owner's recordings cover: those whose span, clipped to the trading sessions, lies within the
+    owner's coverage of that security (the union of its recordings' clock ranges). A bar its recordings cover only
+    in part would be missing trades."""
     if not bars.num_rows:
         return bars
-    keep = np.zeros(bars.num_rows, bool)
     starts = pc.cast(bars.column('ts_event'), pa.int64()).to_numpy()
-    symbols = bars.column('symbol').to_numpy(zero_copy_only=False)
-    for code in np.unique(symbols):
-        windows = _merge([(r.first, r.last + 1) for r in recs if code in r.codes])
+    pieces = _session_pieces(starts, starts + length)
+    symbols = bars.column('symbol')
+    # Securities in the same recordings share their windows (usually every security is in every recording), so
+    # each such group is one vectorized pass, not one per security.
+    groups = {}
+    for code in pc.unique(symbols).to_pylist():
+        groups.setdefault(tuple(i for i, r in enumerate(recs) if code in r.codes), []).append(code)
+    keep = np.zeros(bars.num_rows, bool)
+    for members, codes in groups.items():
+        windows = _merge([(recs[i].first, recs[i].last + 1) for i in members])
         if not windows:
             continue
         lows, highs = np.array([w[0] for w in windows]), np.array([w[1] for w in windows])
-        rows = np.nonzero(symbols == code)[0]
+        rows = np.nonzero(pc.is_in(symbols, value_set=pa.array(codes)).to_numpy())[0]
         ok = np.ones(len(rows), bool)
-        begin, end = starts[rows], starts[rows] + length
-        pieces = _session_pieces(begin, end)
         for low, high in pieces:
-            present = high > low
+            low, high = low[rows], high[rows]
             where = np.searchsorted(lows, low, 'right') - 1
-            inside = (where >= 0) & (highs[np.maximum(where, 0)] >= high)
-            ok &= ~present | inside
+            ok &= (high <= low) | ((where >= 0) & (highs[np.maximum(where, 0)] >= high))
         keep[rows] = ok
     return bars.filter(pa.array(keep))
 
@@ -599,7 +604,7 @@ def get_range(bucket, owner, req: Request) -> pa.Table:
     else:
         recs = recordings(bucket, owner, dates)
     if req.schema in BARS:
-        table = _bars(bucket, req, recs, publisher)
+        table = _bars(bucket, owner, req, recs, publisher)
     else:
         parts = [_project(bucket, rec, req, publisher) for rec in recs]
         table = pa.concat_tables(parts) if parts else _empty(req.schema)
@@ -613,7 +618,7 @@ def get_range(bucket, owner, req: Request) -> pa.Table:
     return table.slice(0, req.limit) if req.limit else table
 
 
-def _bars(bucket, req, recs, publisher):
+def _bars(bucket, owner, req, recs, publisher):
     length = BARS[req.schema]
     parts = []
     for date in sorted({r.date for r in recs}):
@@ -622,10 +627,9 @@ def _bars(bucket, req, recs, publisher):
             bars = build_bars([_trades_for_bars(bucket, r) for r in day])[req.schema]
         else:
             try:
-                bars = _central(bucket, f'{CENTRAL}/{date}/{req.schema}.parquet', req.symbols)
-            except NotFound:  # not built yet: the owner's own recordings
-                bars = build_bars([_trades_for_bars(bucket, r) for r in day])[req.schema]
-            bars = covered(bars, length, day)
+                bars = _built(bucket, f'{bars_root(owner, date)}/{req.schema}.parquet', req.symbols)
+            except NotFound:  # not built (a rebuild failed): from the recordings now
+                bars = covered(build_bars([_trades_for_bars(bucket, r) for r in day])[req.schema], length, day)
         ts = pc.cast(bars.column('ts_event'), pa.int64())
         keep = pc.and_(pc.greater_equal(ts, req.start), pc.less(ts, req.end))
         if req.symbols is not None:
@@ -640,8 +644,8 @@ def _bars(bucket, req, recs, publisher):
     return table.sort_by([('ts_event', 'ascending'), ('instrument_id', 'ascending')])
 
 
-def _central(bucket, key, symbols):
-    """A day's central bars, only the row groups whose symbol range can hold a requested one."""
+def _built(bucket, key, symbols):
+    """A day's built bars, only the row groups whose symbol range can hold a requested one."""
     source = bucket.parquet(key)
     if symbols is None:
         return source.read()

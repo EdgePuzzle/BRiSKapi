@@ -8,8 +8,8 @@
 Names and parameters follow databento.Historical. Datasets: XTKS.BRISK (your live recordings, whichever
 broker's BRiSK they came through) and XTKS.BRISKDEMO (the public demo, open to every identity). Schemas:
 trades, mbp-10, definition, imbalance, brisk-quotes, and OHLCV bars (ohlcv-1s/1m/1h/1d), which come only
-from the cloud: built once from everyone's uploads and returned for the securities and times your own
-uploads cover. Times without a zone, and dates, are JST (the trading day for a date); `end` is exclusive.
+from the cloud: built ahead from your own live recordings, for the securities and times they cover. Times
+without a zone, and dates, are JST (the trading day for a date); `end` is exclusive.
 See docs/cloud-api.md.
 """
 from __future__ import annotations
@@ -151,6 +151,7 @@ class Historical:
         self.gateway = (gateway or cli.settings().get('query_url') or '').rstrip('/')
         if not self.gateway:
             raise BriskError('This archive has no query API (archive.json has no query_url)')
+        cli.secure(self.gateway)   # the key goes with every request
         self.timeseries = _Timeseries(self)
         self.metadata = _Metadata(self)
 
@@ -167,7 +168,7 @@ class Historical:
             with urllib.request.build_opener(_NoRedirect).open(request, timeout=300) as response:
                 return response.read(), response.headers.get('content-type', '')
         except urllib.error.HTTPError as error:
-            if error.code in (301, 302, 303, 307) and error.headers.get('location'):
+            if error.code in (301, 302, 303, 307) and error.headers.get('location', '').startswith('https://'):
                 with urllib.request.urlopen(error.headers['location'], timeout=300) as response:
                     return response.read(), response.headers.get('content-type', '')
             try:

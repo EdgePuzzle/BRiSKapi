@@ -16,6 +16,9 @@ Decided (2026-10-13):
 - the datasets are `XTKS.BRISK` and `XTKS.BRISKDEMO`;
 - OHLCV bars are built once per trading day from every upload (the shared bars), and an
   identity receives only the bars its own uploads cover (moved into phase 1);
+- (after 1.0.0) each owner's bars are built from its own uploads only, ahead of queries: the
+  shared bars let a made-up upload receive, and change, other owners' bars (see
+  [OHLCV bars](#ohlcv-bars));
 - requests filter and sort on `ts_event`, and times without a zone are JST.
 
 ## Goals
@@ -24,10 +27,9 @@ Decided (2026-10-13):
   for a week of your BRiSK sessions, merged and time-ordered, as a DataFrame-ready table.
 - **Databento's shape.** The same endpoints, parameters, dataset naming and record schemas, so
   that code and habits carry over.
-- **Private by construction.** A request reaches only its owner's recordings, plus the public
-  demo for any identity. The one thing built from everyone's uploads is the OHLCV bars, which
-  hold only prices, volumes and times, and an identity receives a bar only where its own
-  uploads cover it.
+- **Private by construction.** A request reaches only its owner's recordings and the bars built
+  from them, plus the public demo for any identity. Nothing is built from several owners'
+  uploads.
 - **Cheap to run.** Serverless, reading only the Parquet row groups a request needs; no database.
 
 Non-goals: live streaming (the feed is `briskapi.connect`), other owners' records, SQL, DBN for
@@ -60,7 +62,7 @@ NautilusTrader instrument IDs such as `7203.XTKS`) and the feed is BRiSK:
 
 | Dataset | Data | Who can query it |
 | --- | --- | --- |
-| `XTKS.BRISK` | Every live recording you uploaded, whichever broker's BRiSK it came through; its OHLCV bars are the shared bars | You |
+| `XTKS.BRISK` | Every live recording you uploaded, whichever broker's BRiSK it came through, and the OHLCV bars built from them | You |
 | `XTKS.BRISKDEMO` | The public BRiSK Next demo (TSE, 2021-09-27), from the archive's one verified copy | Every identity |
 
 - **One live dataset.** The broker site a recording came through doesn't matter: every site runs
@@ -105,7 +107,7 @@ the columns a Databento user expects. Every schema but the bars starts with `ts_
 | `imbalance` | the auction fields | BRiSK's strength: per update an opening (`O`) row where the opening indicative price shows and a closing (`C`) row where the closing one does, in `auction_type`. `ind_match_price` = indicative price, `paired_qty` = indicative volume, `market_imbalance_qty`/`_side` = market buy minus sell, `bid_total_qty`/`ask_total_qty` = the board totals (the closing ones for `C`), collars = the day's limit prices, `auction_time` = special-quote timer. |
 | `definition` | `data/equity.parquet` | One row per security per recording, stamped JST midnight of its trading day: code, name, lot size, tick increment, base price, limits, issue and tick types |
 | `brisk-quotes` (ours) | depths, all columns | Everything BRiSK records for each update: closing-condition books, board totals, special-quote time (decimals as float64) |
-| `ohlcv-1s/1m/1h/1d` | trades | Aggregated from trades, as Databento does; see [below](#ohlcv-bars-and-the-shared-bars) |
+| `ohlcv-1s/1m/1h/1d` | trades | Aggregated from trades, as Databento does; see [below](#ohlcv-bars) |
 
 Planned for phase 2:
 
@@ -140,7 +142,7 @@ Planned for phase 2:
   defaults to the end of the start's trading day. A request touches at most 31 JST trading
   dates.
 
-## OHLCV bars and the shared bars
+## OHLCV bars
 
 Bars come only from the cloud: the engine (`query_engine.py`) is server side and not in the
 `briskapi` wheel.
@@ -151,23 +153,33 @@ Bars come only from the cloud: the engine (`query_engine.py`) is server side and
   the frame; `volume` is the sum of sizes (uint64). Auction prints are trades like any other.
   Columns: `ts_event`, `publisher_id`, `instrument_id`, `open`, `high`, `low`, `close`,
   `volume`, `symbol`.
-- **Central store.** For `XTKS.BRISK` one set of bars per trading day is built from every
-  current live recording of that day, whoever uploaded it, with each trade counted once
-  (deduplicated by security and trade ID). It lives in
-  `central/XTKS.BRISK/YYYYMMDD/ohlcv-1s|1m|1h|1d.parquet`, sorted by security so that a query
-  reads only its securities' row groups. A marker per backing recording sits under
-  `sources/`. The archive service rebuilds the day when a live recording is stored, deleted
-  or restored; with no marker left the files are removed, and a rebuild that fails removes
-  them too (queries then build the owner's bars from its own recordings, as they do for a day
-  with no central files yet).
-- **Entitlement.** The bars hold no identity or local timing, but they hold everyone's trades,
-  so a request receives a bar only if its span, clipped to the Tokyo Stock Exchange's trading
-  sessions (09:00 to 11:30:01 and 12:30 to 15:30:01 JST, half open, the extra second holding
-  the closing auction's prints), lies within the merged clock ranges (first to last source
-  clock) of your own recordings that hold that security. A bar outside every session is judged
-  on its whole span. A recording from 08:55 to 11:31, for example, gets the morning's
-  one-minute and one-hour bars but not the day bar. So uploading is how you get bars.
-  [PRIVACY.md](../PRIVACY.md) (policy version 7) describes the shared bars to uploaders.
+- **Built ahead, per owner.** For `XTKS.BRISK` an owner's bars for a trading day are built from
+  its own current live recordings of that day, with each trade counted once (deduplicated by
+  security and trade ID), into `bars/OWNER/YYYYMMDD/ohlcv-1s|1m|1h|1d.parquet`, sorted by
+  security so that a query reads only its securities' row groups. The archive service rebuilds
+  them when one of those recordings is stored, deleted or restored; with none left the files
+  are removed, and a rebuild that fails removes them too (queries then build the bars from the
+  recordings, slower but the same).
+- **Coverage.** A day's files hold only the bars whose span, clipped to the Tokyo Stock
+  Exchange's trading sessions (09:00 to 11:30:01 and 12:30 to 15:30:01 JST, half open, the extra
+  second holding the closing auction's prints), lies within the merged clock ranges (first to
+  last source clock) of the owner's recordings that hold that security; a bar they cover only in
+  part would be missing trades. A bar outside every session is judged on its whole span. A
+  recording from 08:55 to 11:31, for example, gets the morning's one-minute and one-hour bars
+  but not the day bar. So uploading is how you get bars.
+- **Only your own uploads.** Within its coverage an owner's own recordings hold every trade:
+  ingest refuses a recording whose trades don't account for every change in each security's
+  cumulative volume and turnover between its quotes, so a recording that missed a trade is never
+  stored. Others' recordings could add nothing there, only disagree. 1.0.0 built one set of
+  shared bars per day from every owner's recordings; a made-up recording could then claim a
+  whole day's coverage to receive everyone's bars, or, from an owner ID that sorts first,
+  replace real prints in everyone's (`test_no_upload_reveals_or_changes_another_owners_bars`).
+- **Speed.** On a day of 1,000,000 trades across 3,774 securities (local, without S3 latency):
+  building an owner's four files takes about 0.8 s; a query reads one-minute bars for one
+  security in about 1 ms and for every security in about 60 ms (one-second bars: 2 ms and
+  140 ms), against about 0.5 s to build them from the recording per request. 1.0.0 applied
+  coverage at query time, one pass per security: about 25 s for such a day's four bar sizes.
+  [PRIVACY.md](../PRIVACY.md) (policy version 7) describes the bars to uploaders.
 
 ## Request flow
 
@@ -180,9 +192,8 @@ client ──HTTPS──▶ Lambda function URL "brisk-recorder-query" (Python 3
                     │ 3 resolve symbols per recording from its equity table (code → issue_id)
                     │ 4 read: pyarrow over S3 ranged GETs (4 MiB blocks), only row groups whose issue_id and
                     │   ts_event statistics can match (tables are sorted by issue, then batch);
-                    │   bars: the day's central file, row groups pruned by symbol
-                    │ 5 merge recordings, deduplicate, sort by ts_event, project to the schema, encode;
-                    │   bars: keep what the owner's coverage allows
+                    │   bars: the owner's built file for the day, row groups pruned by symbol
+                    │ 5 merge recordings, deduplicate, sort by ts_event, project to the schema, encode
                     │ 6 count the result's bytes against the daily quota
                     ▼
               ≤ 4 MiB: inline response (Parquet as base64)
@@ -215,19 +226,22 @@ client ──HTTPS──▶ Lambda function URL "brisk-recorder-query" (Python 3
   prints it, and `briskapi.Historical()` finds it as the archive does (`BRISK_IDENTITY`, the
   credential store or the file). The same key can also upload, delete and restore, so it should be
   kept like a password. There is no key registry: any well-formed identity authenticates, and one
-  with no recordings sees only the demo. A missing or malformed key is HTTP 400.
-- **Isolation.** The query function's role may read `archive/*`, `reference/*`, the bar files
-  under `central/` and `results/*`, and write `results/*`, nothing else. Every path into your recordings is built from
-  the authenticated owner ID, never from request input. The other prefixes a request reads are
-  the demo's reference copy, for `XTKS.BRISKDEMO`, and the day's central bars, for `XTKS.BRISK`
-  bars, which are cut to the owner's coverage as above.
+  with no recordings sees only the demo. A missing or malformed key is HTTP 400. Guessing keys is
+  bounded by the per-address limit, counted before the key is read: among 2^128 possible secrets,
+  finding one with recordings is hopeless. The client sends the key only over HTTPS and follows a
+  303 to an `https` result without it.
+- **Isolation.** The query function's role may read `archive/*`, `reference/*`, `bars/*` and
+  `results/*`, and write `results/*`, nothing else. Every path into your recordings and bars is
+  built from the authenticated owner ID, never from request input. The other prefix a request reads
+  is the demo's reference copy, for `XTKS.BRISKDEMO`.
 
 ## Limits and cost
 
 - **Free, with quotas:** 60 requests a minute and 2 GB returned a UTC day per identity; since
-  identities cost nothing to make, also 120 requests a minute per IP address and 20 GB returned a
-  day for everyone. They use the same DynamoDB counters as uploads (a request over a quota gets
-  HTTP 429). Up to 2,000 symbols and 31 days per request, and `limit`. Results up to 4 MiB are returned inline.
+  identities cost nothing to make, also 120 requests a minute and 4 GB returned a day per IP
+  address (an IPv6 address by its /64; requests count before their key is read), and 20 GB
+  returned a day for everyone. They use the same DynamoDB counters as uploads (a request over a
+  quota gets HTTP 429). Up to 2,000 symbols and 31 days per request, and `limit`. Results up to 4 MiB are returned inline.
 - `get_cost` returns 0. `get_record_count` returns the real number by running the query, so it
   costs the operator a query but no returned bytes. `get_billable_size` (phase 3) will come from
   Parquet metadata.
@@ -274,8 +288,8 @@ copy yet) or 429 (quota).
 1. **Core (built for 1.0).**
    - `timeseries.get_range` for `trades`, `mbp-10`, `definition`, `imbalance`, `brisk-quotes`
      and `ohlcv-1s/1m/1h/1d`, in Parquet, CSV or JSON.
-   - The shared bars: the central store, kept in step on store, delete and restore, and the
-     per-identity coverage rule (moved up from phase 2).
+   - Bars: the shared bars, kept in step on store, delete and restore, and the per-identity
+     coverage rule (moved up from phase 2); after 1.0.0, each owner's own bars, built ahead.
    - The metadata endpoints (`list_*`, `get_dataset_range`, `get_dataset_condition`,
      `get_record_count`, `get_cost`).
    - Identity auth, inline or 303 results, quotas, `briskapi.Historical`, `brisk query` and the
@@ -292,20 +306,20 @@ client use the archive directly (`databento.Historical(key, gateway=URL)`). Its 
 non-empty key and any https gateway.
 
 Known gaps in phase 1:
-- Rebuilds of one day's bars are not serialized; one that finds the day's sources changed while
-  it ran runs again, up to three times.
+- Rebuilds of an owner's day of bars are not serialized; one that finds the owner's recordings of
+  the day changed while it ran runs again, up to three times.
 - That overlapping captures agree, across sites, is unconfirmed on live data.
 
 ## Infrastructure
 
 - A second function, `brisk-recorder-query`, with its own role (`brisk-recorder-query`),
   log group and function URL, in the same zip and layer as the archive function: 3,008 MB (the
-  account's maximum), a 300 second timeout and no reserved concurrency. Ingest is unchanged
-  except that it keeps the central bars in step, so the archive role gains read, write and
-  delete of current objects under `central/`.
-- Bucket: a `results/` prefix with a one-day lifecycle (`ExpireResults`); `central/` noncurrent
+  account's maximum), a 300 second timeout and eight reserved concurrent executions where the
+  account allows. Ingest is unchanged except that it keeps owners' bars in step, so the archive
+  role gains read, write and delete of current objects under `bars/`.
+- Bucket: a `results/` prefix with a one-day lifecycle (`ExpireResults`); `bars/` noncurrent
   versions expire after a day (`ExpireReplacedBars`). The query role reads `archive/`,
-  `reference/`, `central/` and `results/` and writes `results/`.
+  `reference/`, `bars/` and `results/` and writes `results/`.
 - DynamoDB: query quotas in the existing table.
 - `deploy.py` deploys both functions and writes `query_url` to `archive.json`; `--seed-demo
   PACKAGE` uploads a complete demo recording as the operator so that `XTKS.BRISKDEMO` has data

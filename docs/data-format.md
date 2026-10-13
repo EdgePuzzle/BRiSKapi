@@ -176,9 +176,9 @@ of your recordings overlap, each record appears once.
 | `close` | float64 | Last trade price (yen) |
 | `volume` | uint64 | Shares traded |
 
-Bars exist only for intervals with trades. You receive a bar only when your own uploads cover
-that security and the bar's whole span within the trading sessions (09:00–11:30 and
-12:30–15:30 JST); `XTKS.BRISKDEMO` bars are open to everyone.
+Bars exist only for intervals with trades, and are built from your own uploads only. You
+receive a bar only when they cover that security and the bar's whole span within the trading
+sessions (09:00–11:30 and 12:30–15:30 JST); `XTKS.BRISKDEMO` bars are open to everyone.
 
 ### CSV and JSON
 

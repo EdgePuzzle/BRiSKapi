@@ -28,21 +28,19 @@ wire-format sample capture.
   `brisk restore PREFIX` (or `briskapi.Archive().restore(prefix)`) restores it. After that
   it can't be restored, and the storage removes it within a day.
 - The archive's operator (below) runs the storage and can access what it holds, as with
-  any hosted service. Apart from the shared bars below, the operator does not publish or
-  share it.
-- **Shared bars.** For each trading day, the archive builds one set of OHLCV bars (open,
-  high, low, close and volume per security, from one second to one day) from the trades in
-  every current broker recording of that day (SBI or e-shiten), whoever uploaded it,
-  counting each trade once. The bars hold only prices, volumes and times: no identity, owner
-  ID or local timing. Through the cloud API you receive bars only for the securities and the
-  times your own current uploads cover; nobody receives more because of your uploads. A
-  recording stops contributing as soon as it is deleted, and bars no current upload backs
-  are removed (older versions within a day).
+  any hosted service. The operator does not publish or share it.
+- **Your bars.** For each trading day of your broker recordings (SBI or e-shiten), the
+  archive builds OHLCV bars (open, high, low, close and volume per security, from one second
+  to one day) from the trades in your own current recordings of that day, counting each trade
+  once, and keeps them under your owner ID. They hold only the bars your recordings cover
+  completely. No one else's uploads enter them, and yours enter no one else's. They are
+  rebuilt whenever you upload, delete or restore a recording of that day, and replaced
+  versions are removed within a day.
 - **Cloud API.** Queries (`briskapi.Historical`, `brisk query`) use your identity as the API
-  key and read only your own recordings, the shared bars as above and the public demo, which
+  key and read only your own recordings, your bars as above and the public demo, which
   any identity may query. Results are kept for up to a day so that large ones can be
-  downloaded. It is free, with quotas counted per identity (60 requests a minute, 2 GB a
-  day); the service does not log what you query.
+  downloaded. It is free, with quotas per identity (60 requests a minute, 2 GB a day) and per
+  IP address (120 requests a minute, 4 GB a day); the service does not log what you query.
 
 ## Automatic uploads
 
@@ -158,13 +156,17 @@ from your own browser. They are credentials:
 
 ## Network metadata
 
-Uploading, listing, downloading and deleting contact an AWS Lambda function URL and Amazon S3
-in Tokyo (`ap-northeast-1`). These services receive your IP address with each request.
+Uploading, listing, downloading, deleting and querying contact AWS Lambda function URLs and
+Amazon S3 in Tokyo (`ap-northeast-1`). These services receive your IP address with each request.
 
-- The service uses your IP address only to rate limit upload tickets (four per hour). It
-  stores a keyed hash (HMAC-SHA-256 with a secret per-deployment key), never the address
-  itself, and your owner ID for a per-owner limit. These entries are marked to expire after
-  two hours, and DynamoDB deletes expired entries, usually within a few days.
+- The services use your IP address only for rate limits: every request counts against it
+  (120 a minute), and so do upload tickets, timing reports, deletes and restores, and the bytes
+  the cloud API returns. Identities cost nothing to make, so an address is what keeps one
+  computer from guessing or multiplying them. The services store a keyed hash (HMAC-SHA-256 with
+  a secret per-deployment key) of the address, or of an IPv6 address's /64 block, never the
+  address itself, and your owner ID for per-owner limits, in separate entries. Each entry is
+  marked to expire after twice its counting window (two minutes, two hours or two days), and
+  DynamoDB deletes expired entries, usually within a few days.
 - The service does not log IP addresses, identity secrets or recording contents. Its logs
   record infrastructure errors and are deleted after 14 days. S3 server access logging is
   not enabled.

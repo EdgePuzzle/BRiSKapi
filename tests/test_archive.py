@@ -132,8 +132,9 @@ class S3:
         return Pages({'list_objects_v2': objects, 'list_object_versions': versions}[name])
 
 class DB:
-    def __init__(self):
+    def __init__(self, enforce=False):
         self.calls = []; self.versions = {}; self.reject = False
+        self.enforce, self.used = enforce, {}   # with `enforce`, quota counters behave like DynamoDB's
     def update_item(self, **kw):
         self.calls.append(kw)
         key = kw['Key']['id']['S']; values = kw['ExpressionAttributeValues']
@@ -142,12 +143,15 @@ class DB:
             if key in self.versions and self.versions[key] != version:
                 raise ClientError({'Error': {'Code': 'ConditionalCheckFailedException'}}, 'UpdateItem')
             self.versions[key] = version
-        if self.reject:
+        if self.reject or (self.enforce and ':remaining' in values
+                           and self.used.get(key, 0) > int(values[':remaining']['N'])):
             raise ClientError({'Error': {'Code': 'ConditionalCheckFailedException'}}, 'UpdateItem')
+        if ':amount' in values:
+            self.used[key] = self.used.get(key, 0) + int(values[':amount']['N'])
         return {}
 
-def event(method='POST', body=None, query='', secret=SECRET):
-    return {'requestContext': {'http': {'method': method, 'sourceIp': '127.0.0.1'}},
+def event(method='POST', body=None, query='', secret=SECRET, ip='127.0.0.1'):
+    return {'requestContext': {'http': {'method': method, 'sourceIp': ip}},
             'headers': {'authorization': f'Bearer {secret}'} if secret else {},
             'body': json.dumps(body), 'rawQueryString': query}
 
@@ -706,7 +710,7 @@ def test_api_errors_and_handler(packaged, monkeypatch):
     nested = event(); nested['body'] = '[' * 200000
     assert service.handler(nested, None)['statusCode'] == 400
     db.reject = True
-    assert service.handler(event(body=ticket), None)['statusCode'] == 400
+    assert service.handler(event(body=ticket), None)['statusCode'] == 429
     db.reject = False
     monkeypatch.setattr(service, 'QUOTA_KEY', b'')
     assert service.handler(event(body=ticket), None)['statusCode'] == 400
@@ -724,10 +728,49 @@ def test_api_errors_and_handler(packaged, monkeypatch):
 def test_quota_key_is_keyed_hash(packaged):
     directory, m = packaged; s3 = S3(); db = DB()
     ticket_for(s3, db, m)
-    key = db.calls[0]['Key']['id']['S']
-    assert key.split(':')[0] == 'ip-' + hmac.new(b'test-key', b'127.0.0.1', hashlib.sha256).hexdigest()
-    assert '127.0.0.1' not in json.dumps(db.calls) and hashlib.sha256(b'127.0.0.1').hexdigest() not in key
-    assert db.calls[1]['Key']['id']['S'].startswith(f'owner-{OWNER}:') and SECRET not in json.dumps(db.calls)
+    keyed = 'ip-' + hmac.new(b'test-key', b'127.0.0.1', hashlib.sha256).hexdigest()
+    assert [call['Key']['id']['S'].split(':')[0] for call in db.calls[:3]] == [f'requests-{keyed}', keyed, f'owner-{OWNER}']
+    assert '127.0.0.1' not in json.dumps(db.calls) and hashlib.sha256(b'127.0.0.1').hexdigest() not in json.dumps(db.calls)
+    assert SECRET not in json.dumps(db.calls)
+
+def test_every_request_counts_against_its_address_first(monkeypatch):
+    """Guessing identities from one address: every request counts, whatever identity (or none) it names."""
+    s3, db = S3(), DB(enforce=True)
+    monkeypatch.setattr(service, 'clients', lambda: (s3, db))
+    monkeypatch.setattr(service, 'REQUESTS', (4, 60))
+    listing = {'action': 'list', 'kind': 'recordings', 'date': None, 'after': None}
+    assert service.handler(event('GET', query='ticket=' + str(uuid.uuid4())), None)['statusCode'] == 404
+    assert service.handler(event(body=listing, secret='brisk-id-v1-nope'), None)['statusCode'] == 400
+    assert service.handler(event(body=listing, secret=None), None)['statusCode'] == 400
+    assert service.handler(event(body=listing, secret=OTHER), None)['statusCode'] == 200
+    refused = service.handler(event(body=listing), None)
+    assert refused['statusCode'] == 429 and 'this address' in json.loads(refused['body'])['error']
+    assert service.handler(event('GET', query='ticket=' + str(uuid.uuid4())), None)['statusCode'] == 429
+    assert service.handler(event(body=listing, ip='192.0.2.7'), None)['statusCode'] == 200
+
+def test_addresses_are_keyed_hashes_ipv6_by_64(monkeypatch):
+    at = lambda ip: service.address(event(ip=ip))  # noqa: E731
+    assert at('2001:db8:1:2::1') == at('2001:db8:1:2:ffff:ffff:ffff:ffff') != at('2001:db8:1:3::1')
+    assert at('::ffff:192.0.2.1') == at('192.0.2.1') != at('192.0.2.2')
+    assert at('192.0.2.1') == hmac.new(b'test-key', b'192.0.2.1', hashlib.sha256).hexdigest()
+    assert at('unknown') == hmac.new(b'test-key', b'unknown', hashlib.sha256).hexdigest()
+    monkeypatch.setattr(service, 'QUOTA_KEY', b'')
+    with pytest.raises(ValueError, match='not configured'):
+        at('192.0.2.1')
+
+def test_deletes_and_restores_are_limited(monkeypatch):
+    """Each one may rebuild a day of the owner's bars, so they are counted per owner and per address."""
+    s3, db = S3(), DB(enforce=True)
+    monkeypatch.setattr(service, 'clients', lambda: (s3, db))
+    monkeypatch.setattr(service, 'CHANGES', (2, 3600))
+    missing = lambda who: f'timing/{schema.owner(who)}/20261013/' + 'c' * 64 + '.json'  # noqa: E731
+    change = lambda action, who=SECRET, ip='127.0.0.1': service.handler(  # noqa: E731
+        event(body={'action': action, 'prefix': missing(who)}, secret=who, ip=ip), None)['statusCode']
+    assert change('delete') == 404 and change('restore') == 404
+    assert change('delete') == 429                         # this owner, this address
+    assert change('delete', ip='192.0.2.7') == 429         # this owner, elsewhere
+    assert change('restore', who=OTHER) == 429             # this address, another owner
+    assert change('restore', who=OTHER, ip='192.0.2.8') == 404
 
 @pytest.mark.parametrize('error', ['AccessDenied', 'InternalError'])
 def test_cloud_errors_retry(error):
@@ -983,6 +1026,13 @@ def test_request_json(monkeypatch):
     assert cli.request_json('https://example.test', {'a': 1}) == {'ok': True}
     assert cli.request_json('https://example.test', {'a': 1}, SECRET) == {'ok': True}
     assert seen[0].get_header('Authorization') is None and seen[1].get_header('Authorization') == f'Bearer {SECRET}'
+    # Never copied to wherever a redirect points, and never sent over plain HTTP but to this computer.
+    assert 'Authorization' not in seen[1].headers and seen[1].unredirected_hdrs['Authorization'] == f'Bearer {SECRET}'
+    for url in ('http://example.test', 'ftp://example.test', 'file:///tmp/x'):
+        with pytest.raises(ValueError, match='Refusing to send your identity'):
+            cli.request_json(url, {'a': 1}, SECRET)
+    assert len(seen) == 2 and cli.request_json('http://example.test/?ticket=x') == {'ok': True}
+    assert cli.request_json('http://localhost:9000', {'a': 1}, SECRET) == {'ok': True}
 
 def test_package_failure_leaves_nothing(tmp_path):
     events = tmp_path / 'partial.jsonl'

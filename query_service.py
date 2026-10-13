@@ -4,12 +4,11 @@ A Lambda function URL. Every request names its owner with the archive identity, 
 HTTP basic-auth username with an empty password (Databento's convention) or `Authorization: Bearer`.
 Endpoints are Databento's (`/v0/timeseries.get_range`, `/v0/metadata.*`); parameters come as the query
 string or a form body. Results are Parquet, CSV or JSON lines; up to INLINE bytes in the response, larger
-ones in results/OWNER/ behind a 303 to a short-lived URL. Free, with quotas per identity.
+ones in results/OWNER/ behind a 303 to a short-lived URL. Free, with quotas per identity and, since identities
+cost nothing to make, per source address (counted before the key is read) and for the whole service.
 """
 import base64
 import datetime as dt
-import hashlib
-import hmac
 import json
 import os
 from urllib.parse import parse_qsl
@@ -25,7 +24,8 @@ URL_SECONDS = 900
 REQUESTS = (60, 60)                 # per identity: requests per minute
 RETURNED = (2 * 1024**3, 86400)     # per identity: bytes returned per day
 # Identities cost nothing to make, so an address and the whole service have limits too.
-ADDRESS = (120, 60)                 # per IP address (keyed hash): requests per minute
+ADDRESS = (120, 60)                 # per IP address (keyed hash; IPv6 by /64): requests per minute
+ADDRESS_BYTES = (4 * 1024**3, 86400)  # per IP address: bytes returned per day
 SERVED = (20 * 1024**3, 86400)      # everyone: bytes returned per day
 MAX_BODY = 65536
 
@@ -52,6 +52,9 @@ def api(event, s3, db):
 
 def _api(event, s3, db):
     http = event['requestContext']['http']
+    # The address first: requests without a valid key count too.
+    address = archive.address(event)
+    limit(db, f'query-ip-{address}', 1, *ADDRESS, f'{ADDRESS[0]} requests a minute from this address')
     path = event.get('rawPath') or http.get('path', '')
     require(path.startswith('/v0/'), 'Unknown endpoint: use /v0/timeseries.get_range or /v0/metadata.*')
     endpoint = path[len('/v0/'):]
@@ -66,11 +69,8 @@ def _api(event, s3, db):
     else:
         require(http['method'] == 'GET', 'Use GET or POST')
     who = authenticate(event.get('headers') or {})
-    require(archive.QUOTA_KEY, 'Query service is not configured')
-    address = hmac.new(archive.QUOTA_KEY, http.get('sourceIp', 'unknown').encode(), hashlib.sha256).hexdigest()
-    limit(db, f'query-ip-{address}', 1, *ADDRESS)
-    limit(db, f'query-{who}', 1, *REQUESTS)
-    return ENDPOINTS[endpoint](params, who, engine.Bucket(s3, BUCKET), s3, db)
+    limit(db, f'query-{who}', 1, *REQUESTS, f'{REQUESTS[0]} requests a minute for this identity')
+    return ENDPOINTS[endpoint](params, who, engine.Bucket(s3, BUCKET), s3, db, address)
 
 
 def authenticate(headers):
@@ -89,11 +89,15 @@ def authenticate(headers):
     return owner(key)
 
 
-def limit(db, scope, amount, cap, window):
+def limit(db, scope, amount, cap, window, what):
     try:
         archive.quota(db, scope, amount, cap, window)
-    except ValueError:
-        raise Quota('Query quota reached (60 requests a minute and 2 GB a day per identity); retry later') from None
+    except archive.Quota:
+        raise Quota(f"Query quota reached: {what}; retry {'in a minute' if window == 60 else 'tomorrow (UTC)'}") from None
+
+
+def _gigabytes(cap):
+    return f'{cap[0] / 1024**3:g} GB returned a day'
 
 
 def _json(status, value):
@@ -114,13 +118,16 @@ def _request(params):
     return engine.request(**{name: params[name] for name in names if name in params and params[name] != ''})
 
 
-def get_range(params, who, bucket, s3, db):
+def get_range(params, who, bucket, s3, db, address):
     table = engine.get_range(bucket, who, _request(params))
     body, content, extension = engine.encode(table, params.get('encoding') or 'parquet', params.get('compression') or None,
                                              _flag(params, 'pretty_ts', True), _flag(params, 'pretty_px', True),
                                              _flag(params, 'map_symbols', True))
-    limit(db, f'query-bytes-{who}', max(len(body), 1), *RETURNED)
-    limit(db, 'query-bytes-all', max(len(body), 1), *SERVED)
+    size = max(len(body), 1)
+    limit(db, f'query-bytes-{who}', size, *RETURNED, f'{_gigabytes(RETURNED)} for this identity')
+    # Before the service-wide cap, so that one address alone cannot use up everyone's day.
+    limit(db, f'query-bytes-ip-{address}', size, *ADDRESS_BYTES, f'{_gigabytes(ADDRESS_BYTES)} for this address')
+    limit(db, 'query-bytes-all', size, *SERVED, f'{_gigabytes(SERVED)} for the whole service')
     if len(body) > INLINE:
         key = f'results/{who}/{uuid.uuid4()}.{extension}'
         s3.put_object(Bucket=BUCKET, Key=key, Body=body, ContentType=content)
@@ -132,20 +139,20 @@ def get_range(params, who, bucket, s3, db):
     return {'statusCode': 200, 'headers': headers, 'body': base64.b64encode(body).decode(), 'isBase64Encoded': True}
 
 
-def list_datasets(params, who, bucket, s3, db):
+def list_datasets(params, who, bucket, s3, db, address):
     return _json(200, list(engine.DATASETS))
 
 
-def list_schemas(params, who, bucket, s3, db):
+def list_schemas(params, who, bucket, s3, db, address):
     require(params.get('dataset') in (None, '', *engine.DATASETS), 'Unknown dataset')
     return _json(200, list(engine.SCHEMAS))
 
 
-def list_fields(params, who, bucket, s3, db):
+def list_fields(params, who, bucket, s3, db, address):
     return _json(200, engine.fields(params.get('schema', '')))
 
 
-def list_publishers(params, who, bucket, s3, db):
+def list_publishers(params, who, bucket, s3, db, address):
     return _json(200, [{'publisher_id': pid, 'dataset': name, 'venue': 'XTKS', 'description': text}
                        for name, (pid, text) in engine.DATASETS.items()])
 
@@ -159,13 +166,13 @@ def _dates(params, who, bucket):
     return dates
 
 
-def get_dataset_range(params, who, bucket, s3, db):
+def get_dataset_range(params, who, bucket, s3, db, address):
     dates = sorted(_dates(params, who, bucket))
     day = lambda d: f'{d[:4]}-{d[4:6]}-{d[6:]}'  # noqa: E731
     return _json(200, {'start': day(dates[0]), 'end': day(dates[-1])})
 
 
-def get_dataset_condition(params, who, bucket, s3, db):
+def get_dataset_condition(params, who, bucket, s3, db, address):
     dates = _dates(params, who, bucket)
     low = (params.get('start_date') or '').replace('-', '') or min(dates)
     high = (params.get('end_date') or '').replace('-', '') or max(dates)
@@ -180,11 +187,11 @@ def get_dataset_condition(params, who, bucket, s3, db):
     return _json(200, out)
 
 
-def get_record_count(params, who, bucket, s3, db):
+def get_record_count(params, who, bucket, s3, db, address):
     return _json(200, engine.get_range(bucket, who, _request(params)).num_rows)
 
 
-def get_cost(params, who, bucket, s3, db):
+def get_cost(params, who, bucket, s3, db, address):
     _request(params)
     return _json(200, 0.0)
 

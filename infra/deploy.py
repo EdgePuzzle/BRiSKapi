@@ -81,6 +81,15 @@ def publish_layer(lam, s3, bucket):
     return lam.publish_layer_version(LayerName=NAME+'-deps',Description=tag,Content={'S3Bucket':bucket,'S3Key':key},
         CompatibleRuntimes=['python3.12'],CompatibleArchitectures=['arm64'])['LayerVersionArn']
 
+def reserve(lam, name, executions):
+    """Cap a function's concurrency (and so its cost) where the account's quota allows reserving it."""
+    try:
+        lam.put_function_concurrency(FunctionName=name,ReservedConcurrentExecutions=executions)
+    except lam.exceptions.InvalidParameterValueException as e:
+        if 'UnreservedConcurrentExecution' not in str(e):
+            raise
+        print(f'Regional account quota prevents reserving concurrency for {name}; application quotas remain active.')
+
 def publish_samples(s3, bucket):
     """Copy the legacy wire-format sample (schema brisk-sbi-wire-jsonl-v1, stored while the archive was public)
     to the public samples/ prefix. Idempotent; the originals stay where they are."""
@@ -135,11 +144,11 @@ def deploy(bucket):
         *({'ID':f'ExpireDeleted-{prefix[:-1]}','Status':'Enabled','Filter':{'Prefix':prefix},
            'NoncurrentVersionExpiration':{'NoncurrentDays':DELETED_DAYS},'Expiration':{'ExpiredObjectDeleteMarker':True}}
           for prefix in ('archive/', 'timing/')),
-        # Query results are fetched within minutes; central bars are derived, and what a rebuild replaces or
+        # Query results are fetched within minutes; owners' bars are derived, and what a rebuild replaces or
         # removes must not linger as old versions.
         {'ID':'ExpireResults','Status':'Enabled','Filter':{'Prefix':'results/'},'Expiration':{'Days':1},
          'NoncurrentVersionExpiration':{'NoncurrentDays':1}},
-        {'ID':'ExpireReplacedBars','Status':'Enabled','Filter':{'Prefix':'central/'},
+        {'ID':'ExpireReplacedBars','Status':'Enabled','Filter':{'Prefix':'bars/'},
          'NoncurrentVersionExpiration':{'NoncurrentDays':1},'Expiration':{'ExpiredObjectDeleteMarker':True}}]})
     ignore_exists(db.create_table, TableName=NAME, AttributeDefinitions=[{'AttributeName':'id','AttributeType':'S'}],
         KeySchema=[{'AttributeName':'id','KeyType':'HASH'}], BillingMode='PAY_PER_REQUEST')
@@ -150,7 +159,7 @@ def deploy(bucket):
     role = ignore_exists(iam.create_role, RoleName=NAME, AssumeRolePolicyDocument=json.dumps(trust))
     role_arn = iam.get_role(RoleName=NAME)['Role']['Arn']
     iam.put_role_policy(RoleName=NAME, PolicyName=NAME, PolicyDocument=json.dumps({'Version':'2012-10-17','Statement':[
-        {'Effect':'Allow','Action':['s3:GetObject','s3:GetObjectVersion','s3:PutObject'],'Resource':[arn+'/incoming/*',arn+'/archive/*',arn+'/timing/*',arn+'/reference/*',arn+'/central/*']},
+        {'Effect':'Allow','Action':['s3:GetObject','s3:GetObjectVersion','s3:PutObject'],'Resource':[arn+'/incoming/*',arn+'/archive/*',arn+'/timing/*',arn+'/reference/*',arn+'/bars/*']},
         # Owners list their own uploads (the function scopes each listing to the caller's owner ID).
         # Unconditional ListBucket, so that a missing key reads as 404 (NoSuchKey), not 403: the service
         # tests for staging parts, reference copies and tickets that way.
@@ -161,7 +170,7 @@ def deploy(bucket):
         {'Effect':'Allow','Action':['s3:DeleteObject','s3:DeleteObjectVersion'],'Resource':arn+'/incoming/*'},
         # Owners remove their own uploads from their archive; the function can't purge versions there, so they stay
         # restorable until the lifecycle expires them (DELETED_DAYS).
-        {'Effect':'Allow','Action':'s3:DeleteObject','Resource':[arn+'/archive/*',arn+'/timing/*',arn+'/central/*']},
+        {'Effect':'Allow','Action':'s3:DeleteObject','Resource':[arn+'/archive/*',arn+'/timing/*',arn+'/bars/*']},
         {'Effect':'Allow','Action':'dynamodb:UpdateItem','Resource':f'arn:aws:dynamodb:{REGION}:{account}:table/{NAME}'},
         {'Effect':'Allow','Action':['logs:CreateLogStream','logs:PutLogEvents'],'Resource':f'arn:aws:logs:{REGION}:{account}:log-group:/aws/lambda/{NAME}:*'}]}))
     logs=session.client('logs')
@@ -197,12 +206,7 @@ def deploy(bucket):
         lam.get_waiter('function_updated_v2').wait(FunctionName=NAME)
         lam.update_function_code(FunctionName=NAME,ZipFile=code.getvalue(),Architectures=['arm64'])
         lam.get_waiter('function_updated_v2').wait(FunctionName=NAME)
-    try:
-        lam.put_function_concurrency(FunctionName=NAME,ReservedConcurrentExecutions=4)
-    except lam.exceptions.InvalidParameterValueException as e:
-        if 'UnreservedConcurrentExecution' not in str(e):
-            raise
-        print('Regional account quota prevents reserving concurrency; application upload quotas remain active.')
+    reserve(lam,NAME,4)
     lam.put_function_event_invoke_config(FunctionName=NAME,MaximumRetryAttempts=2,MaximumEventAgeInSeconds=3600)
     function_arn=lam.get_function(FunctionName=NAME)['Configuration']['FunctionArn']
     ignore_exists(lam.add_permission,FunctionName=NAME,StatementId='S3Ingest',Action='lambda:InvokeFunction',
@@ -225,13 +229,12 @@ def deploy(bucket):
     return result
 
 def deploy_query(session, lam, iam, arn, account, bucket, archive_config):
-    """The cloud API's function: read-only on recordings, the demo copy and the central bars; writes results/."""
+    """The cloud API's function: read-only on recordings, the demo copy and owners' bars; writes results/."""
     trust={'Version':'2012-10-17','Statement':[{'Effect':'Allow','Principal':{'Service':'lambda.amazonaws.com'},'Action':'sts:AssumeRole'}]}
     ignore_exists(iam.create_role, RoleName=QUERY, AssumeRolePolicyDocument=json.dumps(trust))
     role_arn=iam.get_role(RoleName=QUERY)['Role']['Arn']
     iam.put_role_policy(RoleName=QUERY, PolicyName=QUERY, PolicyDocument=json.dumps({'Version':'2012-10-17','Statement':[
-        # The bars only: the central/ source markers name owners and are none of a query's business.
-        {'Effect':'Allow','Action':'s3:GetObject','Resource':[arn+'/archive/*',arn+'/reference/*',arn+'/central/*/ohlcv-*',arn+'/results/*']},
+        {'Effect':'Allow','Action':'s3:GetObject','Resource':[arn+'/archive/*',arn+'/reference/*',arn+'/bars/*',arn+'/results/*']},
         {'Effect':'Allow','Action':'s3:PutObject','Resource':arn+'/results/*'},
         # Unconditional ListBucket, so that a missing key reads as 404 (an owner's dates are listed under its ID).
         {'Effect':'Allow','Action':'s3:ListBucket','Resource':arn},
@@ -263,6 +266,8 @@ def deploy_query(session, lam, iam, arn, account, bucket, archive_config):
         lam.get_waiter('function_updated_v2').wait(FunctionName=QUERY)
         lam.update_function_code(FunctionName=QUERY,ZipFile=code,Architectures=['arm64'])
         lam.get_waiter('function_updated_v2').wait(FunctionName=QUERY)
+    # Queries are free and identities cost nothing: a ceiling on concurrent queries bounds the compute bill.
+    reserve(lam,QUERY,8)
     ignore_exists(lam.add_permission,FunctionName=QUERY,StatementId='PublicURL',Action='lambda:InvokeFunctionUrl',
         Principal='*',FunctionUrlAuthType='NONE')
     ignore_exists(lam.add_permission,FunctionName=QUERY,StatementId='PublicURLInvoke',Action='lambda:InvokeFunction',

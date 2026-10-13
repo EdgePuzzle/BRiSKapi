@@ -12,7 +12,7 @@ itself. For usage, see the [README](README.md).
 | BRiSK site client | `briskapi/brisk.py` | Cookie login (SBI by default, or e-shiten with `site="e-shiten"`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `brisk.connect()` starts the live host. |
 | Archive client | `briskapi/cli.py`, `briskapi/schema.py`, `briskapi/_parquet.py`, `briskapi/identity.py` | The `brisk` CLI, upload consent, your identity, Parquet packaging, upload, verified download, deletion, restore and export. |
 | Auction state | `rust/brisk_quote_ingest` | Optional Rust tools: `brisk_quote_ingest` validates batches, keeps per-security state and publishes latest-state files; `brisk_recording` reconstructs a saved recording. |
-| Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL serves each owner's uploads, listings, downloads, deletions and restores; S3-triggered ingest validates and stores and keeps the central OHLCV bars in step; DynamoDB holds quotas. |
+| Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL serves each owner's uploads, listings, downloads, deletions and restores; S3-triggered ingest validates and stores and keeps each owner's OHLCV bars in step; DynamoDB holds quotas. |
 | Cloud API | `query_engine.py`, `query_service.py`, `briskapi/_historical.py` | A second Lambda function URL answers Databento-style queries over an owner's recordings and the demo's, with OHLCV bars built from every broker upload; `briskapi.Historical` and `brisk query` are its client. The engine and the service run only in the cloud and are not in the wheel. |
 
 ```
@@ -24,7 +24,7 @@ SBI/e-shiten session ────────► brisk.cjs ───┴─► JS
 JSON batches ─► Parquet tables ─► zip ─► upload ticket ─► S3 staging ─► verification ─► archive/OWNER/… ─► briskapi.pull
                                                                                          (a replay's market tables: reference/)
 
-archive/OWNER/… + reference/ + central/ (bars from all live recordings) ─► query_service ─► briskapi.Historical, brisk query
+archive/OWNER/… + reference/ + bars/OWNER/… (built from the owner's live recordings) ─► query_service ─► briskapi.Historical, brisk query
 ```
 
 ## Data source
@@ -720,7 +720,9 @@ There is no registration. On first use the client makes a random 128-bit secret,
 and one in an owner-only file, `identity.json` in the config directory. Reading repairs a
 missing copy from the other, refuses copies that differ, and never overwrites an unreadable
 file (it is set aside as `identity.json.unreadable`). Every
-API request but a ticket's status sends it as `Authorization: Bearer <secret>`, over TLS. The
+API request but a ticket's status sends it as `Authorization: Bearer <secret>`, over TLS only:
+the client refuses any URL but `https` (or plain HTTP to localhost, for a local service) and
+never forwards the header on a redirect (`cli.request_json`, `cli.secure`). The
 service derives the **owner ID**, the first 32 hex digits of
 SHA-256("brisk-owner-v1:" + secret) (`schema.owner`), and keeps nothing else: no account,
 no stored key, nothing to look up. Everything an owner uploads is filed under
@@ -728,7 +730,7 @@ no stored key, nothing to look up. Everything an owner uploads is filed under
 scoped to the caller's owner ID. Owner IDs can't be reversed to secrets, so they may appear
 in prefixes, quotas and logs. Outside the owners' prefixes are the archive's single copy of
 a demo replay's market tables (below), which holds no owner's data, and the cloud API's
-`central/` (the shared bars and their source markers) and `results/OWNER/` (see
+`bars/OWNER/` (bars built from the owner's own recordings) and `results/OWNER/` (see
 [Cloud API](#cloud-api)). The cloud API takes the same secret as its key.
 
 A secret is a bearer credential: whoever holds it acts as that owner. Its **recovery code**
@@ -749,10 +751,19 @@ The API (`archive_service.py`), JSON with an `action`:
 | `timing` | `report` | The stored key. |
 | `list` | `kind` (`recordings`, `timing` or `deleted`), `date`, `after` | A page of the owner's manifests (50) or reports (500), and the key to continue after. `deleted` lists what the owner deleted and can still restore: recordings (`prefix`, `manifest`) and reports (`key`, `report`), each with `deleted_at` and `restore_until`, up to 200 and without paging (`after` must be null). |
 | `download` | `prefix` | The manifest and a 15-minute presigned URL for each of the four tables (`files`), for the owner's own prefix only. A demo recording's market tables are the archive's copy under `reference/`. |
-| `delete` | `prefix` (a recording's) or a timing key | The current objects deleted, the manifest first, so a listing never shows half a recording. Without a version ID the versioned bucket keeps them as noncurrent versions, which `restore` can bring back for 30 days and the lifecycle removes after 31; the execution role can't delete archive or timing versions. A replay's `reference/` tables are not touched. A live recording's trading day of central bars is then rebuilt without it. |
-| `restore` | `prefix` (a recording's) or a timing key | `{"status": "restored", "restored": N}`: each key deleted in the last `RESTORE_DAYS` (30) days is copied back from its newest kept version (`copy_object`), the manifest last. Not found when nothing is restorable. A restored live recording is added back to its day's central bars. See [Deleting, restoring and retention](#deleting-restoring-and-retention). |
+| `delete` | `prefix` (a recording's) or a timing key | The current objects deleted, the manifest first, so a listing never shows half a recording. Without a version ID the versioned bucket keeps them as noncurrent versions, which `restore` can bring back for 30 days and the lifecycle removes after 31; the execution role can't delete archive or timing versions. A replay's `reference/` tables are not touched. The owner's bars of a live recording's trading day are then rebuilt without it. |
+| `restore` | `prefix` (a recording's) or a timing key | `{"status": "restored", "restored": N}`: each key deleted in the last `RESTORE_DAYS` (30) days is copied back from its newest kept version (`copy_object`), the manifest last. Not found when nothing is restorable. The owner's bars of a restored live recording's trading day are rebuilt with it. See [Deleting, restoring and retention](#deleting-restoring-and-retention). |
 
 `GET /?ticket=UUID` returns a ticket's status; the unguessable ticket is its credential.
+
+Every request, a ticket's status included, first counts against its source address, 120 a
+minute (`REQUESTS`), before its identity is read. Identities are free to make and any
+well-formed one is accepted, so an address, not an identity, is what bounds guessing: with
+2^128 secrets, finding one that has uploads is hopeless at any rate, and the limit bounds what
+trying costs. Addresses count as keyed hashes (`address`), an IPv6 address as its /64 (one
+connection's usual block, so that moving within it does not reset a limit). Deletes and
+restores, each of which may rebuild a day of the owner's bars, are limited to 60 an hour per
+address and per owner (`CHANGES`). A request over any limit gets HTTP 429.
 
 ### Integrity
 
@@ -830,10 +841,9 @@ reference/SOURCE/TIMELINE/
     data/equity.parquet  data/order_book_depths.parquet  data/trades.parquet
     complete.json                            written after the tables
 timing/OWNER/YYYYMMDD/SHA256.json
-central/XTKS.BRISK/YYYYMMDD/
-    ohlcv-1s.parquet  ohlcv-1m.parquet       the day's bars from every live recording
+bars/OWNER/YYYYMMDD/
+    ohlcv-1s.parquet  ohlcv-1m.parquet       the owner's bars of the day, from its live recordings
     ohlcv-1h.parquet  ohlcv-1d.parquet       (derived; see Cloud API)
-    sources/OWNER-FROM-TO-SHA256             one marker per recording that backs them: {"prefix": ...}
 results/OWNER/UUID.EXT                       a query result too large to return inline
 ```
 
@@ -865,7 +875,8 @@ results/OWNER/UUID.EXT                       a query result too large to return 
   that form. Tickets are limited to four per IP address per hour (stored as a keyed
   hash, never the address), eight per owner per hour, 64 per hour in total and 5 GiB
   of authorized uploads per UTC day, counted by what is sent (a timing table alone,
-  once the copy exists). A complete demo replay is a 41 MB package.
+  once the copy exists), on top of every request's per-address limit (see
+  [Identity](#identity)). A complete demo replay is a 41 MB package.
 - Ticket metadata in staging expires after two days. Stored data is kept until its
   owner deletes it; what an owner deletes can be restored for 30 days and is removed
   after 31.
@@ -905,11 +916,10 @@ only the lifecycle does.
   and removes delete markers once no version is left beneath them. S3 applies lifecycle
   rules asynchronously, so removal can trail that by a day. Current objects are not
   affected, and `reference/` has no rule, since no owner deletes there.
-- A live recording's `delete` and `restore` also move its trading day's central bars
-  (`central_bars` in the service): the recording stops, or starts again, backing them.
-  The role deletes `central/` objects the same way it deletes archive ones (current
-  versions only), and the lifecycle rule `ExpireReplacedBars` removes the noncurrent
-  versions of replaced or removed bars and markers after a day.
+- A live recording's `delete` and `restore` also rebuild its owner's bars of that trading
+  day (`owner_bars` in the service). The role deletes `bars/` objects the same way it
+  deletes archive ones (current versions only), and the lifecycle rule `ExpireReplacedBars`
+  removes the noncurrent versions of replaced or removed bars after a day.
 
 ### Sources
 
@@ -936,7 +946,7 @@ in the [README](README.md).
 - `briskapi/_historical.py` is the client (`Historical`, `DataStore` and `brisk query`).
 
 The engine and the service are server side, like `archive_service.py`, which imports the
-engine to keep the bars in step: the wheel ships only `briskapi/`, and `package()` in
+engine to keep owners' bars in step: the wheel ships only `briskapi/`, and `package()` in
 `deploy.py` puts them in the one zip both functions run. OHLCV bars therefore come only from
 the cloud.
 
@@ -998,7 +1008,7 @@ JSON, `pretty_ts` gives ISO 8601 UTC times with nanoseconds instead of integer n
 `map_symbols` keeps or drops `symbol` and `compression=zstd` compresses (`.zst`); nested
 columns are JSON text in CSV.
 
-### Central bars
+### Bars
 
 `build_bars` aggregates trades (symbol, `trade_id`, frame, `ts_event`, price, size) into open,
 high, low, close and volume per security and interval, for all four lengths. Several sources
@@ -1008,32 +1018,42 @@ aligned to JST (a day bar runs from JST midnight), a bar's `ts_event` is its sta
 interval without a trade has no bar. `XTKS.BRISKDEMO` bars are built from the demo's trades on
 the fly and returned whole.
 
-For `XTKS.BRISK` the bars are central: one set per trading day from every current live
-recording of it, whoever uploaded it, each trade counted once (the shared bars).
-`central/XTKS.BRISK/YYYYMMDD/` holds the four files (zstd, sorted by symbol in 65,536-row
-groups, so a query for a few securities reads only their row groups) and
-`sources/OWNER-NAME`, a marker per backing recording whose body names its prefix.
-`central_bars` in the archive service runs after `store` commits a live recording (it backs
-the day), after `delete` (it no longer does) and after `restore` (it does again): it writes or
-removes the marker, then `rebuild_bars` reads the trades of every marked recording of the day
-and writes all four files, or removes them when no marker is left. A rebuild reads the whole
-day again, so it grows with that day's uploads. Rebuilds of one day are not serialized, so a
-rebuild that finds the day's markers changed while it ran runs again (up to three times). Bars
-are derived data, so a rebuild that fails removes the day's files (the service prints
-`Central bars for DATE not rebuilt`) rather than keep bars a recording no longer backs;
-queries then build an owner's bars from its own recordings, as they do for a day with no
-central files yet. No live recording was stored before the central bars existed, so none lacks
-a marker.
+For `XTKS.BRISK` an owner's bars are built ahead, from its own current live recordings of each
+trading day, each trade counted once. `bars/OWNER/YYYYMMDD/` holds the four files (zstd, sorted
+by symbol in 65,536-row groups, so a query for a few securities reads only their row groups).
+`owner_bars` in the archive service runs after `store` commits a live recording, after `delete`
+and after `restore`: `rebuild_bars` reads the trades of the owner's live recordings of that day
+and writes all four files, or removes them when none is left. Rebuilds of one owner's day are
+not serialized, so a rebuild that finds the owner's keys for the day changed while it ran runs
+again (up to three times). Bars are derived data, so a rebuild that fails removes the day's
+files (the service prints `Bars for DATE not rebuilt`) rather than keep bars that no longer
+match the recordings; queries then build them from the recordings, with the same result.
 
-The bars hold no identity, but they hold everyone's trades, so an owner receives only what its
-own coverage allows. `covered` keeps a bar when its span, clipped to the Tokyo Stock
-Exchange's trading sessions (`SESSIONS`: 09:00 to 11:30:01 and 12:30 to 15:30:01 JST, half
-open; the extra second holds the closing auction's prints), lies inside the merged clock
-ranges (first to last source clock) of the owner's recordings that hold that code. A bar that
-touches no session is judged on its whole span. So a one-second bar needs its second
-recorded, and an hour or day bar needs the whole of its in-session part. A query reads the
-central files for each date on which the owner has a recording, pruned by symbol; with no
-file yet, the bars come from the owner's own recordings, with the same rule.
+`covered` keeps only the bars the recordings cover completely: a bar whose span, clipped to
+the Tokyo Stock Exchange's trading sessions (`SESSIONS`: 09:00 to 11:30:01 and 12:30 to
+15:30:01 JST, half open; the extra second holds the closing auction's prints), lies inside the
+merged clock ranges (first to last source clock) of the owner's recordings that hold that code.
+A bar that touches no session is judged on its whole span. So a one-second bar needs its second
+recorded, and an hour or day bar needs the whole of its in-session part. Securities held by the
+same recordings share their windows, so it is one vectorized pass per such group (usually one),
+not one per security.
+
+No other owner's recordings enter an owner's bars, and nothing is lost by that: within its
+coverage an owner's own recordings hold every trade, since `validate_batches` refuses a
+recording whose trades do not account for every change in a security's cumulative volume and
+turnover between its quotes. Others' recordings could only disagree there. 1.0.0 built one set
+of shared bars per day from every owner's recordings and cut each owner's to its coverage, which
+a made-up recording (it passes validation: nothing ties a broker recording to the real market)
+defeated twice: two batches at 09:00 and 15:30 claimed a whole day's coverage and received
+everyone's bars, and a made-up price for a real print, from an owner ID ground to sort first,
+won deduplication and replaced the real one in everyone's. `test_query.py` keeps both
+(`test_no_upload_reveals_or_changes_another_owners_bars`).
+
+Speed, on a day of 1,000,000 trades across 3,774 securities (measured locally, without S3
+latency): a rebuild takes about 0.8 s; a query reads one-minute bars in about 1 ms for one
+security and 60 ms for every security (one-second bars: 2 ms and 140 ms), against about 0.5 s
+to build them from the recording per request. 1.0.0's per-security `covered` took about 25 s
+over such a day's four bar sizes, at query time.
 
 ### Service
 
@@ -1043,9 +1063,11 @@ wins). The key is the basic-auth username (the password is ignored) or a Bearer 
 `schema.owner` turns it into the owner ID. There is no key registry, so any well-formed
 identity authenticates: a missing or malformed key is HTTP 400, not 401, and an identity with
 no recordings gets empty tables (HTTP 404 from the dates endpoints). Quotas use the archive's
-DynamoDB table and `archive.quota`: `query-OWNER` (60 requests a minute) before the endpoint
-runs and `query-bytes-OWNER` (2 GiB per UTC day) on the encoded result's size; over either is
-HTTP 429. Errors are `{"detail": ...}` with 400 (invalid input), 404 (no data, or no demo
+DynamoDB table and `archive.quota`: first `query-ip-ADDRESS` (120 requests a minute, keyed as
+`archive.address` does, before the key is read, so requests without a valid key count too),
+then `query-OWNER` (60 requests a minute) before the endpoint runs, and on the encoded result's
+size `query-bytes-OWNER` (2 GiB per UTC day), `query-bytes-ip-ADDRESS` (4 GiB) and
+`query-bytes-all` (20 GiB for everyone); over any is HTTP 429. Errors are `{"detail": ...}` with 400 (invalid input), 404 (no data, or no demo
 copy) or 429.
 
 A result of up to 4 MiB (`INLINE`: a function URL returns 6 MB, and base64 adds a third) is
