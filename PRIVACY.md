@@ -51,7 +51,7 @@ the command line, the tool shows a short notice of everything described below an
 once. Pressing Enter accepts, and the choice is saved for future runs. After that, every
 clean and complete session is uploaded to your private archive without further prompts: demo sessions (`brisk record`, `brisk live`,
 `briskapi.connect()`, `briskapi.record()`), and broker sessions (SBI or Tachibana
-e-shiten: `brisk live --sbi`, `--site e-shiten`, `briskapi.connect(site=...)`), which upload a timing
+e-shiten: `brisk live --site sbi`, `--site e-shiten`, `briskapi.connect(site=...)`), which upload a timing
 summary and their decoded market recording. A broker session records one trading day after
 another until you stop it, and each day is uploaded once it ends (when the site serves the
 next trading date, or the server closes the stream). If the connection to your broker's BRiSK
@@ -123,7 +123,7 @@ contains other fields.
 
 ## Broker BRiSK (SBI, e-shiten)
 
-The BRiSK site client (`briskapi.brisk`; `brisk live --sbi` for SBI, `site="e-shiten"` and
+The BRiSK site client (`briskapi.brisk`; `brisk live --site sbi` for SBI, `site="e-shiten"` and
 `brisk live --site e-shiten` for Tachibana e-shiten BRiSK Next) uses session cookies
 from your own browser. They are credentials:
 

@@ -519,7 +519,7 @@ BROKER = [
            'Your broker\'s live BRiSK feed (experimental), decoded by BRiSK\'s own decoder under Node. It records one trading '
            'day after another until closed, keeping (`output`) and uploading each finished day. Without `output`, a '
            'finished day is kept only in your archive, and with uploads off, nowhere. On the command line: '
-           '`brisk live --sbi` or `--site e-shiten` (see [Recording](/guides/recording.md)).',
+           '`brisk live --site sbi` or `--site e-shiten` (see [Recording](/guides/recording.md)).',
            'briskapi.connect(\n    *,\n    site: str,\n    codes: list[str] | None = None,\n    history: bool = False,\n'
            '    upload: bool | None = None,\n    upload_market_data: bool | None = None,\n    output: str | Path | None = None,\n'
            '    on_day: Callable | None = None,\n    gateway: bool = False,\n    trace_protocol: bool = False,\n'
@@ -538,7 +538,7 @@ BROKER = [
            'A [`Feed`](/reference/python/feed_quotes.md).',
            {'Python': 'import briskapi\n\nfeed = briskapi.connect(site="sbi", codes=["7203"], output="days")\n'
             'for quote in feed.quotes("7203"):\n    print(quote["time"], quote["last_price"])',
-            'CLI': 'brisk live --sbi --codes 7203 --output days'},
+            'CLI': 'brisk live --site sbi --codes 7203 --output days'},
            {'Python': '2026-10-13 09:00:00.012000+09:00 2902.0\n2026-10-13 09:00:00.481000+09:00 2903.5'}, illustrative=True),
 ]
 

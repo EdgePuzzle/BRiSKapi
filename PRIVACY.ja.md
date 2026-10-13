@@ -53,7 +53,7 @@ ID は、システムの資格情報ストア（macOS のキーチェーンま�
 その答えは保存されて以降の実行に使われます。それ以降は、最後まで正常に終わったセッションはすべて、
 確認なしで自分専用のアーカイブにアップロードされます。対象は、デモのセッション（`brisk record`、`brisk live`、
 `briskapi.connect()`、`briskapi.record()`）と、証券会社のセッション（SBI または立花証券 e支店。
-`brisk live --sbi`、`--site e-shiten`、`briskapi.connect(site=...)`）で、後者はタイミングの要約と、
+`brisk live --site sbi`、`--site e-shiten`、`briskapi.connect(site=...)`）で、後者はタイミングの要約と、
 デコードした市場データの記録をアップロードします。証券会社のセッションは、止めるまで取引日を次々に記録し、
 各日はその日が終わると（サイトが次の取引日を配信し始めたとき、またはサーバーがストリームを閉じたとき）
 アップロードされます。日の途中で証券会社の BRiSK との接続が切れた場合、セッションは自動で再接続します。
@@ -120,7 +120,7 @@ ID の秘密の値が送られるのは、アーカイブの関数だけです�
 
 ## 証券会社の BRiSK（SBI、e支店）
 
-BRiSK のサイト用クライアント（`briskapi.brisk`。SBI は `brisk live --sbi`、立花証券 e支店の BRiSK Next は
+BRiSK のサイト用クライアント（`briskapi.brisk`。SBI は `brisk live --site sbi`、立花証券 e支店の BRiSK Next は
 `site="e-shiten"` と `brisk live --site e-shiten`）は、ご自身のブラウザーのセッション Cookie を使います。
 Cookie は認証情報です。
 

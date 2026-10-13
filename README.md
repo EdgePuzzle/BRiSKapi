@@ -67,7 +67,7 @@ Recording isn't a third API. The live calls record as they run, and `brisk live`
 
 | Command line | Python | Records | Kept on disk | Uploaded |
 | --- | --- | --- | --- | --- |
-| `brisk live --sbi` or `--site e-shiten` | `briskapi.connect(site="sbi")` | Your broker's live feed, one recording per trading day, until you stop it | Each finished day, with `--output DIR` (`output=`) | Each finished day, unless you opt out |
+| `brisk live --site sbi` or `--site e-shiten` | `briskapi.connect(site="sbi")` | Your broker's live feed, one recording per trading day, until you stop it | Each finished day, with `--output DIR` (`output=`) | Each finished day, unless you opt out |
 | `brisk live --site demo` | `briskapi.connect(site="demo")` | The demo replay, printed as JSON lines | With `--output DIR` | If the replay completes |
 | `brisk record --output DIR` | `briskapi.record(DIR)` | The demo replay | Always, in `DIR` | If the replay completes |
 
@@ -91,7 +91,7 @@ most its last half-minute. When the day ends they become its recording.
   its local copy is removed. With uploads off as well (`--no-upload`, or
   `--no-upload-market-data` for a broker's market recording), that day isn't kept anywhere,
   so add `--output DIR` to keep it.
-- **A lost connection** doesn't lose the day. `brisk live --sbi` (or `--site e-shiten`)
+- **A lost connection** doesn't lose the day. `brisk live --site sbi` (or `--site e-shiten`)
   reconnects by itself, after 5 s, then 10 s, 30 s, a minute and every 2 minutes. What it
   recorded before the drop is a complete recording of its own (`..._085800-101500`), kept and
   uploaded like a day, and the rest of the day is recorded from a fresh snapshot
@@ -144,7 +144,7 @@ cloud API returns. `briskapi.Live` is shaped like Databento's live client and ne
 sign-in: only the feed signs in to your broker.
 
 ```sh
-brisk live --sbi --quiet        # records, uploads and serves XTKS.BRISK until you stop it (--site demo: the demo, XTKS.BRISKDEMO)
+brisk live --site sbi --quiet   # records, uploads and serves XTKS.BRISK until you stop it (--site demo: the demo, XTKS.BRISKDEMO)
 ```
 
 ```python
@@ -332,7 +332,7 @@ without asking. The broker's site cannot tell the difference.
    login page and presses the passkey button, and the virtual authenticator signs. Open BRiSK from
    the broker's site in that window (or pass `--launch-url` to have it opened for you).
    `briskapi` reads the BRiSK session cookies, saves them and closes Chrome.
-3. **Then use it.** For SBI and e-shiten, `brisk live --sbi` or `brisk live --site e-shiten` and the
+3. **Then use it.** For SBI and e-shiten, `brisk live --site sbi` or `brisk live --site e-shiten` and the
    `briskapi.brisk` API use the saved cookies. For the other brokers `briskapi` has no data client
    yet, so the cookies are only saved (under `~/.config/brisk/cookies/`) for your own use.
 
@@ -428,10 +428,10 @@ one security's history is read on its own.
 ```sh
 brisk live --site demo --codes 7203,6758    # one JSON object per quote update (--raw for vendor fields)
 brisk sites | enroll | login | forget       # sign in to your broker's BRiSK with a passkey through Chrome (experimental)
-brisk live --sbi --codes 7203               # BRiSK at SBI Securities; cookies from BRISK_SBI_COOKIES (JSON) or `brisk login`; --trace-protocol shows the handshake, wire details in BRISK_PROFILE
+brisk live --site sbi --codes 7203          # BRiSK at SBI Securities; cookies from BRISK_SBI_COOKIES (JSON) or `brisk login`; --trace-protocol shows the handshake, wire details in BRISK_PROFILE
 brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; cookies from BRISK_ESHITEN_COOKIES (JSON) or `brisk login`
-brisk live --sbi --output days              # runs day after day; keeps each finished day in days/ (e.g. sbi_live_20261013_085800-153512) and prints a {"day": {...}} line on stderr
-brisk live --sbi --quiet                    # prints no quotes: records, uploads and serves briskapi.Live() (--no-gateway: serves nothing)
+brisk live --site sbi --output days         # runs day after day; keeps each finished day in days/ (e.g. sbi_live_20261013_085800-153512) and prints a {"day": {...}} line on stderr
+brisk live --site sbi --quiet               # prints no quotes: records, uploads and serves briskapi.Live() (--no-gateway: serves nothing)
 brisk record --output recordings/s1         # record the demo (uploaded unless you opt out)
 brisk list --date 20210927 --source historical_mock   # your recordings (--timing: your timing reports; --deleted: what you deleted in the last 30 days)
 brisk pull PREFIX --output recordings/downloaded   # use a prefix returned by brisk list
@@ -453,7 +453,7 @@ Each command is the command-line form of a Python call:
 | Command | Python |
 | --- | --- |
 | `brisk live --site demo` (`--cache DIR`) | `briskapi.connect(site="demo", gateway=True)` (`cache=DIR`; `--no-gateway`: without `gateway`) |
-| `brisk live --sbi`, `--site e-shiten` | `briskapi.connect(site="sbi", gateway=True)` |
+| `brisk live --site sbi`, `--site e-shiten` | `briskapi.connect(site="sbi", gateway=True)` |
 | `brisk record` | `briskapi.record()` |
 | `brisk query` | `briskapi.Historical().timeseries.get_range()` |
 | `brisk list` (`--deleted`, `--timing`) | `briskapi.recordings()` (`Archive().deleted()`, `.timing()`) |
@@ -462,7 +462,7 @@ Each command is the command-line form of a Python call:
 | `brisk enroll`, `login`, `forget` | `briskapi.passkey.enroll()`, `.login()`, `.forget()` |
 | `brisk export`, `brisk identity` | Command line only |
 
-`brisk live --sbi` and `--site e-shiten` run until you stop them, one recording per trading
+`brisk live --site sbi` and `--site e-shiten` run until you stop them, one recording per trading
 day. Unless you opt out, they upload each finished day's market recording and timing summary
 without asking; `--no-upload-market-data` stops uploading the recordings and `--no-upload` both
 (add `--output DIR` to keep them on disk). `brisk list --source sbi_live` (or `eshiten_live`) lists

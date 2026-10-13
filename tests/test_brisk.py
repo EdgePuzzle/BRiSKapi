@@ -265,7 +265,7 @@ def test_cli_live_sbi(fake_host, monkeypatch, capsys):
     sent, market = [], []
     monkeypatch.setattr(cli, 'upload_timing', lambda report, url: sent.append(report) or {'status': 'stored'})
     monkeypatch.setattr(cli, 'upload', lambda *args, **kwargs: market.append(args) or {'status': 'stored'})
-    cli.main(['live', '--sbi', '--codes', '7203'])
+    cli.main(['live', '--site', 'sbi', '--codes', '7203'])
     out = capsys.readouterr()
     lines = [json.loads(line) for line in out.out.splitlines()]
     # The one-time question names what a broker session uploads: a timing summary and the market recording.
@@ -276,7 +276,7 @@ def test_cli_live_sbi(fake_host, monkeypatch, capsys):
 
 def test_cli_trace_protocol_reaches_the_sbi_host(fake_host, monkeypatch, capfd):
     monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
-    cli.main(['live', '--sbi', '--codes', '7203', '--trace-protocol', '--no-upload'])
+    cli.main(['live', '--site', 'sbi', '--codes', '7203', '--trace-protocol', '--no-upload'])
     assert capfd.readouterr().err.count('["--codes","7203","--trace-protocol"]') == 1
 
 
@@ -303,7 +303,7 @@ def test_cli_without_cookies_stops_before_prompt_or_decoder(monkeypatch, capsys)
     monkeypatch.setattr(cli, 'check_node', lambda *args: pytest.fail('decoder must not start'))
     monkeypatch.setattr(cli, 'ask_consent', lambda: pytest.fail('do not prompt without cookies'))
     with pytest.raises(SystemExit, match='No SBI BRiSK cookies'):
-        cli.main(['live', '--sbi'])
+        cli.main(['live', '--site', 'sbi'])
     assert 'Decoder exited' not in capsys.readouterr().err
 
 
@@ -319,7 +319,7 @@ def test_an_expired_session_fails_in_one_line_before_the_decoder_starts(monkeypa
     assert [r.full_url for r in opener.requests] == [brisk.ORIGIN + '/api/frontend/boot']
     monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "expired"}')
     with pytest.raises(SystemExit) as stop:
-        cli.main(['live', '--sbi', '--codes', '7203'])
+        cli.main(['live', '--site', 'sbi', '--codes', '7203'])
     assert stop.value.code == 'brisk: error: SBI BRiSK session expired or invalid; log in again'
     assert 'Decoder exited' not in capsys.readouterr().err
 
@@ -394,12 +394,12 @@ def test_cli_asks_once_then_uploads_sbi_captures_automatically(fake_host, monkey
     monkeypatch.setattr(cli, 'upload_timing', lambda *args: timing.append(args) or {'status': 'stored'})
     for run in range(2):
         monkeypatch.setattr(cli.sys, 'stdin', io.StringIO(answer))
-        cli.main(['live', '--sbi'])
+        cli.main(['live', '--site', 'sbi'])
         out = capsys.readouterr()
         assert ('Upload automatically to your private archive? [Y/n]' in out.err) == (run == 0)
         assert len(sent) == len(timing) == (run + 1 if uploaded else 0)
     assert cli.load_consent()['enabled'] == uploaded
-    cli.main(['live', '--sbi', '--no-upload'])
+    cli.main(['live', '--site', 'sbi', '--no-upload'])
     assert len(sent) == len(timing) == (2 if uploaded else 0)
 
 
@@ -412,7 +412,7 @@ def test_cli_sbi_upload_switches(fake_host, monkeypatch, flags, market, timing):
     sent = {'market': [], 'timing': []}
     monkeypatch.setattr(cli, 'upload', lambda *args, **kwargs: sent['market'].append(args) or {'status': 'stored'})
     monkeypatch.setattr(cli, 'upload_timing', lambda *args: sent['timing'].append(args) or {'status': 'stored'})
-    cli.main(['live', '--sbi', *flags])
+    cli.main(['live', '--site', 'sbi', *flags])
     assert (len(sent['market']), len(sent['timing'])) == (market, timing)
 
 
@@ -591,5 +591,5 @@ def test_cli_asks_once_for_e_shiten_like_sbi(eshiten_host, monkeypatch, capsys, 
         cli.main(['live', '--site', 'demo', '--upload-market-data'])
     assert '--upload-market-data is for a broker' in capsys.readouterr().err
     with pytest.raises(SystemExit):
-        cli.main(['live', '--sbi', '--cache', '.'])
+        cli.main(['live', '--site', 'sbi', '--cache', '.'])
     assert '--cache is for the demo' in capsys.readouterr().err

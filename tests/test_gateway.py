@@ -280,7 +280,7 @@ def test_the_gateway_admits_only_its_key_on_this_computer():
         _gateway.Gateway('XTKS.BRISK')
     gateway.close()
     assert not gateway.path.exists()
-    with pytest.raises(brisk.BriskError, match=r'No feed on this computer serves XTKS.BRISK: start one with `brisk live --sbi`'):
+    with pytest.raises(brisk.BriskError, match=r'No feed on this computer serves XTKS.BRISK: start one with `brisk live --site sbi`'):
         brisk.Live().subscribe('XTKS.BRISK', 'trades')
     # A file left by a feed that died is replaced, and a session finding no one there says so.
     stale = dict(info, port=_free_port())

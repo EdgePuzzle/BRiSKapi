@@ -487,7 +487,6 @@ def _main(argv):
         else:
             p.add_argument('--events', type=Path, required=True)
     p = sub.add_parser('live', help='Stream live quote updates as JSON lines')
-    group = p.add_mutually_exclusive_group(required=True)
     p.add_argument('--cache', type=Path, metavar='DIR',
                    help="With --site demo: replay a copy of the demo's files downloaded before (default: download them)")
     p.add_argument('--codes', help='Comma-separated security codes (default: whole market)')
@@ -500,18 +499,17 @@ def _main(argv):
                         'file; default: yes)')
     p.add_argument('--output', type=Path, metavar='DIR',
                    help='Keep each finished day here as SOURCE_YYYYMMDD_FROM-TO (its first and last clock, JST HHMMSS)')
-    group.add_argument('--sbi', action='store_const', dest='site', const='sbi',
-                       help='Live SBI BRiSK (experimental); cookies from BRISK_SBI_COOKIES, saved with briskapi.login(remember=True) or by `brisk login`')
-    group.add_argument('--site', choices=('demo', 'sbi', 'e-shiten'),
-                       help="demo: the public BRiSK Next demo, a 2021 recording replayed here; sbi or e-shiten: your broker's "
-                            'live BRiSK (experimental); --site e-shiten for Tachibana e-shiten BRiSK Next, '
-                            "cookies from BRISK_ESHITEN_COOKIES, saved with briskapi.login('e-shiten', remember=True) or by `brisk login`")
+    p.add_argument('--site', choices=('demo', 'sbi', 'e-shiten'), required=True,
+                   help="demo: the public BRiSK Next demo, a 2021 recording replayed here; sbi: SBI Securities' live BRiSK "
+                        '(experimental), cookies from BRISK_SBI_COOKIES, saved with briskapi.login(remember=True) or by '
+                        "`brisk login`; e-shiten: Tachibana e-shiten's BRiSK Next, the same with BRISK_ESHITEN_COOKIES and "
+                        "briskapi.login('e-shiten', remember=True)")
     p.add_argument('--trace-protocol', action='store_true',
-                   help='With --sbi or --site: print the connection steps to stderr, every token redacted (wire details in BRISK_PROFILE)')
+                   help='With --site sbi or e-shiten: print the connection steps to stderr, every token redacted (wire details in BRISK_PROFILE)')
     p.add_argument('--upload', action=argparse.BooleanOptionalAction, default=None,
                    help='Upload this session to your private archive (default: yes once you agreed); --no-upload keeps all of it local, timing summary included')
     p.add_argument('--upload-market-data', action=argparse.BooleanOptionalAction, default=None,
-                   help='With --sbi or --site: upload the decoded market recording too (default: yes unless you opt out); --no-upload-market-data keeps it local')
+                   help='With --site sbi or e-shiten: upload the decoded market recording too (default: yes unless you opt out); --no-upload-market-data keeps it local')
     sub.add_parser('sites', help='List the brokers you can sign in to (built in, plus your own in sites.json)')
     for name, text in (('enroll', 'Once: pick your broker, sign in by hand and register a passkey; it is saved to the Keychain'),
                        ('login', 'Sign in with the saved passkey in Chrome and keep the BRiSK session cookies')):
@@ -527,7 +525,7 @@ def _main(argv):
             p.add_argument('--passkey-button', help='Text of the passkey sign-in control on the login page')
             p.add_argument('--headless', action='store_true', help='No Chrome window: needs --launch-url and a login page that works unattended')
             p.add_argument('--remember', action=argparse.BooleanOptionalAction, default=True,
-                           help='Save the cookies (default: yes; owner-only file); `brisk live --sbi` and `--site e-shiten` read them')
+                           help='Save the cookies (default: yes; owner-only file); `brisk live --site sbi` and `--site e-shiten` read them')
     sub.add_parser('forget', help='Delete the saved passkey (it stays registered at your broker until you remove it there)')
     p = sub.add_parser('upload', help='Upload a prepared package to your private archive'); p.add_argument('directory', type=Path)
     p = sub.add_parser('list', help='List your archived recordings (or timing reports)')
@@ -567,7 +565,7 @@ def _main(argv):
     group.add_argument('--revoke', action='store_true')
     args = parser.parse_args(argv)
     if args.command == 'live' and args.upload_market_data and args.site == 'demo':
-        parser.error('--upload-market-data is for a broker: --sbi or --site sbi|e-shiten')
+        parser.error('--upload-market-data is for a broker: --site sbi or e-shiten')
     if args.command == 'live' and args.cache and args.site != 'demo':
         parser.error('--cache is for the demo: --site demo')
     config = settings(args.config)

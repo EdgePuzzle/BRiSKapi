@@ -69,7 +69,7 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 
 | コマンドライン | Python | 記録するもの | ディスクに残るもの | アップロード |
 | --- | --- | --- | --- | --- |
-| `brisk live --sbi` または `--site e-shiten` | `briskapi.connect(site="sbi")` | 証券会社のライブフィード。止めるまで、取引日ごとに1つの記録 | `--output DIR`（`output=`）を指定すると、終わった日ごと | 終わった日ごと（オプトアウトした場合を除く） |
+| `brisk live --site sbi` または `--site e-shiten` | `briskapi.connect(site="sbi")` | 証券会社のライブフィード。止めるまで、取引日ごとに1つの記録 | `--output DIR`（`output=`）を指定すると、終わった日ごと | 終わった日ごと（オプトアウトした場合を除く） |
 | `brisk live --site demo` | `briskapi.connect(site="demo")` | デモの再生（JSON の行として出力） | `--output DIR` を指定した場合 | 再生が最後まで終わった場合 |
 | `brisk record --output DIR` | `briskapi.record(DIR)` | デモの再生 | 常に `DIR` に | 再生が最後まで終わった場合 |
 
@@ -92,7 +92,7 @@ Parquet ファイルで、大きさは完成した記録とほぼ同じなので
 - **`--output` を指定しない場合**、終わった日は[自分のアーカイブ](#自分専用のアーカイブ)に送られ、手元の
   コピーは削除されます。さらにアップロードもオフにすると（`--no-upload`、または証券会社の市場データの記録なら
   `--no-upload-market-data`）、その日はどこにも残らないので、残すには `--output DIR` を付けてください。
-- **接続が切れても**、その日は失われません。`brisk live --sbi`（または `--site e-shiten`）は、5秒後、続いて
+- **接続が切れても**、その日は失われません。`brisk live --site sbi`（または `--site e-shiten`）は、5秒後、続いて
   10秒、30秒、1分、以後2分ごとに自動で再接続します。切れる前に記録した分はそれだけで完結した記録
   （`..._085800-101500`）として、日と同じように保存・アップロードされ、その日の残りは新しいスナップショットから
   記録されます（`..._102000-153512`）。欠けるのは途切れていた間だけで、クラウド API は2つをまとめて返します。
@@ -144,7 +144,7 @@ feed.wait()           # または feed.close()。`with briskapi.connect(...) as 
 キーもサインインも要りません。証券会社にサインインするのはフィードだけです。
 
 ```sh
-brisk live --sbi --quiet        # 止めるまで記録・アップロードし、XTKS.BRISK を配信（--site demo ならデモの XTKS.BRISKDEMO）
+brisk live --site sbi --quiet   # 止めるまで記録・アップロードし、XTKS.BRISK を配信（--site demo ならデモの XTKS.BRISKDEMO）
 ```
 
 ```python
@@ -334,7 +334,7 @@ Chrome と Node を使います）、Linux でもテストしています。
    パスキーのボタンを押すと、仮想オーセンティケーターが署名します。そのウィンドウで証券会社の
    サイトから BRiSK を開いてください（`--launch-url` を指定すれば自動で開きます）。`briskapi` が
    BRiSK のセッション Cookie を読み取って保存し、Chrome を閉じます。
-3. **あとは使うだけ。** SBI証券と e支店では、保存した Cookie を `brisk live --sbi` または
+3. **あとは使うだけ。** SBI証券と e支店では、保存した Cookie を `brisk live --site sbi` または
    `brisk live --site e-shiten` と `briskapi.brisk` API が使います。他の証券会社には `briskapi` の
    データクライアントがまだないため、Cookie はご自身の利用のために保存される
    （`~/.config/brisk/cookies/`）だけです。
@@ -430,10 +430,10 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 ```sh
 brisk live --site demo --codes 7203,6758    # 気配の更新ごとに JSON を1行出力（--raw でベンダー形式）
 brisk sites | enroll | login | forget       # Chrome 経由のパスキーで証券会社の BRiSK にサインイン（試験的）
-brisk live --sbi --codes 7203               # SBI証券の BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_PROFILE）
+brisk live --site sbi --codes 7203          # SBI証券の BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_PROFILE）
 brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）または `brisk login` が保存したもの
-brisk live --sbi --output days              # 日をまたいで動き続け、終わった日ごとに days/ に残し（例: sbi_live_20261013_085800-153512）、stderr に {"day": {...}} を1行出力
-brisk live --sbi --quiet                    # 気配を出力せず、記録・アップロードと briskapi.Live() への配信だけ（--no-gateway で配信しない）
+brisk live --site sbi --output days         # 日をまたいで動き続け、終わった日ごとに days/ に残し（例: sbi_live_20261013_085800-153512）、stderr に {"day": {...}} を1行出力
+brisk live --site sbi --quiet               # 気配を出力せず、記録・アップロードと briskapi.Live() への配信だけ（--no-gateway で配信しない）
 brisk record --output recordings/s1         # デモを記録（オプトアウトしない限りアップロード）
 brisk list --date 20210927 --source historical_mock   # 自分の記録（--timing で自分のタイミングレポート、--deleted で過去30日間に削除したもの）
 brisk pull PREFIX --output recordings/downloaded   # brisk list が返した prefix を使う
@@ -455,7 +455,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 | コマンド | Python |
 | --- | --- |
 | `brisk live --site demo`（`--cache DIR`） | `briskapi.connect(site="demo", gateway=True)`（`cache=DIR`。`--no-gateway` なら `gateway` なし） |
-| `brisk live --sbi`、`--site e-shiten` | `briskapi.connect(site="sbi", gateway=True)` |
+| `brisk live --site sbi`、`--site e-shiten` | `briskapi.connect(site="sbi", gateway=True)` |
 | `brisk record` | `briskapi.record()` |
 | `brisk query` | `briskapi.Historical().timeseries.get_range()` |
 | `brisk list`（`--deleted`、`--timing`） | `briskapi.recordings()`（`Archive().deleted()`、`.timing()`） |
@@ -464,7 +464,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 | `brisk enroll`、`login`、`forget` | `briskapi.passkey.enroll()`、`.login()`、`.forget()` |
 | `brisk export`、`brisk identity` | コマンドラインのみ |
 
-`brisk live --sbi` と `--site e-shiten` は、止めるまで動き続け、取引日ごとに1つの記録を作ります。
+`brisk live --site sbi` と `--site e-shiten` は、止めるまで動き続け、取引日ごとに1つの記録を作ります。
 オプトアウトしない限り、終わった日ごとの市場データの記録とタイミングの要約を確認なしで
 アップロードします。`--no-upload-market-data` で記録を、`--no-upload` で両方をアップロードしなくなります
 （ディスクに残すには `--output DIR`）。`brisk list --source sbi_live`（または `eshiten_live`）で自分の証券会社の記録を

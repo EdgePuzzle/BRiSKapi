@@ -23,7 +23,7 @@ enroll` starts, when the first sign-in is not on the passkey login page) and use
 for a user ID box that must be filled before the passkey control works; enroll then asks for the ID and
 keeps it with the passkey; null for none). An id that is already built in only replaces the keys you give.
 
-SBI and e-shiten have a data client in briskapi (`briskapi.brisk`; `brisk live --sbi`, `brisk live --site
+SBI and e-shiten have a data client in briskapi (`briskapi.brisk`; `brisk live --site sbi`, `brisk live --site
 e-shiten`). For the other sites, signing in captures the BRiSK session cookies for your own use.
 """
 from __future__ import annotations
