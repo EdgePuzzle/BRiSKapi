@@ -79,7 +79,8 @@ other quote fields), `data/trades.parquet` (every execution, as v2 `TradeTick`),
 `data/equity.parquet` (the securities master, as v2 `Equity`) and
 `data/custom/BriskBatch.parquet` (per-frame timing). The complete demo replay takes about
 41 MB. pandas, Polars and DuckDB read the tables directly; `brisk export` writes a
-NautilusTrader catalog or JSONL. ARCHITECTURE.md lists every column.
+NautilusTrader catalog or JSONL. [docs/data-format.md](https://github.com/honvl/BRiSKapi/blob/main/docs/data-format.md)
+describes every column, with examples for pandas, Polars and DuckDB.
 
 Time queries use each quote's timestamp. Toyota's first demo quote is at
 08:59:59.993551 JST; an earlier query raises `NotFoundError`. `Market().summary()`
@@ -273,6 +274,11 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | `briskapi.Archive().upload(dir)` / `.delete(prefix)` / `.deleted()` / `.restore(prefix)` / `.timing()` / `.owner` | Upload, delete, what you deleted in the last 30 days (with `deleted_at`, `restore_until`), bring one back, your timing reports, your owner ID |
 | `briskapi.record(output, web=True, ...)` | A recording of the demo, uploaded per your choice |
 | `briskapi.consent(...)` | Your upload choice |
+| `briskapi.Historical()` | The cloud API's client, Databento-style; your archive identity is the API key ([below](#querying-your-archive-in-the-cloud)) |
+| `Historical().timeseries.get_range(dataset, start, end=None, symbols='ALL_SYMBOLS', schema='trades', limit=None, path=None)` | A store of records from `XTKS.BRISK` (your recordings) or `XTKS.BRISKDEMO`: Databento's conversions: `to_df()` (indexed by `ts_recv`, or `ts_event` for bars), `to_ndarray()`, `to_csv(path)`, `to_json(path)`, `to_parquet(path)`, `to_file(path)`, `replay(callback)`, iteration, `len()` |
+| `Historical().metadata.list_datasets()` / `.list_schemas(dataset)` / `.list_fields(schema)` / `.list_publishers()` / `.get_dataset_range(dataset)` | The catalogue; a dataset's first and last date with data |
+| `Historical().metadata.get_dataset_condition(dataset, start_date, end_date)` | Each date available or missing, and the clock windows (JST) your recordings cover |
+| `Historical().metadata.get_record_count(...)` / `.get_cost(...)` | How many records a request returns; its cost, always 0 (free, with quotas) |
 | `Ticker(code).candles(interval)` / `.margin(days)` | Broker BRiSK (SBI, e-shiten) price bars; margin balances and lending fees |
 | `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | Broker BRiSK market data |
 | `briskapi.brisk.login(site=...)` / `.connect()` | SBI (default) or e-shiten BRiSK session and live feed |
@@ -302,6 +308,7 @@ brisk delete PREFIX                         # remove one of your uploads from yo
 brisk restore PREFIX                        # bring back an upload deleted in the last 30 days (also a timing report's key)
 brisk prune recordings/s1                   # free disk: remove a local recording your archive holds
 brisk export recordings/s1 --nautilus catalog      # a NautilusTrader v2 catalog (or --jsonl FILE)
+brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13   # the cloud API: CSV to stdout (--encoding json|parquet, --output FILE, --end, --limit)
 brisk consent [--accept | --revoke]         # show or change automatic uploads (--no-upload: this run only)
 brisk upload recordings/s1                  # retry uploading a recording
 brisk identity [--recovery-code | --recover CODE]  # your owner ID; its recovery code; use it on another computer
@@ -320,7 +327,9 @@ both. `brisk list --source sbi_live` (or `eshiten_live`) lists your broker recor
 Uploading gives you a free, off-computer copy of every complete session, checked on arrival
 (a complete demo replay must match the reference). Once a recording is in your archive,
 `brisk prune DIR` deletes the local copy (after checking its SHA-256 against your archive)
-and `brisk pull` brings it back, on this computer or any other. Each upload is filed under
+and `brisk pull` brings it back, on this computer or any other. Uploading also gives you the
+[cloud API](#querying-your-archive-in-the-cloud) and its OHLCV bars, which exist only there.
+Each upload is filed under
 `archive/OWNER/YYYYMMDD/FROM-TO-SHA256` (the prefix `brisk list` returns), FROM and TO being
 the recording's first and last source clock (JST, HHMMSS), so a day's recordings sort by time.
 
@@ -357,7 +366,9 @@ Python), until you decide with `brisk consent --accept` or `--revoke`
   trading date and the first and last minute; `briskapi.Archive().timing()` lists yours)
   and, once a trading day has ended, that day's decoded market recording: securities master,
   prices, quantities, books, trades, codes and local timing. Cookies, tokens and connection
-  diagnostics are never uploaded.
+  diagnostics are never uploaded. The day's trades also go into the archive's shared OHLCV
+  bars, which hold no identity or local timing (see
+  [below](#querying-your-archive-in-the-cloud)).
 - **Opting out:** `--no-upload` for one run (`upload=False` in Python);
   `--no-upload-market-data` (`upload_market_data=False`) keeps only a broker capture's
   market recording local; `BRISK_UPLOAD=0` for every run in that environment;
@@ -370,8 +381,74 @@ Python), until you decide with `brisk consent --accept` or `--revoke`
 - Partial replays (`--limit-frames`) and recordings closed before their day ends are never
   uploaded; a broker feed stopped mid-day uploads only its timing summary.
 
+## Querying your archive in the cloud
+
+Uploads also give you a cloud API over your own recordings, shaped like Databento's
+historical API (the same names and parameters). Your archive identity is the API key: there
+is no signup and no key to create, and `briskapi.Historical()` finds your identity the way
+uploads do (and makes one if you have none).
+
+```python
+import briskapi
+
+client = briskapi.Historical()
+trades = client.timeseries.get_range("XTKS.BRISK", start="2026-10-13", end="2026-10-17",
+                                     symbols=["7203"], schema="trades")
+trades.to_df()      # a pandas DataFrame indexed by ts_recv; also to_ndarray(), to_csv(), to_json(), to_parquet(), replay()
+client.timeseries.get_range("XTKS.BRISK", start="2026-10-13", symbols=["7203"],
+                            schema="ohlcv-1m").to_df()     # 1-minute bars (see below)
+client.timeseries.get_range("XTKS.BRISKDEMO", start="2021-09-27T08:59", end="2021-09-27T09:03",
+                            symbols=["7203"], schema="imbalance")    # the demo, for any identity
+client.metadata.get_dataset_condition("XTKS.BRISK", start_date="2026-10-01")   # each date and the clock windows you recorded
+```
+
+`get_range(dataset, start, end=None, symbols='ALL_SYMBOLS', schema='trades', limit=None,
+path=None)` returns a store; `path` also writes its Parquet file. `client.metadata` has
+`list_datasets()`, `list_schemas(dataset)`, `list_fields(schema)`, `list_publishers()`,
+`get_dataset_range(dataset)`, `get_dataset_condition(dataset, start_date, end_date)` (each date
+available or missing, and the clock windows your recordings cover, in JST),
+`get_record_count(...)` and `get_cost(...)`. `get_cost` is always 0: the cloud API is free,
+with quotas of 60 requests a minute and 2 GB a day per identity.
+
+- **Datasets** follow Databento's `VENUE.FEED` naming (XTKS is the Tokyo Stock Exchange).
+  `XTKS.BRISK` is your own live recordings, whichever broker's BRiSK they came through.
+  `XTKS.BRISKDEMO` is the public demo (2021-09-27), open to every identity.
+- **Schemas:** `trades`; `mbp-10` (ten levels per side; BRiSK gives books, not order events,
+  so `action` and `side` are `N`); `definition`; `imbalance` (opening and closing auction
+  state: indicative price and volume, market-order imbalance); `brisk-quotes` (every BRiSK
+  quote field); and the OHLCV bars `ohlcv-1s`, `ohlcv-1m`, `ohlcv-1h` and `ohlcv-1d`.
+  `list_fields(schema)` lists a schema's columns.
+- **Times:** a date means that JST trading day, a time without a zone is JST and an integer is
+  UTC nanoseconds. `end` is exclusive and defaults to the end of the start's trading day. A
+  request covers at most 31 days and 2,000 symbols.
+- **Symbols** are JPX codes. `instrument_id` is fixed per code: digits-only codes are their
+  number (7203), others are 100,000 plus the code's base-36 value (`167A` is 154694).
+
+**OHLCV bars come only from the cloud.** The archive builds one set of bars per trading day
+from everyone's current uploads, counting each trade once (the shared bars). You receive a bar
+only when your own uploads cover that security and the bar's whole span within the trading
+sessions (09:00 to 11:30 and 12:30 to 15:30 JST). A recording from 08:55 to 11:31, for
+example, gets the morning's 1-minute and 1-hour bars but not the day bar. So uploading is how
+you get bars. (`XTKS.BRISKDEMO`'s bars are built from the demo's own trades.) The shared bars
+hold only prices, volumes and times, with no identity or local timing; see
+[PRIVACY.md](https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md) (policy version 7).
+`Ticker.candles()` is something else: BRiSK's own bars from your broker, which need a broker
+login.
+
+On the command line, `brisk query` writes CSV to stdout. `--encoding json` or `parquet` changes
+that (Parquet needs `--output FILE`), `--output FILE` writes a file instead, and `--end` and
+`--limit` bound the request:
+
+```sh
+brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13 > toyota-1m.csv
+```
+
+The HTTP API behind both is described in
+[docs/cloud-api.md](https://github.com/honvl/BRiSKapi/blob/main/docs/cloud-api.md).
+
 ## More documentation
 
+- [docs/data-format.md](https://github.com/honvl/BRiSKapi/blob/main/docs/data-format.md): every column of recordings and cloud API records, and how to read them
 - [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/main/ARCHITECTURE.md): how it works, data format, archive integrity and limits
 - [PRIVACY.md](https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md): privacy policy
 - [CONTRIBUTING.md](https://github.com/honvl/BRiSKapi/blob/main/CONTRIBUTING.md): development, tests and releases

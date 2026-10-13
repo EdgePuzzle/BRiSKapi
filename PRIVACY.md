@@ -1,7 +1,7 @@
 # Privacy policy
 
-Policy version 6, effective 13 October 2026. Applies to the `brisk` Python API and
-CLI in this repository and the private recording archive they upload to.
+Policy version 7, effective 13 October 2026. Applies to the `brisk` Python API and
+CLI in this repository, the private recording archive they upload to and its cloud API.
 
 ## Your private archive
 
@@ -28,7 +28,21 @@ wire-format sample capture.
   `brisk restore PREFIX` (or `briskapi.Archive().restore(prefix)`) restores it. After that
   it can't be restored, and the storage removes it within a day.
 - The archive's operator (below) runs the storage and can access what it holds, as with
-  any hosted service. The operator does not publish or share it.
+  any hosted service. Apart from the shared bars below, the operator does not publish or
+  share it.
+- **Shared bars.** For each trading day, the archive builds one set of OHLCV bars (open,
+  high, low, close and volume per security, from one second to one day) from the trades in
+  every current broker recording of that day (SBI or e-shiten), whoever uploaded it,
+  counting each trade once. The bars hold only prices, volumes and times: no identity, owner
+  ID or local timing. Through the cloud API you receive bars only for the securities and the
+  times your own current uploads cover; nobody receives more because of your uploads. A
+  recording stops contributing as soon as it is deleted, and bars no current upload backs
+  are removed (older versions within a day).
+- **Cloud API.** Queries (`briskapi.Historical`, `brisk query`) use your identity as the API
+  key and read only your own recordings, the shared bars as above and the public demo, which
+  any identity may query. Results are kept for up to a day so that large ones can be
+  downloaded. It is free, with quotas counted per identity (60 requests a minute, 2 GB a
+  day); the service does not log what you query.
 
 ## Automatic uploads
 

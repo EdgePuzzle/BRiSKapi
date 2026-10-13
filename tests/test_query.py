@@ -1,0 +1,443 @@
+"""The cloud API: query_engine over stored recordings, the central bars, query_service and briskapi.Historical."""
+import base64
+import datetime as dt
+import io
+import json
+from pathlib import Path
+import urllib.error
+import urllib.parse
+
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+import pytest
+
+import archive_service as service
+import briskapi
+import briskapi.cli as cli
+import briskapi.schema as schema
+import query_engine as engine
+import query_service
+from briskapi import _historical
+from test_archive import (DB, OTHER, OWNER, S3, SECRET, isolated, packaged, stream, ticket_for, upload,  # noqa: F401
+                          stored)
+
+JST = dt.timezone(dt.timedelta(hours=9))
+DATE = '20261013'
+CODES = ('7203', '167A')
+OPEN_US = 9 * 3600 * 1_000_000
+THIRD = 'brisk-id-v1-' + 'c' * 26
+OTHER_OWNER = schema.owner(OTHER)
+
+
+def trades_at(second):
+    """The day's trades at this second after 09:00: Toyota every 10 s, 167A every 30 s."""
+    out = []
+    if second and second % 10 == 0:
+        out.append((0, 30000 + 10 * (second // 10 % 7), 100 * (1 + second // 10 % 3)))
+    if second and second % 30 == 0:
+        out.append((1, 5000 + 10 * (second // 30 % 4), 200))
+    return out
+
+
+def cumulative(issue, second):
+    volume = turnover = 0
+    for s in range(second + 1):
+        for i, price10, quantity in trades_at(s):
+            if i == issue:
+                volume, turnover = volume + quantity, turnover + price10 * quantity
+    return volume, turnover
+
+
+def session(first, last, date=DATE, source='sbi_live'):
+    """A broker session from `first` to `last` (seconds after 09:00), one quote batch per second."""
+    midnight_ms = int(dt.datetime.strptime(date, '%Y%m%d').replace(tzinfo=JST).timestamp() * 1000)
+    master = [{**dict.fromkeys(schema.MASTER_KEYS, 0), 'issue_id': i, 'code': code, 'name': f'Issue {code}', 'lot_size': 100,
+               'base_price10': 30000 if i == 0 else 5000, 'limit_up10': 39000 if i == 0 else 6500,
+               'limit_down10': 21000 if i == 0 else 3500, 'tick_type': 1, 'issue_type': 1} for i, code in enumerate(CODES)]
+
+    def quote(i, second):
+        volume, turnover = cumulative(i, second)
+        price = 30000 if i == 0 else 5000
+        opening = second < 5
+        return {**dict.fromkeys(schema.QUOTE_KEYS, 0), **{key: [] for key in schema.BOOK_KEYS},
+                'issue_id': i, 'code': CODES[i], 'frame': second + 1, 'max_frame': second + 1,
+                'source_time_us': OPEN_US + second * 1_000_000, 'last_price10': price, 'volume': volume,
+                'turnover10': turnover, 'bid_levels': [[price - 10, 300, 3], [price - 20, 200, 2]],
+                'ask_levels': [[price + 10, 100, 1]], 'indicative_price10': price if opening else 0,
+                'indicative_volume': 1000 if opening else 0, 'market_buy_quantity': 500 if opening else 0,
+                'market_sell_quantity': 200 if opening else 0, 'reference_price10': price}
+
+    batches = [dict(type='bootstrap', seq=0, source=source, trading_date=date, source_time_us=OPEN_US + first * 1_000_000,
+                    input_transport={**schema.BROKER_TRANSPORT[source], 'decoder': '/private/decoder.js'},
+                    source_timestamp_origin='brisk_decoder_unverified', exchange_delay_ms=None, market_issue_count=2,
+                    master=master, quotes=[quote(0, first), quote(1, first)], trades=[])]
+    for seq, second in enumerate(range(first + 1, last + 1), 1):
+        now = OPEN_US + second * 1_000_000
+        trades = [{'issue_id': i, 'code': CODES[i], 'frame': second + 1, 'time_us': now, 'price10': price10,
+                   'quantity': quantity, 'side': 1 if i == 0 else 2} for i, price10, quantity in trades_at(second)]
+        batches.append(dict(type='quotes', seq=seq, source_time_us=now, received_unix_ms=midnight_ms + now // 1000 + 20,
+                            decode_ns=250_000, replay_lateness_ms=None, quotes=[quote(0, second), quote(1, second)],
+                            trades=trades))
+    n = len(batches)
+    return batches + [dict(type='end', seq=n, source_time_us=OPEN_US + last * 1_000_000, frames=n,
+                           quote_updates=2 * (n - 1), replay_wall_ms=1.0)]
+
+
+@pytest.fixture
+def archive(tmp_path):
+    s3, db = S3(), DB()
+
+    def put(batches, secret=SECRET, name=None):
+        events = tmp_path / f'{name or len(list(tmp_path.iterdir()))}.jsonl'
+        events.write_bytes(stream(batches).read())
+        directory = tmp_path / f'package-{events.stem}'
+        m = cli.package(events, directory)
+        ticket = ticket_for(s3, db, m, secret)
+        service.ingest(upload(s3, m, directory, ticket), s3, db)
+        status = service.json_get(s3, f'incoming/{ticket}/status.json')
+        assert status['status'] == 'stored', status
+        return status['prefix']
+    return s3, db, put
+
+
+def query(s3, owner, **params):
+    return engine.get_range(engine.Bucket(s3, service.BUCKET), owner, engine.request(**params))
+
+
+def at(second):
+    return (dt.datetime(2026, 10, 13, 9, tzinfo=JST) + dt.timedelta(seconds=second)).isoformat()
+
+
+def test_your_own_records_merged_deduplicated_and_time_ordered(archive):
+    s3, db, put = archive
+    put(session(0, 150))
+    put(session(120, 300))                     # overlaps the first from 09:02:00 to 09:02:30
+    put(session(0, 300, date='20261014'), OTHER)
+    trades = query(s3, OWNER, dataset='XTKS.BRISK', schema='trades', symbols='7203', start='2026-10-13')
+    assert trades.column('sequence').to_pylist() == [s + 1 for s in range(10, 301, 10)]   # each trade once
+    assert trades.column('price').to_pylist()[0] == 3001.0 and set(trades.column('side').to_pylist()) == {'B'}
+    assert trades.column('instrument_id').to_pylist()[0] == 7203 and trades.column('symbol').to_pylist()[0] == '7203'
+    recv = pc.cast(trades.column('ts_recv'), pa.int64()).to_pylist()
+    event = pc.cast(trades.column('ts_event'), pa.int64()).to_pylist()
+    assert all(r - e == 20_000_000 for r, e in zip(recv, event))   # local receipt, 20 ms after BRiSK's stamp
+    # 167A's sellers, its stable ID, and nothing of the other owner's day.
+    other = query(s3, OWNER, dataset='XTKS.BRISK', schema='trades', symbols=['167A'], start=at(0), end=at(200))
+    assert other.column('instrument_id').to_pylist()[0] == 154694 and set(other.column('side').to_pylist()) == {'A'}
+    assert other.num_rows == 6
+    assert query(s3, OWNER, dataset='XTKS.BRISK', schema='trades', start='2026-10-14').num_rows == 0
+    assert query(s3, OTHER_OWNER, dataset='XTKS.BRISK', schema='trades', start='2026-10-14').num_rows == 40
+    assert query(s3, OWNER, dataset='XTKS.BRISK', schema='trades', start='2026-10-13', limit=3).num_rows == 3
+
+
+def test_books_definitions_imbalance_and_everything_else(archive):
+    s3, db, put = archive
+    put(session(0, 60))
+    books = query(s3, OWNER, dataset='XTKS.BRISK', schema='mbp-10', symbols='7203', start=at(0), end=at(10))
+    row = books.slice(0, 1).to_pylist()[0]
+    assert row['flags'] == 32 and row['action'] == 'N' and row['sequence'] == 1          # the session's snapshot
+    assert (row['bid_px_00'], row['bid_sz_00'], row['bid_ct_00'], row['bid_px_01']) == (2999.0, 300, 3, 2998.0)
+    assert row['bid_px_02'] is None and (row['ask_px_00'], row['ask_px_01']) == (3001.0, None)
+    assert books.num_rows == 10 and books.slice(1, 1).to_pylist()[0]['flags'] == 0
+    definition = query(s3, OWNER, dataset='XTKS.BRISK', schema='definition', start='2026-10-13').to_pylist()
+    assert [(d['raw_symbol'], d['min_lot_size_round_lot'], d['high_limit_price'], d['low_limit_price']) for d in definition] == \
+        [('7203', 100, 3900.0, 2100.0), ('167A', 100, 650.0, 350.0)]
+    imbalance = query(s3, OWNER, dataset='XTKS.BRISK', schema='imbalance', symbols='7203', start='2026-10-13').to_pylist()
+    assert len(imbalance) == 5 and {r['auction_type'] for r in imbalance} == {'O'}
+    assert (imbalance[0]['ind_match_price'], imbalance[0]['paired_qty'], imbalance[0]['market_imbalance_qty'],
+            imbalance[0]['market_imbalance_side'], imbalance[0]['upper_collar']) == (3000.0, 1000, 300, 'B', 3900.0)
+    quotes = query(s3, OWNER, dataset='XTKS.BRISK', schema='brisk-quotes', symbols='167A', start=at(0), end=at(2))
+    assert {'turnover', 'closing_bids', 'bid_total_quantity', 'special_quote_time'} <= set(quotes.column_names)
+    assert quotes.num_rows == 2
+
+
+def bars(s3, owner, schema_, **params):
+    return query(s3, owner, dataset='XTKS.BRISK', schema=schema_, start='2026-10-13', **params)
+
+
+def test_central_bars_are_shared_but_each_owner_gets_only_its_own_coverage(archive):
+    s3, db, put = archive
+    mine = put(session(0, 150))               # 09:00:00 to 09:02:30
+    theirs = put(session(0, 300), OTHER)      # 09:00:00 to 09:05:00
+    root = f'{engine.CENTRAL}/{DATE}'
+    assert sorted(k.rsplit('/', 1)[1] for k in s3.objects if k.startswith(f'{root}/sources/')) == \
+        sorted(f"{p.split('/')[1]}-{p.rsplit('/', 1)[1]}" for p in (mine, theirs))
+    minute = bars(s3, OWNER, 'ohlcv-1m', symbols='7203').to_pylist()
+    # Whole minutes inside 09:00:00 to 09:02:30 only, from the deduplicated trades (not doubled).
+    assert [m['ts_event'].astimezone(JST).strftime('%H:%M') for m in minute] == ['09:00', '09:01']
+    assert minute[0]['volume'] == sum(q for s in range(10, 60, 10) for i, _, q in trades_at(s) if i == 0)
+    assert (minute[0]['open'], minute[0]['close']) == (3001.0, 3005.0)
+    assert [m['ts_event'].astimezone(JST).strftime('%H:%M') for m in bars(s3, OTHER_OWNER, 'ohlcv-1m', symbols='7203').to_pylist()] == \
+        ['09:00', '09:01', '09:02', '09:03', '09:04']
+    seconds = bars(s3, OWNER, 'ohlcv-1s', symbols='7203')
+    # The 09:02:30 second runs past the recording's last clock (09:02:30.000000), so 09:02:20 is the last whole one.
+    assert pc.max(seconds.column('ts_event')).as_py().astimezone(JST).strftime('%H:%M:%S') == '09:02:20'
+    # An hour or a day needs the whole session part of it covered.
+    assert bars(s3, OTHER_OWNER, 'ohlcv-1h').num_rows == 0 and bars(s3, OTHER_OWNER, 'ohlcv-1d').num_rows == 0
+    assert bars(s3, THIRD_OWNER(), 'ohlcv-1m').num_rows == 0
+    # Deleting a recording takes it out of the day's bars at once; restoring brings it back.
+    assert service.api(_event('delete', theirs, OTHER), s3, db)['statusCode'] == 200
+    assert json.loads(s3.objects[f'{root}/sources/{OWNER}-{mine.rsplit("/", 1)[1]}'])['prefix'] == mine
+    built = pq.read_table(io.BytesIO(s3.objects[f'{root}/ohlcv-1m.parquet']))
+    assert pc.max(built.column('ts_event')).as_py().astimezone(JST).strftime('%H:%M') == '09:02'
+    service.api(_event('delete', mine, SECRET), s3, db)
+    assert not [k for k in s3.objects if k.startswith(root)]
+    service.api(_event('restore', mine, SECRET), s3, db)
+    assert f'{root}/ohlcv-1m.parquet' in s3.objects and len(bars(s3, OWNER, 'ohlcv-1m', symbols='7203')) == 2
+    # Without central bars (not built yet), an owner's own recordings give the same.
+    for key in [k for k in s3.objects if k.startswith(f'{root}/ohlcv-')]:
+        del s3.objects[key]
+    assert bars(s3, OWNER, 'ohlcv-1m', symbols='7203').to_pylist() == minute
+
+
+def THIRD_OWNER():
+    return schema.owner(THIRD)
+
+
+def _event(action, prefix, secret, method='POST'):
+    return {'requestContext': {'http': {'method': method, 'sourceIp': '127.0.0.1'}},
+            'headers': {'authorization': f'Bearer {secret}'}, 'body': json.dumps({'action': action, 'prefix': prefix})}
+
+
+def test_a_failed_rebuild_removes_the_days_bars(archive, monkeypatch):
+    s3, db, put = archive
+    mine = put(session(0, 120))
+    monkeypatch.setattr(engine, 'rebuild_bars', lambda *a: 1 / 0)
+    service.api(_event('delete', mine, SECRET), s3, db)
+    assert not [k for k in s3.objects if k.startswith(f'{engine.CENTRAL}/{DATE}/ohlcv-')]
+
+
+def test_the_demo_is_open_to_every_identity(packaged, archive, monkeypatch):
+    s3, db, put = archive
+    monkeypatch.setattr(engine, 'DEMO_SOURCE', 'synthetic_test')
+    bucket = engine.Bucket(s3, service.BUCKET)
+    with pytest.raises(engine.NotFound):
+        engine.demo(bucket)
+    stored(s3, db, *packaged)                 # the first verified replay becomes the archive's copy
+    request = engine.request('XTKS.BRISKDEMO', 'trades', start='2021-09-27')
+    trades = engine.get_range(bucket, THIRD_OWNER(), request).to_pylist()
+    assert [(t['symbol'], t['price'], t['size']) for t in trades] == [('0000', 124.0, 100)]
+    assert trades[0]['ts_recv'] == trades[0]['ts_event']     # a replay has no receipt time of its own
+    second = engine.get_range(bucket, THIRD_OWNER(), engine.request('XTKS.BRISKDEMO', 'ohlcv-1s', start='2021-09-27'))
+    assert second.to_pylist()[0]['volume'] == 100
+    assert engine.dataset_dates(bucket, THIRD_OWNER(), 'XTKS.BRISKDEMO') == {'20210927': [['00:00:00', '00:00:00']]}
+    assert engine.get_range(bucket, THIRD_OWNER(), engine.request('XTKS.BRISKDEMO', 'trades', start='2021-09-28')).num_rows == 0
+
+
+def test_requests_and_encodings():
+    midnight = int(dt.datetime(2026, 10, 13, tzinfo=JST).timestamp()) * 10**9
+    assert engine.timestamp('2026-10-13') == midnight
+    assert engine.timestamp('2026-10-13T09:00') == midnight + 9 * 3600 * 10**9      # JST unless it says otherwise
+    assert engine.timestamp('2026-10-13T00:00Z') == midnight + 9 * 3600 * 10**9
+    assert engine.timestamp(str(midnight)) == midnight == engine.timestamp(midnight)
+    req = engine.request('XTKS.BRISK', start='2026-10-13')
+    assert (req.end - req.start, req.symbols, req.limit, req.schema) == (86400 * 10**9, None, None, 'trades')
+    assert engine.request('XTKS.BRISK', symbols='7203, 167A', start='2026-10-13', limit='5').symbols == {'7203', '167A'}
+    for bad in (dict(dataset='XNAS.ITCH'), dict(schema='mbo'), dict(symbols='toyota'), dict(start=None),
+                dict(end='2026-10-12'), dict(end='2026-12-31'), dict(limit='-1'), dict(stype_in='instrument_id'),
+                dict(start='yesterday')):
+        with pytest.raises(ValueError):
+            engine.request(**{'dataset': 'XTKS.BRISK', 'start': '2026-10-13', **bad})
+    assert (engine.instrument_id('7203'), engine.instrument_id('167A'), engine.instrument_id('25935')) == (7203, 154694, 25935)
+    table = pa.table({'ts_event': pa.array([midnight], engine.TIME), 'price': [3001.5], 'symbol': ['7203'],
+                      'book': pa.array([[{'price': 1.0}]])})
+    body, content, extension = engine.encode(table, 'csv')
+    assert content == 'text/csv' and b'2026-10-12T15:00:00.000000000Z' in body and b'3001.5' in body and b'"[{' in body
+    body, _, _ = engine.encode(table, 'json', pretty_ts=False, pretty_px=False, map_symbols=False)
+    row = json.loads(body)
+    assert row['ts_event'] == midnight and row['price'] == 3001500000000 and 'symbol' not in row
+    body, content, extension = engine.encode(table, 'csv', compression='zstd')
+    assert content == 'application/zstd' and extension == 'csv.zst'
+    assert b'3001.5' in pa.input_stream(pa.BufferReader(body), compression='zstd').read()
+    with pytest.raises(ValueError):
+        engine.encode(table, 'dbn')
+    assert [f['name'] for f in engine.fields('ohlcv-1m')][:2] == ['ts_event', 'publisher_id']
+    assert 'bid_px_09' in {f['name'] for f in engine.fields('mbp-10')}
+    with pytest.raises(ValueError):
+        engine.fields('mbo')
+
+
+def api_event(path, params=None, secret=SECRET, method='POST', basic=True):
+    headers = {}
+    if secret:
+        headers['authorization'] = ('Basic ' + base64.b64encode(f'{secret}:'.encode()).decode()) if basic else f'Bearer {secret}'
+    body = urllib.parse.urlencode(params or {})
+    return {'requestContext': {'http': {'method': method, 'sourceIp': '127.0.0.1'}}, 'rawPath': path, 'headers': headers,
+            'rawQueryString': body if method == 'GET' else '', 'body': body if method == 'POST' else ''}
+
+
+def test_the_service(archive, monkeypatch):
+    s3, db, put = archive
+    put(session(0, 150))
+    call = lambda *a, **k: query_service.api(api_event(*a, **k), s3, db)  # noqa: E731
+    params = {'dataset': 'XTKS.BRISK', 'schema': 'trades', 'symbols': '7203', 'start': '2026-10-13'}
+    got = call('/v0/timeseries.get_range', params)
+    assert got['statusCode'] == 200 and got['isBase64Encoded'] and got['headers']['x-record-count'] == '15'
+    assert pq.read_table(io.BytesIO(base64.b64decode(got['body']))).num_rows == 15
+    got = call('/v0/timeseries.get_range', {**params, 'encoding': 'csv'}, basic=False)
+    assert got['headers']['content-type'] == 'text/csv' and got['body'].count('\n') == 16
+    # Large results wait in results/OWNER/ behind a 303.
+    monkeypatch.setattr(query_service, 'INLINE', 10)
+    got = call('/v0/timeseries.get_range', params)
+    assert got['statusCode'] == 303 and got['headers']['location'].startswith(f'https://s3.test/results/{OWNER}/')
+    monkeypatch.setattr(query_service, 'INLINE', 4 * 1024 * 1024)
+    assert json.loads(call('/v0/metadata.list_datasets', method='GET')['body']) == ['XTKS.BRISK', 'XTKS.BRISKDEMO']
+    assert json.loads(call('/v0/metadata.list_publishers', method='GET')['body'])[0] == \
+        {'publisher_id': 1, 'dataset': 'XTKS.BRISK', 'venue': 'XTKS', 'description': 'Tokyo Stock Exchange via BRiSK'}
+    assert 'ohlcv-1m' in json.loads(call('/v0/metadata.list_schemas', {'dataset': 'XTKS.BRISK'}, method='GET')['body'])
+    first = json.loads(call('/v0/metadata.list_fields', {'schema': 'trades'}, method='GET')['body'])[0]
+    assert (first['name'], first['type']) == ('ts_recv', 'timestamp[ns, tz=UTC]') and 'received' in first['description']
+    assert json.loads(call('/v0/metadata.get_dataset_range', {'dataset': 'XTKS.BRISK'}, method='GET')['body']) == \
+        {'start': '2026-10-13', 'end': '2026-10-13'}
+    condition = json.loads(call('/v0/metadata.get_dataset_condition', {'dataset': 'XTKS.BRISK', 'start_date': '2026-10-12'},
+                                method='GET')['body'])
+    assert condition == [{'date': '2026-10-12', 'condition': 'missing', 'last_modified_date': None, 'windows': []},
+                         {'date': '2026-10-13', 'condition': 'available', 'last_modified_date': None,
+                          'windows': [['09:00:00', '09:02:30']]}]
+    assert json.loads(call('/v0/metadata.get_record_count', params)['body']) == 15
+    assert json.loads(call('/v0/metadata.get_cost', params)['body']) == 0.0
+    assert call('/v0/metadata.get_dataset_range', {'dataset': 'XTKS.BRISK'}, secret=OTHER, method='GET')['statusCode'] == 404
+    assert call('/v0/timeseries.get_range', params, secret=None)['statusCode'] == 400
+    assert call('/v0/timeseries.get_range', params, secret='brisk-id-v1-nope')['statusCode'] == 400
+    assert call('/v0/nope', params)['statusCode'] == 400 and call('/v1/x', params)['statusCode'] == 400
+    assert call('/v0/timeseries.get_range', {**params, 'pretty_ts': 'maybe'})['statusCode'] == 400
+    db.reject = True
+    assert call('/v0/metadata.list_datasets', method='GET')['statusCode'] == 429
+
+
+class _Response(io.BytesIO):
+    def __init__(self, body, headers):
+        super().__init__(body)
+        self.headers = headers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+
+def test_the_python_client(archive, monkeypatch, tmp_path):
+    s3, db, put = archive
+    put(session(0, 150))
+
+    class Opener:
+        def open(self, request, timeout):
+            parts = urllib.parse.urlsplit(request.full_url)
+            event = {'requestContext': {'http': {'method': request.get_method(), 'sourceIp': '127.0.0.1'}},
+                     'rawPath': parts.path, 'rawQueryString': parts.query,
+                     'headers': {k.lower(): v for k, v in request.header_items()},
+                     'body': (request.data or b'').decode()}
+            out = query_service.api(event, s3, db)
+            body = out['body'].encode() if not out.get('isBase64Encoded') else base64.b64decode(out['body'])
+            if out['statusCode'] >= 300:
+                raise urllib.error.HTTPError(request.full_url, out['statusCode'], 'error', out['headers'], io.BytesIO(body))
+            return _Response(body, out['headers'])
+
+    monkeypatch.setattr(_historical.urllib.request, 'build_opener', lambda *handlers: Opener())
+    monkeypatch.setattr(_historical.urllib.request, 'urlopen',
+                        lambda url, timeout: _Response(s3.objects[url.removeprefix('https://s3.test/')], {}))
+    client = briskapi.Historical(gateway='https://query.test/')
+    assert client.key == SECRET and client.metadata.list_datasets() == ['XTKS.BRISK', 'XTKS.BRISKDEMO']
+    data = client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', symbols=['7203'], path=tmp_path / 't.parquet')
+    assert len(data) == 15 and (tmp_path / 't.parquet').exists() and repr(data) == "DataStore(schema='trades', records=15)"
+    frame = data.to_df()
+    assert frame.index.name == 'ts_recv' and list(frame['symbol'].unique()) == ['7203']
+    # databento.DBNStore's conversions.
+    assert data.to_df(price_type='fixed')['price'].iloc[0] == 3001_000_000_000
+    import decimal
+    assert data.to_df(price_type='decimal')['price'].iloc[0] == decimal.Decimal('3001.0')
+    assert data.to_df(pretty_ts=False, map_symbols=False)['ts_event'].dtype.kind == 'i' and 'symbol' not in data.to_df(map_symbols=False)
+    assert str(data.to_df(tz='Asia/Tokyo').index.tz) == 'Asia/Tokyo'
+    assert [len(chunk) for chunk in data.to_df(count=6)] == [6, 6, 3]
+    for bad in (dict(price_type='cents'), dict(pretty_ts=False, tz='Asia/Tokyo')):
+        with pytest.raises(ValueError):
+            data.to_df(**bad)
+    assert len(data.to_ndarray()) == 15 and [len(a) for a in data.to_ndarray(count=10)] == [10, 5]
+    assert data.to_ndarray()['price'][0] == 3001.0
+    assert (tmp_path / 'c.csv').exists() is False and data.to_csv(tmp_path / 'c.csv', pretty_px=False).read_text().count('\n') == 16
+    assert '3001000000000' in (tmp_path / 'c.csv').read_text()
+    lines = data.to_json(tmp_path / 'j.json').read_text().splitlines()
+    assert len(lines) == 15 and json.loads(lines[0])['symbol'] == '7203'
+    assert pq.read_table(data.to_parquet(tmp_path / 'f.parquet', price_type='fixed')).column('price')[0].as_py() == 3001_000_000_000
+    assert data.to_file(tmp_path / 'raw.parquet').read_bytes() == (tmp_path / 't.parquet').read_bytes()
+    records = []
+    data.replay(records.append)
+    assert len(records) == 15 and records == list(data) and records[0]['symbol'] == '7203'
+    with pytest.raises(ValueError, match='stype_out'):
+        client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', stype_out='raw_symbol')
+    assert client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', schema='ohlcv-1m').to_df().index.name == 'ts_event'
+    monkeypatch.setattr(query_service, 'INLINE', 10)   # followed by hand, without the key
+    assert len(client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', symbols='7203')) == 15
+    assert client.metadata.get_record_count('XTKS.BRISK', start='2026-10-13', symbols='7203') == 15
+    assert client.metadata.get_cost('XTKS.BRISK', start='2026-10-13') == 0.0
+    assert client.metadata.get_dataset_range('XTKS.BRISK')['start'] == '2026-10-13'
+    assert client.metadata.get_dataset_condition('XTKS.BRISK')[0]['windows'] == [['09:00:00', '09:02:30']]
+    assert client.metadata.list_schemas('XTKS.BRISK')[-1] == 'ohlcv-1d' and client.metadata.list_publishers()[1]['publisher_id'] == 2
+    assert client.metadata.list_fields('trades')[0]['name'] == 'ts_recv'
+    with pytest.raises(briskapi.BriskError, match='HTTP 400: Unknown schema'):
+        client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', schema='mbo')
+    monkeypatch.setattr(cli, 'settings', lambda path=None: {'api_url': 'x'})
+    with pytest.raises(briskapi.BriskError, match='no query API'):
+        briskapi.Historical()
+    # Without an identity, the client makes one (it is the key) and says how to keep it.
+    monkeypatch.delenv('BRISK_IDENTITY')
+    with pytest.warns(UserWarning, match='recovery'):
+        made = briskapi.Historical(gateway='https://query.test')
+    assert schema.IDENTITY.fullmatch(made.key) and briskapi.Historical(gateway='https://query.test').key == made.key
+
+
+def test_brisk_query(tmp_path, monkeypatch, capsys):
+    config = tmp_path / 'archive.json'
+    config.write_text(json.dumps({'bucket': 'b', 'region': 'ap-northeast-1', 'api_url': 'https://api.test',
+                                  'query_url': 'https://query.test'}))
+    seen = []
+
+    def call(self, endpoint, params, post=False):
+        seen.append((self.gateway, endpoint, params, post))
+        return b'ts_event,price\n1,2\n', 'text/csv'
+    monkeypatch.setattr(_historical.Historical, '_call', call)
+    cli.main(['--config', str(config), 'query', 'XTKS.BRISK', '--start', '2026-10-13', '--symbols', '7203', '--schema', 'ohlcv-1m'])
+    assert capsys.readouterr().out == 'ts_event,price\n1,2\n'
+    assert seen[0][:2] == ('https://query.test', 'timeseries.get_range') and seen[0][3]
+    assert seen[0][2] | {} == {'dataset': 'XTKS.BRISK', 'schema': 'ohlcv-1m', 'symbols': '7203', 'start': '2026-10-13',
+                               'end': None, 'limit': None, 'encoding': 'csv'}
+    cli.main(['--config', str(config), 'query', 'XTKS.BRISKDEMO', '--start', '2021-09-27', '--encoding', 'parquet',
+              '--output', str(tmp_path / 'out.parquet')])
+    assert (tmp_path / 'out.parquet').read_bytes() == b'ts_event,price\n1,2\n'
+    with pytest.raises(ValueError, match='Parquet needs --output'):
+        cli.main(['--config', str(config), 'query', 'XTKS.BRISK', '--start', '2026-10-13', '--encoding', 'parquet'])
+
+
+def test_a_query_reads_only_the_row_groups_it_needs(archive, monkeypatch):
+    s3, db, put = archive
+    from briskapi import _parquet
+    monkeypatch.setattr(_parquet, 'ROW_GROUP', 50)          # several row groups per table
+    put(session(0, 150))
+    read = []
+    original = pq.ParquetFile.read_row_groups
+    monkeypatch.setattr(pq.ParquetFile, 'read_row_groups', lambda self, groups, **kw: read.append((self.metadata.num_row_groups, list(groups)))
+                        or original(self, groups, **kw))
+    books = query(s3, OWNER, dataset='XTKS.BRISK', schema='mbp-10', symbols='167A', start=at(120), end=at(125))
+    assert books.num_rows == 5 and set(books.column('symbol').to_pylist()) == {'167A'}
+    total, groups = read[-1]
+    # Sorted by issue, then batch: the group holding them, and one at the issue boundary whose statistics overlap.
+    assert total == 7 and groups == [3, 5]
+
+
+def test_every_schema_returns_exactly_its_documented_fields(archive):
+    """get_range's columns and types are FIELDS (metadata.list_fields), with data and without; docs/data-format.md
+    describes each one."""
+    s3, db, put = archive
+    put(session(0, 150))
+    docs = (Path(__file__).resolve().parents[1] / 'docs' / 'data-format.md').read_text()
+    for name in engine.SCHEMAS:
+        expected = pa.schema([(f, kind) for f, kind, _ in engine.FIELDS[name]])
+        for start in ('2026-10-13', '2026-10-20'):          # a day with data, and one without
+            got = query(s3, OWNER, dataset='XTKS.BRISK', schema=name, start=start)
+            assert got.schema.equals(expected), (name, start)
+        assert query(s3, OWNER, dataset='XTKS.BRISK', schema=name, start='2026-10-13').num_rows or name in {'ohlcv-1h', 'ohlcv-1d'}
+        for field, _, text in engine.FIELDS[name]:
+            assert text and f'`{field}`' in docs or field.split('_')[0] in {'bid', 'ask'} and '_NN' in docs, (name, field)
+    book = query(s3, OWNER, dataset='XTKS.BRISK', schema='brisk-quotes', symbols='7203', start=at(0), end=at(1)).to_pylist()[0]
+    assert book['bids'] == [{'price': 2999.0, 'size': 300, 'count': 3}, {'price': 2998.0, 'size': 200, 'count': 2}]

@@ -26,7 +26,7 @@ PACKAGE = Path(__file__).resolve().parent
 DECODER = PACKAGE / 'decoder' / 'decoder.cjs'
 MIN_NODE = 22
 # Bump with any PRIVACY.md change to what is collected; saved choices then lapse.
-POLICY_VERSION = 6
+POLICY_VERSION = 7
 NOTICE = '''\
 briskapi uploads your sessions to your private BRiSK archive: a free, off-computer copy
 of every complete session, reachable from any computer with your identity and checked on
@@ -36,6 +36,9 @@ Only you can list, download or delete your uploads. They are filed under your id
 random key made on this computer and never registered, kept in your system's credential
 store and in ~/.config/brisk/identity.json. The archive's operator can access what it
 stores. What you delete can be restored for 30 days and is then removed.
+Broker recordings also feed the archive's shared OHLC bars, built once from everyone's
+current uploads; the cloud API (`brisk query`) gives you bars only for the securities and
+times your own uploads cover. The bars hold no identity or local timing.
 Every clean, complete session uploads automatically (the default; you can decline):
   - demo sessions: the decoded market data and local timing measurements (decode
     durations, replay lateness, asset download time and your computer's receipt clock,
@@ -508,6 +511,15 @@ def _main(argv):
     p.add_argument('prefix')
     p = sub.add_parser('restore', help='Bring back a recording (or timing report) you deleted in the last 30 days')
     p.add_argument('prefix')
+    p = sub.add_parser('query', help='Query your archive in the cloud, Databento-style (XTKS.BRISK, or XTKS.BRISKDEMO for anyone)')
+    p.add_argument('dataset', choices=['XTKS.BRISK', 'XTKS.BRISKDEMO'])
+    p.add_argument('--schema', default='trades', help='trades, mbp-10, definition, imbalance, brisk-quotes, ohlcv-1s/1m/1h/1d')
+    p.add_argument('--symbols', default='ALL_SYMBOLS', help='Comma-separated JPX codes')
+    p.add_argument('--start', required=True, help='ISO 8601 (JST unless it says otherwise) or a trading date')
+    p.add_argument('--end', help='Exclusive; default: the end of the start\'s trading day')
+    p.add_argument('--limit', type=int)
+    p.add_argument('--encoding', choices=['csv', 'json', 'parquet'], default='csv')
+    p.add_argument('--output', type=Path, help='Write here instead of stdout (needed for parquet)')
     p = sub.add_parser('prune', help='Free disk space: remove local packages your archive holds (brisk pull brings them back)')
     p.add_argument('directories', type=Path, nargs='+')
     p = sub.add_parser('identity', help='Show your archive identity, its recovery code, or restore it on this computer')
@@ -578,6 +590,16 @@ def _main(argv):
         print(json.dumps(delete(config['api_url'], args.prefix)))
     elif args.command == 'restore':
         print(json.dumps(restore(config['api_url'], args.prefix)))
+    elif args.command == 'query':
+        require(args.output or args.encoding != 'parquet', 'Parquet needs --output FILE')
+        from briskapi._historical import Historical
+        body, _ = Historical(gateway=config.get('query_url'))._call('timeseries.get_range', dict(
+            dataset=args.dataset, schema=args.schema, symbols=args.symbols, start=args.start, end=args.end,
+            limit=args.limit, encoding=args.encoding), post=True)
+        if args.output:
+            args.output.write_bytes(body)
+        else:
+            sys.stdout.write(body.decode())
     elif args.command == 'prune':
         for directory in args.directories:
             print(json.dumps(prune(config['api_url'], directory)))

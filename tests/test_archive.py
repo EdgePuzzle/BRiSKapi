@@ -86,13 +86,21 @@ class S3:
             raise ClientError({'Error': {'Code': 'PreconditionFailed'}}, 'PutObject')
         self.objects[Key] = Body.read() if hasattr(Body, 'read') else Body
         return {}
-    def get_object(self, Bucket, Key, VersionId=None):
+    def get_object(self, Bucket, Key, VersionId=None, Range=None):
         try:
             data = (self.retained[Key][0] if VersionId == 'kept' else self.versions[(Key, VersionId)]) if VersionId \
                 else self.objects[Key]
         except KeyError:
             raise ClientError({'Error': {'Code': 'NoSuchVersion' if VersionId else 'NoSuchKey'}}, 'GetObject')
+        if Range:
+            self.ranges = getattr(self, 'ranges', 0) + 1
+            low, high = map(int, Range.removeprefix('bytes=').split('-'))
+            data = data[low:high + 1]
         return {'Body': io.BytesIO(data), 'ContentLength': len(data)}
+    def head_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise ClientError({'Error': {'Code': '404'}}, 'HeadObject')
+        return {'ContentLength': len(self.objects[Key])}
     def delete_object(self, Bucket, Key, VersionId=None):
         self.deleted.append((Key, VersionId))
         if VersionId is None:
@@ -1162,9 +1170,10 @@ def test_lambda_package_is_self_contained(tmp_path):
     deploy = importlib.util.module_from_spec(spec); spec.loader.exec_module(deploy)
     with zipfile.ZipFile(io.BytesIO(deploy.package())) as z:
         assert sorted(z.namelist()) == ['archive_service.py', 'briskapi/__init__.py', 'briskapi/_parquet.py',
-                                        'briskapi/references/historical_mock.json', 'briskapi/schema.py']
+                                        'briskapi/references/historical_mock.json', 'briskapi/schema.py',
+                                        'query_engine.py', 'query_service.py']
         z.extractall(tmp_path)
-    check = ("import archive_service, briskapi, briskapi.schema as s, sys; "
+    check = ("import archive_service, query_service, briskapi, briskapi.schema as s, sys; "
              f"assert briskapi.__file__.startswith({str(tmp_path)!r}); "
              "assert sorted(s.REFERENCES) == ['historical_mock', 'synthetic_test']; "
              "assert 'briskapi.cli' not in sys.modules")

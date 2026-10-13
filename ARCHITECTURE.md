@@ -12,7 +12,8 @@ itself. For usage, see the [README](README.md).
 | BRiSK site client | `briskapi/brisk.py` | Cookie login (SBI by default, or e-shiten with `site="e-shiten"`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `brisk.connect()` starts the live host. |
 | Archive client | `briskapi/cli.py`, `briskapi/schema.py`, `briskapi/_parquet.py`, `briskapi/identity.py` | The `brisk` CLI, upload consent, your identity, Parquet packaging, upload, verified download, deletion, restore and export. |
 | Auction state | `rust/brisk_quote_ingest` | Optional Rust tools: `brisk_quote_ingest` validates batches, keeps per-security state and publishes latest-state files; `brisk_recording` reconstructs a saved recording. |
-| Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL serves each owner's uploads, listings, downloads, deletions and restores; S3-triggered ingest validates and stores; DynamoDB holds quotas. |
+| Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL serves each owner's uploads, listings, downloads, deletions and restores; S3-triggered ingest validates and stores and keeps the central OHLCV bars in step; DynamoDB holds quotas. |
+| Cloud API | `query_engine.py`, `query_service.py`, `briskapi/_historical.py` | A second Lambda function URL answers Databento-style queries over an owner's recordings and the demo's, with OHLCV bars built from every broker upload; `briskapi.Historical` and `brisk query` are its client. The engine and the service run only in the cloud and are not in the wheel. |
 
 ```
 demo assets (HTTPS, pinned) ─► decoder.cjs ─┐
@@ -22,6 +23,8 @@ SBI/e-shiten session ────────► brisk.cjs ───┴─► JS
 
 JSON batches ─► Parquet tables ─► zip ─► upload ticket ─► S3 staging ─► verification ─► archive/OWNER/… ─► briskapi.pull
                                                                                          (a replay's market tables: reference/)
+
+archive/OWNER/… + reference/ + central/ (bars from all live recordings) ─► query_service ─► briskapi.Historical, brisk query
 ```
 
 ## Data source
@@ -88,6 +91,9 @@ clocks, including empty batches and the end marker; recordings cache that range
 when no manifest is available, while feeds track it under the state lock.
 
 ## Recording format
+
+For users, [docs/data-format.md](docs/data-format.md) describes every column of recordings and
+of cloud API records; this section is the internals.
 
 A recording is a directory of four Parquet tables (`briskapi/_parquet.py`), laid out
 like a NautilusTrader v2 catalog's `data/`. Each table is v2's own schema with BRiSK's
@@ -698,9 +704,11 @@ simulate original exchange delivery.
 ## Private archive
 
 The configuration is [briskapi/archive.json](briskapi/archive.json): bucket
-`brisk-recordings-honvl-tokyo` in Tokyo (`ap-northeast-1`) and the function URL. Nothing in
-the bucket is public but `samples/` (the legacy wire-format sample capture): each owner
-reaches its own uploads through the function only.
+`brisk-recordings-honvl-tokyo` in Tokyo (`ap-northeast-1`), the archive's function URL
+(`api_url`) and, once the cloud API is deployed, its function URL (`query_url`; the client
+raises `BriskError` for a query without one). Nothing in the bucket is public but `samples/`
+(the legacy wire-format sample capture): each owner reaches its own uploads through the
+functions only.
 Deployment is described in [infra/README.md](infra/README.md).
 
 ### Identity
@@ -718,8 +726,10 @@ SHA-256("brisk-owner-v1:" + secret) (`schema.owner`), and keeps nothing else: no
 no stored key, nothing to look up. Everything an owner uploads is filed under
 `archive/OWNER/` or `timing/OWNER/`, and listings, downloads, deletions and restores are
 scoped to the caller's owner ID. Owner IDs can't be reversed to secrets, so they may appear
-in prefixes, quotas and logs. The one thing outside the owners' prefixes is the archive's
-single copy of a demo replay's market tables (below), which holds no owner's data.
+in prefixes, quotas and logs. Outside the owners' prefixes are the archive's single copy of
+a demo replay's market tables (below), which holds no owner's data, and the cloud API's
+`central/` (the shared bars and their source markers) and `results/OWNER/` (see
+[Cloud API](#cloud-api)). The cloud API takes the same secret as its key.
 
 A secret is a bearer credential: whoever holds it acts as that owner. Its **recovery code**
 is the same 26 characters in upper case plus two checksum characters (base32 of SHA-256 of
@@ -739,8 +749,8 @@ The API (`archive_service.py`), JSON with an `action`:
 | `timing` | `report` | The stored key. |
 | `list` | `kind` (`recordings`, `timing` or `deleted`), `date`, `after` | A page of the owner's manifests (50) or reports (500), and the key to continue after. `deleted` lists what the owner deleted and can still restore: recordings (`prefix`, `manifest`) and reports (`key`, `report`), each with `deleted_at` and `restore_until`, up to 200 and without paging (`after` must be null). |
 | `download` | `prefix` | The manifest and a 15-minute presigned URL for each of the four tables (`files`), for the owner's own prefix only. A demo recording's market tables are the archive's copy under `reference/`. |
-| `delete` | `prefix` (a recording's) or a timing key | The current objects deleted, the manifest first, so a listing never shows half a recording. Without a version ID the versioned bucket keeps them as noncurrent versions, which `restore` can bring back for 30 days and the lifecycle removes after 31; the execution role can't delete archive or timing versions. A replay's `reference/` tables are not touched. |
-| `restore` | `prefix` (a recording's) or a timing key | `{"status": "restored", "restored": N}`: each key deleted in the last `RESTORE_DAYS` (30) days is copied back from its newest kept version (`copy_object`), the manifest last. Not found when nothing is restorable. See [Deleting, restoring and retention](#deleting-restoring-and-retention). |
+| `delete` | `prefix` (a recording's) or a timing key | The current objects deleted, the manifest first, so a listing never shows half a recording. Without a version ID the versioned bucket keeps them as noncurrent versions, which `restore` can bring back for 30 days and the lifecycle removes after 31; the execution role can't delete archive or timing versions. A replay's `reference/` tables are not touched. A live recording's trading day of central bars is then rebuilt without it. |
+| `restore` | `prefix` (a recording's) or a timing key | `{"status": "restored", "restored": N}`: each key deleted in the last `RESTORE_DAYS` (30) days is copied back from its newest kept version (`copy_object`), the manifest last. Not found when nothing is restorable. A restored live recording is added back to its day's central bars. See [Deleting, restoring and retention](#deleting-restoring-and-retention). |
 
 `GET /?ticket=UUID` returns a ticket's status; the unguessable ticket is its credential.
 
@@ -820,6 +830,11 @@ reference/SOURCE/TIMELINE/
     data/equity.parquet  data/order_book_depths.parquet  data/trades.parquet
     complete.json                            written after the tables
 timing/OWNER/YYYYMMDD/SHA256.json
+central/XTKS.BRISK/YYYYMMDD/
+    ohlcv-1s.parquet  ohlcv-1m.parquet       the day's bars from every live recording
+    ohlcv-1h.parquet  ohlcv-1d.parquet       (derived; see Cloud API)
+    sources/OWNER-FROM-TO-SHA256             one marker per recording that backs them: {"prefix": ...}
+results/OWNER/UUID.EXT                       a query result too large to return inline
 ```
 
 - Recordings are content addressed per owner. FROM and TO are the recording's first and
@@ -890,6 +905,11 @@ only the lifecycle does.
   and removes delete markers once no version is left beneath them. S3 applies lifecycle
   rules asynchronously, so removal can trail that by a day. Current objects are not
   affected, and `reference/` has no rule, since no owner deletes there.
+- A live recording's `delete` and `restore` also move its trading day's central bars
+  (`central_bars` in the service): the recording stops, or starts again, backing them.
+  The role deletes `central/` objects the same way it deletes archive ones (current
+  versions only), and the lifecycle rule `ExpireReplacedBars` removes the noncurrent
+  versions of replaced or removed bars and markers after a day.
 
 ### Sources
 
@@ -902,8 +922,156 @@ reference-verified demo data. New raw-wire uploads remain unsupported. Objects s
 while the archive was public (before policy version 6) sit outside any owner's prefix and
 are unreachable through the API.
 
+## Cloud API
+
+Databento-style queries over an owner's recordings: the records of a dataset, symbols, schema
+and time range across days, without downloading recordings. The HTTP interface, what is
+decided and the plan for later schemas are in [docs/cloud-api.md](docs/cloud-api.md); usage is
+in the [README](README.md).
+
+- `query_engine.py` reads the archive bucket (through `Bucket`, a boto3-style client) and
+  turns recordings into records and bars.
+- `query_service.py` is the Lambda function URL `brisk-recorder-query`: authentication,
+  endpoints, quotas and delivery of results.
+- `briskapi/_historical.py` is the client (`Historical`, `DataStore` and `brisk query`).
+
+The engine and the service are server side, like `archive_service.py`, which imports the
+engine to keep the bars in step: the wheel ships only `briskapi/`, and `package()` in
+`deploy.py` puts them in the one zip both functions run. OHLCV bars therefore come only from
+the cloud.
+
+### Datasets and requests
+
+`XTKS.BRISK` (`publisher_id` 1) is an owner's live recordings, `sbi_live` and `eshiten_live`:
+any broker's BRiSK is the same app and stream. `XTKS.BRISKDEMO` (`publisher_id` 2) is the
+public demo, read from the archive's one copy of its market tables under
+`reference/historical_mock/TIMELINE/` (the same for every identity; HTTP 404 until a verified
+whole demo upload, or `deploy.py --seed-demo`, has created the copy). `request()` validates
+before anything is read: the dataset; the schema (`trades`, `mbp-10`, `definition`,
+`imbalance`, `brisk-quotes`, `ohlcv-1s`, `ohlcv-1m`, `ohlcv-1h`, `ohlcv-1d`); `stype_in` raw
+symbols only; 1 to 2,000 symbols (JPX codes of four or five characters, 0-9 and A-Z) or
+`ALL_SYMBOLS`; at most 31 JST trading dates; a positive `limit`. A date is that JST trading
+day's midnight, a time without a zone is JST, an integer of ten or more digits is UTC
+nanoseconds, and `end` is exclusive and defaults to the end of the start's trading day (so an
+`end` date excludes that day). `instrument_id` comes from the code, because a recording's
+`issue_id` only indexes that day's master: digits-only codes are their number, others are
+100,000 plus the code's base-36 value (`167A` is 154,694).
+
+### Records
+
+`recordings()` lists `archive/OWNER/DATE/` for each trading date a request touches, reads each
+manifest (its summary gives the source, the first and last source clock and the codes) and
+`files.json`, and keeps live sources. `Bucket.parquet` hands pyarrow a `ParquetFile` over a
+file object that fetches 4 MiB blocks by ranged GET as they are asked for, so only the blocks
+holding the footer and the needed row groups are read. `_rows` skips a row group whose
+`issue_id` range (tables are sorted by issue) or `ts_event` range, from its statistics, cannot
+match, then filters the rest exactly. Each schema is a projection:
+
+| Schema | From | Mapping |
+| --- | --- | --- |
+| `trades` | trades | `action` T; `side` B for a BUY aggressor, A for SELL, else N; `price` (float64, yen), `size`, `sequence` (the frame) and `trade_id` |
+| `mbp-10` | depths | One row per quote update with both books flattened to `bid_px_00`, `bid_sz_00`, `bid_ct_00` … `ask_ct_09` (null past a side's last level). BRiSK gives each update's book, not the order event that changed it, so `action` and `side` are N, `depth` 0, `price` null and `size` 0; `flags` is Databento's snapshot flag (32) on the bootstrap batch's rows (`seq` 0), else 0 |
+| `imbalance` | depths | Per update, an opening (`O`) row where the opening indicative price shows and a closing (`C`) row where the closing one does: `ref_price`, `ind_match_price`, `paired_qty` (indicative volume), `side`, `market_buy_qty`, `market_sell_qty`, `market_imbalance_qty` and `_side` (buy minus sell), `bid_total_qty` and `ask_total_qty` (the board totals; the closing ones for `C`), the day's limit prices as collars and `auction_time` (special quote time) |
+| `definition` | equity | One row per security per recording, stamped JST midnight of its trading day and only when the request reaches that day: `raw_symbol`, `exchange` XTKS, `currency` JPY, lot size, tick increment, limits, base price, name, issue type, tick type |
+| `brisk-quotes` | depths | Every column the update has except `identifier`, `ts_init`, `issue_id` and `seq`; decimals become float64 |
+| `ohlcv-*` | trades | Below |
+
+Every schema but bars starts with `ts_recv`, `ts_event`, `publisher_id` and `instrument_id`
+and ends with `symbol`. `ts_event` is BRiSK's stamp. `ts_recv` is the uploader's receipt
+time: `received_unix_ms` of the update's batch, joined by `seq` (milliseconds; `ts_event`
+where there is none), and `ts_event` for the demo, which has no receipt clock of its own. A
+request filters and sorts on `ts_event`, not on `ts_recv` as Databento does: overlapping
+captures of one day agree on `ts_event` and differ in `ts_recv`, so the same range returns the
+same rows from any of them.
+
+A day recorded twice (a restart, two computers, two brokers) gives overlapping recordings.
+Their rows are merged and deduplicated, keeping the first, by (`instrument_id`, `trade_id`)
+for trades, (`instrument_id`, `ts_event`) for definitions, (`instrument_id`, `sequence`,
+`auction_type`) for imbalance and (`instrument_id`, `sequence`) for the rest. The frame
+numbers are the server's, which should make captures agree; that is not yet confirmed on live
+data across brokers. Rows sort by `ts_event`, `instrument_id` and `sequence`, and `limit` cuts
+after the sort. With no recording in range, a result has only the common columns and `symbol`.
+
+`encode()` writes Parquet (zstd, `timestamp[ns, UTC]` times), CSV or JSON lines. For CSV and
+JSON, `pretty_ts` gives ISO 8601 UTC times with nanoseconds instead of integer nanoseconds,
+`pretty_px` yen as numbers instead of integers in units of 1e-9 yen (Databento's fixed point),
+`map_symbols` keeps or drops `symbol` and `compression=zstd` compresses (`.zst`); nested
+columns are JSON text in CSV.
+
+### Central bars
+
+`build_bars` aggregates trades (symbol, `trade_id`, frame, `ts_event`, price, size) into open,
+high, low, close and volume per security and interval, for all four lengths. Several sources
+are deduplicated by (symbol, `trade_id`), then ordered by symbol, `ts_event`, frame and the
+trade's place in its frame, so open and close are the first and last trade. Intervals are
+aligned to JST (a day bar runs from JST midnight), a bar's `ts_event` is its start and an
+interval without a trade has no bar. `XTKS.BRISKDEMO` bars are built from the demo's trades on
+the fly and returned whole.
+
+For `XTKS.BRISK` the bars are central: one set per trading day from every current live
+recording of it, whoever uploaded it, each trade counted once (the shared bars).
+`central/XTKS.BRISK/YYYYMMDD/` holds the four files (zstd, sorted by symbol in 65,536-row
+groups, so a query for a few securities reads only their row groups) and
+`sources/OWNER-NAME`, a marker per backing recording whose body names its prefix.
+`central_bars` in the archive service runs after `store` commits a live recording (it backs
+the day), after `delete` (it no longer does) and after `restore` (it does again): it writes or
+removes the marker, then `rebuild_bars` reads the trades of every marked recording of the day
+and writes all four files, or removes them when no marker is left. A rebuild reads the whole
+day again, so it grows with that day's uploads. Rebuilds of one day are not serialized, so a
+rebuild that finds the day's markers changed while it ran runs again (up to three times). Bars
+are derived data, so a rebuild that fails removes the day's files (the service prints
+`Central bars for DATE not rebuilt`) rather than keep bars a recording no longer backs;
+queries then build an owner's bars from its own recordings, as they do for a day with no
+central files yet. No live recording was stored before the central bars existed, so none lacks
+a marker.
+
+The bars hold no identity, but they hold everyone's trades, so an owner receives only what its
+own coverage allows. `covered` keeps a bar when its span, clipped to the Tokyo Stock
+Exchange's trading sessions (`SESSIONS`: 09:00 to 11:30:01 and 12:30 to 15:30:01 JST, half
+open; the extra second holds the closing auction's prints), lies inside the merged clock
+ranges (first to last source clock) of the owner's recordings that hold that code. A bar that
+touches no session is judged on its whole span. So a one-second bar needs its second
+recorded, and an hour or day bar needs the whole of its in-session part. A query reads the
+central files for each date on which the owner has a recording, pruned by symbol; with no
+file yet, the bars come from the owner's own recordings, with the same rule.
+
+### Service
+
+`query_service.py` handles a request in order. The path must be `/v0/NAME` with a known NAME.
+Parameters come from the query string and, for POST, the form body (at most 64 KiB; the body
+wins). The key is the basic-auth username (the password is ignored) or a Bearer token, and
+`schema.owner` turns it into the owner ID. There is no key registry, so any well-formed
+identity authenticates: a missing or malformed key is HTTP 400, not 401, and an identity with
+no recordings gets empty tables (HTTP 404 from the dates endpoints). Quotas use the archive's
+DynamoDB table and `archive.quota`: `query-OWNER` (60 requests a minute) before the endpoint
+runs and `query-bytes-OWNER` (2 GiB per UTC day) on the encoded result's size; over either is
+HTTP 429. Errors are `{"detail": ...}` with 400 (invalid input), 404 (no data, or no demo
+copy) or 429.
+
+A result of up to 4 MiB (`INLINE`: a function URL returns 6 MB, and base64 adds a third) is
+the response body, with `x-record-count`: text for CSV and JSON, base64 for Parquet. A larger
+one is written to `results/OWNER/UUID.EXT` and the response is a 303 to a 15-minute presigned
+URL; the lifecycle removes it after a day. The endpoints are Databento's:
+`timeseries.get_range`; `metadata.list_datasets`, `list_schemas`, `list_fields` (names only),
+`list_publishers`, `get_dataset_range` (the first and last date with data) and
+`get_dataset_condition` (each date `available` or `missing` with the merged clock windows
+recorded, JST, up to a year); `get_record_count` (runs the query and counts its rows) and
+`get_cost` (always 0). The function prints nothing.
+
+### Client
+
+`Historical(key=None, gateway=None)` takes the key from `identity.ensure()` (warning when it makes one) and the gateway
+from `query_url`. `timeseries.get_range` posts a form, asks for Parquet and returns a
+`DataStore` with databento.DBNStore's conversions (`to_df()` indexed by `ts_recv`, or by `ts_event` where there
+is none, with `price_type`, `pretty_ts`, `map_symbols`, `tz` and `count`; `to_ndarray()`, `to_csv()`,
+`to_json()`, `to_parquet()`, `to_file()`, `replay()`, iteration and `len()`). The metadata calls are GETs, except `get_record_count`
+and `get_cost`, which post the request. The key goes as the basic-auth username with an empty
+password. A 303 is followed by hand with a plain request (`_NoRedirect` stops urllib doing it),
+so the key never reaches the result's URL. `brisk query` posts the same `get_range` request
+with the chosen encoding (CSV by default; Parquet needs `--output`).
+
 ## Development and deployment
 
-Tests and conventions are in [CONTRIBUTING.md](CONTRIBUTING.md). Archive
+Tests and conventions are in [CONTRIBUTING.md](CONTRIBUTING.md). Archive and cloud API
 deployment, IAM scope, costs and removal are in [infra/README.md](infra/README.md).
-Archive changes reach clients only after `infra/deploy.py` runs.
+Archive and cloud API changes reach clients only after `infra/deploy.py` runs.

@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 
 from briskapi import _parquet, identity
+from briskapi._historical import Historical
 from briskapi._recording import Recording
 from briskapi.schema import encode, synthetic_recording
 from briskapi.cli import package, upload, manifests, pull, delete, settings
@@ -79,8 +80,21 @@ def main():
             assert e.code == 404
         else:
             raise AssertionError('A deleted recording is still downloadable')
+        # The cloud API answers with an identity as its key and refuses requests without one.
+        query = 'not deployed'
+        if config.get('query_url'):
+            client = Historical(key=owner, gateway=config['query_url'])
+            assert client.metadata.list_datasets() == ['XTKS.BRISK', 'XTKS.BRISKDEMO']
+            assert client.metadata.list_publishers()[0]['venue'] == 'XTKS'
+            try:
+                urllib.request.urlopen(config['query_url'].rstrip('/') + '/v0/metadata.list_datasets', timeout=30)
+            except urllib.error.HTTPError as e:
+                assert e.code == 400
+            else:
+                raise AssertionError('The query API answered without a key')
+            query = 'passed'
         print(json.dumps({'owner_upload': 'passed', 'owner_pull': 'passed', 'other_identity_denied': 'passed',
-                          'tampered_rejected': 'passed', 'anonymous_denied': 'passed', 'deleted': 'passed',
+                          'tampered_rejected': 'passed', 'anonymous_denied': 'passed', 'deleted': 'passed', 'query_api': query,
                           'region': config['region'], 'prefix': prefix}))
 
 

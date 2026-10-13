@@ -81,7 +81,8 @@ briskapi.Market().snapshot(at="09:00:00").to_pandas()
 `data/equity.parquet`（銘柄マスター、v2 の `Equity`）、
 `data/custom/BriskBatch.parquet`（フレームごとの計測値）からなります。デモ全体で約
 41 MB です。pandas、Polars、DuckDB でそのまま読めます。`brisk export` で
-NautilusTrader のカタログや JSONL に書き出せます。全列の説明は ARCHITECTURE.md にあります。
+NautilusTrader のカタログや JSONL に書き出せます。全列の説明と pandas・Polars・DuckDB での読み方は
+[docs/data-format.md](docs/data-format.md)（英語）にあります。
 
 時刻の照会には、バッチではなく各気配のタイムスタンプを使います。デモの
 7203 の最初の気配は日本時間 08:59:59.993551 で、それより前は `NotFoundError`
@@ -277,6 +278,11 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | `briskapi.Archive().upload(dir)` / `.delete(prefix)` / `.deleted()` / `.restore(prefix)` / `.timing()` / `.owner` | アップロード、削除、過去30日間に削除したもの（`deleted_at`、`restore_until` 付き）、元に戻す、自分のタイミングレポート、自分の owner ID |
 | `briskapi.record(output, web=True, ...)` | デモの記録（設定に従ってアップロード） |
 | `briskapi.consent(...)` | アップロードの設定 |
+| `briskapi.Historical()` | クラウド API のクライアント（Databento 風）。API キーは自分のアーカイブの ID（[下記](#クラウドでアーカイブを照会する)） |
+| `Historical().timeseries.get_range(dataset, start, end=None, symbols='ALL_SYMBOLS', schema='trades', limit=None, path=None)` | `XTKS.BRISK`（自分の記録）または `XTKS.BRISKDEMO` のレコードを返すストア：Databento と同じ変換：`to_df()`（`ts_recv` をインデックスにする。バーは `ts_event`）、`to_ndarray()`、`to_csv(path)`、`to_json(path)`、`to_parquet(path)`、`to_file(path)`、`replay(callback)`、反復、`len()` |
+| `Historical().metadata.list_datasets()` / `.list_schemas(dataset)` / `.list_fields(schema)` / `.list_publishers()` / `.get_dataset_range(dataset)` | カタログ、データセットにデータのある最初と最後の日付 |
+| `Historical().metadata.get_dataset_condition(dataset, start_date, end_date)` | 各日付が available か missing か、自分の記録がカバーする時間帯（日本時間） |
+| `Historical().metadata.get_record_count(...)` / `.get_cost(...)` | リクエストが返すレコード数、そのコスト（常に 0。無料で、上限あり） |
 | `Ticker(code).candles(interval)` / `.margin(days)` | 証券会社の BRiSK（SBI、e支店）のローソク足、信用残と貸株料 |
 | `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | 証券会社の BRiSK の市場データ |
 | `briskapi.brisk.login(site=...)` / `.connect()` | SBI（既定）または e支店の BRiSK のセッションとライブフィード |
@@ -306,6 +312,7 @@ brisk delete PREFIX                         # 自分のアップロードを自�
 brisk restore PREFIX                        # 過去30日間に削除したアップロードを元に戻す（タイミングレポートのキーも可）
 brisk prune recordings/s1                   # ディスクを空ける: アーカイブにある記録のローカルのコピーを削除
 brisk export recordings/s1 --nautilus catalog      # NautilusTrader v2 のカタログ（または --jsonl FILE）
+brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13   # クラウド API：CSV を標準出力へ（--encoding json|parquet、--output FILE、--end、--limit）
 brisk consent [--accept | --revoke]         # 自動アップロードの設定の表示・変更（--no-upload: 今回だけ）
 brisk upload recordings/s1                  # 記録のアップロードを再試行
 brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元コード、別のコンピューターで使う
@@ -326,7 +333,8 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 コンピューターの外に無料で持てます（到着時に検証し、デモの完全な再生は基準と一致する
 必要があります）。アーカイブに入った記録は、`brisk prune DIR` でローカルのコピーを
 削除でき（先に SHA-256 をアーカイブと照合します）、`brisk pull` でこのコンピューターにも
-別のコンピューターにも戻せます。アップロードは `archive/OWNER/YYYYMMDD/FROM-TO-SHA256`
+別のコンピューターにも戻せます。アップロードすると、[クラウド API](#クラウドでアーカイブを照会する)と、
+クラウドにしかない OHLCV バーも使えます。アップロードは `archive/OWNER/YYYYMMDD/FROM-TO-SHA256`
 （`brisk list` が返す prefix）の下に保存されます。FROM と TO は記録の最初と最後のソース時刻
 （日本時間、HHMMSS）なので、その日の記録は時刻順に並びます。
 
@@ -362,7 +370,9 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
   時間、受信時のデータの遅れ、フレーム間隔のパーセンタイル、停滞回数、フレーム数、取引日、
   最初と最後の分。`briskapi.Archive().timing()` で一覧できます）と、取引日が終わった時点で
   その日のデコードした市場データの記録（銘柄マスター、価格、数量、板、約定、銘柄コード、
-  ローカルの計測値）。Cookie、トークン、接続の診断情報はアップロードしません。
+  ローカルの計測値）。Cookie、トークン、接続の診断情報はアップロードしません。その日の約定は、
+  アーカイブの共有 OHLCV バーにも使われます。共有バーに ID やローカルの計測値は含まれません
+  （[下記](#クラウドでアーカイブを照会する)）。
 - **アップロードをやめる:** 1回だけなら `--no-upload`（Python では `upload=False`）。
   `--no-upload-market-data`（`upload_market_data=False`）は証券会社の記録の市場データだけを
   ローカルに残します。その環境のすべての実行では `BRISK_UPLOAD=0`、恒久的には
@@ -374,8 +384,71 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 - 途中までの再生（`--limit-frames`）や、その日が終わる前に閉じた記録はアップロードされません。
   途中で止めた証券会社のフィードは、タイミングの要約だけをアップロードします。
 
+## クラウドでアーカイブを照会する
+
+アップロードすると、自分の記録を対象にしたクラウド API も使えます。Databento の履歴データ API の
+形（名前もパラメーターも同じ）に倣っています。API キーは自分のアーカイブの ID なので、サインアップも
+キーの作成も要らず、設定もありません。`briskapi.Historical()` はアップロードのときと同じ方法で ID を
+見つけます（なければ新しく作ります）。
+
+```python
+import briskapi
+
+client = briskapi.Historical()
+trades = client.timeseries.get_range("XTKS.BRISK", start="2026-10-13", end="2026-10-17",
+                                     symbols=["7203"], schema="trades")
+trades.to_df()      # ts_recv をインデックスにした pandas の DataFrame。to_ndarray()、to_csv()、to_json()、to_parquet()、replay() も使えます
+client.timeseries.get_range("XTKS.BRISK", start="2026-10-13", symbols=["7203"],
+                            schema="ohlcv-1m").to_df()     # 1分のバー（下記）
+client.timeseries.get_range("XTKS.BRISKDEMO", start="2021-09-27T08:59", end="2021-09-27T09:03",
+                            symbols=["7203"], schema="imbalance")    # デモ。どの ID でも照会できます
+client.metadata.get_dataset_condition("XTKS.BRISK", start_date="2026-10-01")   # 各日付と、記録した時間帯
+```
+
+`get_range(dataset, start, end=None, symbols='ALL_SYMBOLS', schema='trades', limit=None,
+path=None)` はストアを返します。`path` を指定すると Parquet ファイルにも書き出します。
+`client.metadata` には `list_datasets()`、`list_schemas(dataset)`、`list_fields(schema)`、
+`list_publishers()`、`get_dataset_range(dataset)`、`get_dataset_condition(dataset, start_date, end_date)`
+（各日付が available か missing か、自分の記録がカバーする時間帯を日本時間で返します）、
+`get_record_count(...)`、`get_cost(...)` があります。`get_cost` は常に 0 です。クラウド API は無料で、
+1つの ID あたり1分に60リクエスト、1日に 2 GB までの上限があります。
+
+- **データセット**は Databento の `VENUE.FEED` という命名に従います（XTKS は東京証券取引所）。
+  `XTKS.BRISK` は自分のライブ記録で、どの証券会社の BRiSK 経由でも同じです。`XTKS.BRISKDEMO` は
+  公開デモ（2021-09-27）で、どの ID からでも照会できます。
+- **スキーマ:** `trades`、`mbp-10`（各側10本。BRiSK は注文イベントではなく板を返すので、`action` と
+  `side` は `N`）、`definition`、`imbalance`（寄付きと引けの板寄せの状態：予想約定価格・数量、
+  成行注文の売買差）、`brisk-quotes`（BRiSK の気配のすべての項目）、そして OHLCV バーの
+  `ohlcv-1s`、`ohlcv-1m`、`ohlcv-1h`、`ohlcv-1d`。`list_fields(schema)` でスキーマの列を確認できます。
+- **時刻:** 日付はその日の日本時間の取引日、タイムゾーンのない時刻は日本時間、整数は UTC のナノ秒を
+  表します。`end` は含まず、省略すると start の取引日の終わりまでです。1回のリクエストで扱えるのは
+  最大31日、2,000銘柄までです。
+- **銘柄**は JPX の銘柄コードです。`instrument_id` はコードごとに固定です。数字だけのコードはその数値
+  （7203）、それ以外は 100,000 にコードの36進数の値を足したものです（`167A` は 154694）。
+
+**OHLCV バーはクラウドにしかありません。** アーカイブは取引日ごとに、全員の現在のアップロードから
+1組のバーを作ります（各約定は1回だけ数えます。これが共有バーです）。バーを受け取れるのは、自分の
+アップロードがその銘柄と、取引時間（前場 09:00〜11:30 と後場 12:30〜15:30、日本時間）内のそのバーの
+全期間をカバーしているときだけです。たとえば 08:55 から 11:31 までの記録なら、午前の1分と1時間の
+バーは受け取れますが、1日のバーは受け取れません。つまり、バーを得るにはアップロードが必要です
+（`XTKS.BRISKDEMO` のバーは、デモ自身の約定から作ります）。共有バーに含まれるのは価格、出来高、
+時刻だけで、ID もローカルの計測値も含まれません。詳しくは
+[PRIVACY.md](PRIVACY.md)（英語、ポリシーバージョン7）をご覧ください。`Ticker.candles()` は別のもので、
+証券会社の BRiSK 自身のバーです（証券会社へのログインが必要）。
+
+コマンドラインでは、`brisk query` は CSV を標準出力に書きます。`--encoding json` または `parquet` で
+変更でき（Parquet は `--output FILE` が必要）、`--output FILE` でファイルに書き、`--end` と `--limit` で
+リクエストの範囲を絞ります。
+
+```sh
+brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13 > toyota-1m.csv
+```
+
+その裏にある HTTP API は [docs/cloud-api.md](docs/cloud-api.md)（英語）に説明があります。
+
 ## その他のドキュメント（英語）
 
+- [docs/data-format.md](docs/data-format.md): 記録とクラウド API のレコードの全列、その読み方
 - [ARCHITECTURE.md](ARCHITECTURE.md): 仕組み、データ形式、アーカイブの改ざん対策と制限
 - [PRIVACY.md](PRIVACY.md): プライバシーポリシー
 - [CONTRIBUTING.md](CONTRIBUTING.md): 開発、テスト、リリース

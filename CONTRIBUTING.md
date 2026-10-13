@@ -30,7 +30,7 @@ changes only with a re-audited asset pin (`tools/brisk_mock/build_reference.py`)
 ```sh
 .venv/bin/python -m pip install -r requirements-dev.txt -e .
 .venv/bin/python -m pytest tests \
-  --cov=archive_service --cov=briskapi --cov-fail-under=85
+  --cov=archive_service --cov=query_engine --cov=query_service --cov=briskapi --cov-fail-under=85
 .venv/bin/python tools/brisk_mock/download_mock.py --cache /tmp/brisk-mock-cache
 BRISK_MOCK_CACHE=/tmp/brisk-mock-cache .venv/bin/python -m pytest tools/brisk_mock/test_reference.py
 BRISK_MOCK_CACHE=/tmp/brisk-mock-cache node --test tools/brisk_mock/*.test.cjs
@@ -47,7 +47,12 @@ behavior.
 Keep `README.md` and `README.ja.md` in step; internals belong in `ARCHITECTURE.md`.
 Everything the installed package needs at runtime lives in `briskapi/` (package
 data is listed in `pyproject.toml`); CI installs the wheel outside the repository
-and runs it. The BRiSK site client's tests (`tests/test_brisk.py`, `tools/brisk_mock/brisk.test.cjs`) use
+and runs it. The cloud API's engine and service (`query_engine.py`, `query_service.py`)
+run only in the cloud, like `archive_service.py`, and are not in the wheel; its client is
+`briskapi/_historical.py`, and `tests/test_query.py` covers all three offline against the
+archive tests' in-memory S3 and DynamoDB. `PRIVACY.md` describes the shared OHLCV bars built
+from broker uploads, so a change to what they hold or who receives them (`covered` in
+`query_engine.py`) updates it like any change to what is collected. The BRiSK site client's tests (`tests/test_brisk.py`, `tools/brisk_mock/brisk.test.cjs`) use
 pybrisk's SBI sample payloads and a fake server. Unless a user
 opts out, broker sessions (SBI, e-shiten) upload a timing report
 (`briskapi/timing.py`, validated by `validate_timing` in `briskapi/schema.py`) and, after each
@@ -74,4 +79,6 @@ PyPI. Running the workflow manually is a dry run that publishes nothing.
 `cloud_smoke.py` is an opt-in real cloud test against the configured archive. It uploads
 only the fixed synthetic fixture under throwaway identities, checks that another identity
 and anonymous requests reach none of it (anonymous requests reach only `samples/`) and that
-tampered content is rejected, then deletes it from the owner's archive. Archive changes reach clients only after `infra/deploy.py` runs (see `infra/README.md`).
+tampered content is rejected, then deletes it from the owner's archive. With the cloud API
+deployed it also calls two metadata endpoints as a throwaway identity and checks that a
+request without a key is refused. Archive and cloud API changes reach clients only after `infra/deploy.py` runs (see `infra/README.md`).

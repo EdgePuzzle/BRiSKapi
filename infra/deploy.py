@@ -18,6 +18,8 @@ from botocore.exceptions import ClientError
 ROOT = Path(__file__).resolve().parents[1]
 REGION = 'ap-northeast-1'
 NAME = 'brisk-recorder-archive'
+# The cloud API (query_service.py): its own function, role and URL.
+QUERY = 'brisk-recorder-query'
 # Deleted uploads stay restorable for 30 days (archive_service.RESTORE_DAYS); the bucket drops them after this.
 DELETED_DAYS = 31
 # The service's Parquet dependencies, pinned: a layer of their manylinux wheels for python3.12 on arm64.
@@ -31,10 +33,12 @@ def ignore_exists(call, **kwargs):
             raise
 
 def package():
-    """The Lambda zip: the service, the shared schema and Parquet format, and reference fingerprints only."""
+    """The Lambda zip (both functions): the services, the query engine, the shared schema and Parquet format,
+    and reference fingerprints only."""
     code=io.BytesIO()
     with zipfile.ZipFile(code,'w',zipfile.ZIP_DEFLATED) as z:
-        z.write(ROOT/'archive_service.py','archive_service.py')
+        for name in ('archive_service.py','query_engine.py','query_service.py'):
+            z.write(ROOT/name,name)
         # An empty package init keeps the client API (and its dependencies) out.
         z.writestr('briskapi/__init__.py','')
         z.write(ROOT/'briskapi/schema.py','briskapi/schema.py')
@@ -130,7 +134,13 @@ def deploy(bucket):
         # What an owner deletes can be restored for 30 days (archive_service.RESTORE_DAYS); a day later it is gone.
         *({'ID':f'ExpireDeleted-{prefix[:-1]}','Status':'Enabled','Filter':{'Prefix':prefix},
            'NoncurrentVersionExpiration':{'NoncurrentDays':DELETED_DAYS},'Expiration':{'ExpiredObjectDeleteMarker':True}}
-          for prefix in ('archive/', 'timing/'))]})
+          for prefix in ('archive/', 'timing/')),
+        # Query results are fetched within minutes; central bars are derived, and what a rebuild replaces or
+        # removes must not linger as old versions.
+        {'ID':'ExpireResults','Status':'Enabled','Filter':{'Prefix':'results/'},'Expiration':{'Days':1},
+         'NoncurrentVersionExpiration':{'NoncurrentDays':1}},
+        {'ID':'ExpireReplacedBars','Status':'Enabled','Filter':{'Prefix':'central/'},
+         'NoncurrentVersionExpiration':{'NoncurrentDays':1},'Expiration':{'ExpiredObjectDeleteMarker':True}}]})
     ignore_exists(db.create_table, TableName=NAME, AttributeDefinitions=[{'AttributeName':'id','AttributeType':'S'}],
         KeySchema=[{'AttributeName':'id','KeyType':'HASH'}], BillingMode='PAY_PER_REQUEST')
     db.get_waiter('table_exists').wait(TableName=NAME)
@@ -140,7 +150,7 @@ def deploy(bucket):
     role = ignore_exists(iam.create_role, RoleName=NAME, AssumeRolePolicyDocument=json.dumps(trust))
     role_arn = iam.get_role(RoleName=NAME)['Role']['Arn']
     iam.put_role_policy(RoleName=NAME, PolicyName=NAME, PolicyDocument=json.dumps({'Version':'2012-10-17','Statement':[
-        {'Effect':'Allow','Action':['s3:GetObject','s3:GetObjectVersion','s3:PutObject'],'Resource':[arn+'/incoming/*',arn+'/archive/*',arn+'/timing/*',arn+'/reference/*']},
+        {'Effect':'Allow','Action':['s3:GetObject','s3:GetObjectVersion','s3:PutObject'],'Resource':[arn+'/incoming/*',arn+'/archive/*',arn+'/timing/*',arn+'/reference/*',arn+'/central/*']},
         # Owners list their own uploads (the function scopes each listing to the caller's owner ID).
         # Unconditional ListBucket, so that a missing key reads as 404 (NoSuchKey), not 403: the service
         # tests for staging parts, reference copies and tickets that way.
@@ -151,7 +161,7 @@ def deploy(bucket):
         {'Effect':'Allow','Action':['s3:DeleteObject','s3:DeleteObjectVersion'],'Resource':arn+'/incoming/*'},
         # Owners remove their own uploads from their archive; the function can't purge versions there, so they stay
         # restorable until the lifecycle expires them (DELETED_DAYS).
-        {'Effect':'Allow','Action':'s3:DeleteObject','Resource':[arn+'/archive/*',arn+'/timing/*']},
+        {'Effect':'Allow','Action':'s3:DeleteObject','Resource':[arn+'/archive/*',arn+'/timing/*',arn+'/central/*']},
         {'Effect':'Allow','Action':'dynamodb:UpdateItem','Resource':f'arn:aws:dynamodb:{REGION}:{account}:table/{NAME}'},
         {'Effect':'Allow','Action':['logs:CreateLogStream','logs:PutLogEvents'],'Resource':f'arn:aws:logs:{REGION}:{account}:log-group:/aws/lambda/{NAME}:*'}]}))
     logs=session.client('logs')
@@ -210,12 +220,74 @@ def deploy(bucket):
         {'Id':'AutomaticIngest','LambdaFunctionArn':function_arn,'Events':['s3:ObjectCreated:*'],
          'Filter':{'Key':{'FilterRules':[{'Name':'prefix','Value':'incoming/'},{'Name':'suffix','Value':'/recording.zip'}]}}}]})
     publish_samples(s3, bucket)
-    result={'bucket':bucket,'region':REGION,'api_url':url}
+    result={'bucket':bucket,'region':REGION,'api_url':url,'query_url':deploy_query(session,lam,iam,arn,account,bucket,config)}
     (ROOT/'briskapi/archive.json').write_text(json.dumps(result,indent=2)+'\n')
     return result
+
+def deploy_query(session, lam, iam, arn, account, bucket, archive_config):
+    """The cloud API's function: read-only on recordings, the demo copy and the central bars; writes results/."""
+    trust={'Version':'2012-10-17','Statement':[{'Effect':'Allow','Principal':{'Service':'lambda.amazonaws.com'},'Action':'sts:AssumeRole'}]}
+    ignore_exists(iam.create_role, RoleName=QUERY, AssumeRolePolicyDocument=json.dumps(trust))
+    role_arn=iam.get_role(RoleName=QUERY)['Role']['Arn']
+    iam.put_role_policy(RoleName=QUERY, PolicyName=QUERY, PolicyDocument=json.dumps({'Version':'2012-10-17','Statement':[
+        # The bars only: the central/ source markers name owners and are none of a query's business.
+        {'Effect':'Allow','Action':'s3:GetObject','Resource':[arn+'/archive/*',arn+'/reference/*',arn+'/central/*/ohlcv-*',arn+'/results/*']},
+        {'Effect':'Allow','Action':'s3:PutObject','Resource':arn+'/results/*'},
+        # Unconditional ListBucket, so that a missing key reads as 404 (an owner's dates are listed under its ID).
+        {'Effect':'Allow','Action':'s3:ListBucket','Resource':arn},
+        {'Effect':'Allow','Action':'dynamodb:UpdateItem','Resource':f'arn:aws:dynamodb:{REGION}:{account}:table/{NAME}'},
+        {'Effect':'Allow','Action':['logs:CreateLogStream','logs:PutLogEvents'],'Resource':f'arn:aws:logs:{REGION}:{account}:log-group:/aws/lambda/{QUERY}:*'}]}))
+    logs=session.client('logs')
+    ignore_exists(logs.create_log_group, logGroupName=f'/aws/lambda/{QUERY}')
+    logs.put_retention_policy(logGroupName=f'/aws/lambda/{QUERY}', retentionInDays=14)
+    config=dict(Runtime='python3.12',Role=role_arn,Handler='query_service.handler',Timeout=300,MemorySize=3008,
+                Layers=archive_config['Layers'],EphemeralStorage={'Size':512},
+                # The archive's per-deployment key, so query limits per address are keyed hashes too.
+                Environment={'Variables':{'ARCHIVE_BUCKET':bucket,'QUOTA_TABLE':NAME,
+                                          'QUOTA_SALT':archive_config['Environment']['Variables']['QUOTA_SALT']}})
+    code=package()
+    try:
+        lam.get_function(FunctionName=QUERY)
+    except lam.exceptions.ResourceNotFoundException:
+        for attempt in range(12):   # a new role takes a few seconds to be assumable
+            try:
+                lam.create_function(FunctionName=QUERY,Code={'ZipFile':code},Architectures=['arm64'],**config)
+                break
+            except lam.exceptions.InvalidParameterValueException:
+                if attempt == 11:
+                    raise
+                time.sleep(5)
+        lam.get_waiter('function_active_v2').wait(FunctionName=QUERY)
+    else:
+        lam.update_function_configuration(FunctionName=QUERY,**config)
+        lam.get_waiter('function_updated_v2').wait(FunctionName=QUERY)
+        lam.update_function_code(FunctionName=QUERY,ZipFile=code,Architectures=['arm64'])
+        lam.get_waiter('function_updated_v2').wait(FunctionName=QUERY)
+    ignore_exists(lam.add_permission,FunctionName=QUERY,StatementId='PublicURL',Action='lambda:InvokeFunctionUrl',
+        Principal='*',FunctionUrlAuthType='NONE')
+    ignore_exists(lam.add_permission,FunctionName=QUERY,StatementId='PublicURLInvoke',Action='lambda:InvokeFunction',
+        Principal='*',InvokedViaFunctionUrl=True)
+    try:
+        return lam.get_function_url_config(FunctionName=QUERY)['FunctionUrl']
+    except lam.exceptions.ResourceNotFoundException:
+        return lam.create_function_url_config(FunctionName=QUERY,AuthType='NONE')['FunctionUrl']
+
+def seed_demo(directory, api_url):
+    """Upload a complete demo replay's package (as the operator's identity) so that the archive holds the demo's
+    market tables, which XTKS.BRISKDEMO serves. `BRISK_UPLOAD=0 brisk record --web --output DIR` makes one."""
+    if not (Path(directory) / 'manifest.json').exists():
+        raise SystemExit(f'{directory} is not a package (no manifest.json): record it with uploads not revoked, '
+                         'for example `BRISK_UPLOAD=0 brisk record --web --output DIR`')
+    sys.path.insert(0, str(ROOT))
+    from briskapi import cli
+    return cli.upload(Path(directory), api_url, market=True)
 
 if __name__ == '__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--bucket',required=True,help='Use a new dedicated globally unique bucket name')
+    p.add_argument('--seed-demo',type=Path,metavar='PACKAGE',help="A complete demo replay's package to seed XTKS.BRISKDEMO")
     args=p.parse_args()
-    print(json.dumps(deploy(args.bucket),indent=2))
+    result=deploy(args.bucket)
+    if args.seed_demo:
+        result['seeded']=seed_demo(args.seed_demo, result['api_url'])
+    print(json.dumps(result,indent=2))

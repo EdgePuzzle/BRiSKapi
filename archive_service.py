@@ -12,6 +12,9 @@ reference copy exists.
 
 Deleting leaves an owner's objects as noncurrent versions in the versioned bucket: the owner can restore
 them for RESTORE_DAYS days, and the bucket's lifecycle removes them a day after that (see PRIVACY.md).
+
+Live recordings also back the central OHLCV bars (query_engine): storing, deleting or restoring one
+rebuilds its trading day's bars from the live recordings that back it then.
 """
 import base64
 import datetime as dt
@@ -32,6 +35,7 @@ import boto3
 from botocore.exceptions import ClientError
 import pyarrow as pa
 from briskapi._parquet import BATCHES, FILES, MARKET, digest, pack, unpack, verify_directory
+import query_engine
 from briskapi.schema import (OWNER, RECORDING_PREFIX, REFERENCES, TIMING_KEY, encode, owner, recording_name, validate_manifest,
                              validate_timing, require, MAX_COMPRESSED, MAX_TIMING_BYTES)
 
@@ -232,7 +236,7 @@ def delete(body, who, ip, s3, db):
     The objects' current versions are deleted, so the owner can no longer list or download them; their
     previous versions stay in the versioned bucket, the operator's copy, which this function cannot purge.
     """
-    target = body['prefix']
+    target, summary = body['prefix'], None
     if isinstance(target, str) and TIMING_KEY.fullmatch(target):
         require(TIMING_KEY.fullmatch(target)[1] == who, 'Not your upload')
         keys = [target] if _exists(s3, target) else []
@@ -240,11 +244,15 @@ def delete(body, who, ip, s3, db):
         prefix = _owned(target, who) + '/'
         keys = [item['Key'] for page in s3.get_paginator('list_objects_v2').paginate(Bucket=BUCKET, Prefix=prefix)
                 for item in page.get('Contents', [])]
+        if prefix + 'manifest.json' in keys:
+            summary = json_get(s3, prefix + 'manifest.json')['summary']
     if not keys:
         raise NotFound(target)
     # The manifest (the listing's commit marker) goes first, so a listing never shows half a recording.
     for key in sorted(keys, key=lambda k: not k.endswith('manifest.json')):
         s3.delete_object(Bucket=BUCKET, Key=key)
+    if summary:
+        central_bars(s3, target, summary, backed=False)
     return response(200, {'status': 'deleted', 'removed': len(keys),
                           'note': f'Removed from your archive; `brisk restore` brings it back within {RESTORE_DAYS} days.'})
 
@@ -261,7 +269,28 @@ def restore(body, who, ip, s3, db):
     # The manifest, the listing's commit marker, comes back last.
     for key in sorted(kept, key=lambda k: k.endswith('manifest.json')):
         s3.copy_object(Bucket=BUCKET, Key=key, CopySource={'Bucket': BUCKET, 'Key': key, 'VersionId': kept[key]})
+    if not TIMING_KEY.fullmatch(target) and _exists(s3, f'{target}/manifest.json'):
+        central_bars(s3, target, json_get(s3, f'{target}/manifest.json')['summary'], backed=True)
     return response(200, {'status': 'restored', 'restored': len(kept)})
+
+def central_bars(s3, prefix, summary, backed):
+    """Keep a live recording's trading day of central bars in step: it backs them (stored, restored) or no
+    longer does (deleted). Bars are derived data: a failed rebuild removes the day's rather than keep any
+    a recording no longer backs."""
+    if summary['source'] not in query_engine.LIVE:
+        return
+    bucket, date = query_engine.Bucket(s3, BUCKET), summary['trading_date']
+    marker = query_engine.source_key(date, prefix)
+    if backed:
+        bucket.write(marker, json.dumps({'prefix': prefix}).encode(), 'application/json')
+    elif bucket.exists(marker):
+        bucket.delete(marker)
+    try:
+        query_engine.rebuild_bars(bucket, date)
+    except Exception as error:  # noqa: BLE001
+        print(f'Central bars for {date} not rebuilt ({type(error).__name__}); removed until the next rebuild')
+        for key in bucket.keys(f'{query_engine.CENTRAL}/{date}/ohlcv-'):
+            bucket.delete(key)
 
 EARLIEST = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
 
@@ -437,6 +466,7 @@ def store(data, m, part, who, s3):
              immutable=True)
     # Manifest is the commit marker. Readers list only committed datasets.
     json_put(s3, f'{prefix}/manifest.json', stored, immutable=True)
+    central_bars(s3, prefix, stored['summary'], backed=True)
     return prefix, stored
 
 def handler(event, context):
