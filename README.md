@@ -14,8 +14,8 @@ SBI, TSE or JPX.
 >   pre-open snapshot and the first three minutes after the open), replayed at
 >   its recorded pace. This is not live market data.
 > - **With your broker's BRiSK (SBI Securities, or Tachibana e-shiten's BRiSK Next):**
->   BRiSK market data (candles, margin, alerts, schedule, watchlist) and an
->   experimental live feed.
+>   BRiSK market data (candles, margin, alerts, schedule, watchlist) and a
+>   live feed.
 
 ## Which API should I use?
 
@@ -246,7 +246,7 @@ market.events()       # basket orders, limit up/down, volume surges
 market.schedule()     # trading date, status and session times
 market.watchlist()    # your saved codes
 
-feed = briskapi.connect(site="sbi", codes=["7203"])   # live (experimental); each finished day uploaded unless you opt out
+feed = briskapi.connect(site="sbi", codes=["7203"])   # live; each finished day uploaded unless you opt out
 toyota.quote()                              # same calls as any feed
 # upload_market_data=False uploads no market recordings, upload=False nothing; output="days" keeps each day
 ```
@@ -295,7 +295,7 @@ then `brisk login` before `brisk live --site e-shiten`.
 
 ```python
 briskapi.login("e-shiten", cookies={...})   # or BRISK_ESHITEN_COOKIES; remember=True keeps them apart from SBI's
-feed = briskapi.connect(site="e-shiten", codes=["7203"])   # live (experimental)
+feed = briskapi.connect(site="e-shiten", codes=["7203"])   # live
 ```
 
 Everything above applies, daily recordings and uploads included (each finished day's market

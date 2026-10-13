@@ -1,4 +1,4 @@
-"""Your broker's BRiSK session: login, REST data and an experimental live feed.
+"""Your broker's BRiSK session: login, REST data and a live feed.
 
 Each broker runs BRiSK on its own address. SBI Securities' (sbi.brisk.jp, the default
 site) and Tachibana e-shiten's BRiSK Next (next.e-shiten.brisk.jp) are the same app, so one
@@ -291,7 +291,7 @@ def _check_session(session: Session) -> None:
 
 def _connect(site, codes=None, history=False, node='node', timeout=120, upload=None, trace_protocol=False, profile=None,
              upload_market_data=None, output=None, on_day=None, gateway=False):
-    """briskapi.connect(site=...): the experimental live feed of your broker's BRiSK, through the site's own WASM
+    """briskapi.connect(site=...): the live feed of your broker's BRiSK, through the site's own WASM
     decoder under Node, never Chrome. It uses the session briskapi.login made for `site`, or signs in as
     login(site) does.
 

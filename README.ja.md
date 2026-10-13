@@ -15,7 +15,7 @@ e支店（BRiSK Next）の BRiSK も利用できます（パスキーでのサ�
 >   データではありません。
 > - **お使いの証券会社の BRiSK（SBI証券、または立花証券 e支店の BRiSK Next）を
 >   使える場合:** BRiSK の市場データ（ローソク足、信用残、アラート、取引
->   スケジュール、ウォッチリスト）と、試験的なライブフィード。
+>   スケジュール、ウォッチリスト）と、ライブフィード。
 
 ## どの API を使うか
 
@@ -246,7 +246,7 @@ market.events()       # バスケット注文、ストップ高・安、出来�
 market.schedule()     # 取引日、状態、取引時間
 market.watchlist()    # 保存済みの銘柄コード
 
-feed = briskapi.connect(site="sbi", codes=["7203"])   # ライブ（試験的）。オプトアウトしない限り、終わった日ごとにアップロード
+feed = briskapi.connect(site="sbi", codes=["7203"])   # ライブ。オプトアウトしない限り、終わった日ごとにアップロード
 toyota.quote()                              # 他のフィードと同じ呼び出し
 # upload_market_data=False で市場データの記録を、upload=False ですべてをアップロードしない（残すには output="days"）
 ```
@@ -294,7 +294,7 @@ e支店の BRiSK Next（[next.e-shiten.brisk.jp](https://next.e-shiten.brisk.jp)
 
 ```python
 briskapi.login("e-shiten", cookies={...})   # または BRISK_ESHITEN_COOKIES。remember=True で SBI とは別に保存
-feed = briskapi.connect(site="e-shiten", codes=["7203"])   # ライブ（試験的）
+feed = briskapi.connect(site="e-shiten", codes=["7203"])   # ライブ
 ```
 
 上記の説明は日ごとの記録とアップロードも含めてそのまま当てはまります（終わった日ごとの市場データの
