@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "briskapi"
-version = "1.0.0"
+version = "1.0.1"
 description = "Unofficial Python API and CLI for BRiSK auction data: demo replay, broker BRiSK sessions (SBI, Tachibana e-shiten), an experimental live feed and a private archive"
 readme = "README.md"
 license = "MIT"
