@@ -17,6 +17,30 @@ SBI, TSE or JPX.
 >   BRiSK market data (candles, margin, alerts, schedule, watchlist) and an
 >   experimental live feed.
 
+## Which API should I use?
+
+| You want | Use | It reads |
+| --- | --- | --- |
+| Quotes, trades and auctions as they happen | `briskapi.connect()`, then `Ticker`/`Market` | Your live feed |
+| A recording you have, offline or in NautilusTrader | `briskapi.load(dir)` or `briskapi.pull(prefix)`, then `Ticker`/`Market`; `brisk export` | That recording, exactly as recorded |
+| History across days, or OHLCV bars, without downloading | `briskapi.Historical()`, `brisk query` | Your uploads in the cloud (the demo for everyone) |
+| BRiSK's own bars, margin, turnover, lists, events | `Ticker.candles()`, `.margin()`, `Market().turnover()` and the like | Your broker's BRiSK servers (needs a login) |
+| What you have uploaded | `briskapi.Archive()`, `brisk list`, `pull`, `delete`, `restore`, `prune` | Your private archive |
+
+`Ticker.history()` and `.trades()` never go to the network. They read the loaded recording
+or the live feed:
+- A recording gives exactly the span it covers.
+- A live feed needs `history=True`. It then keeps every update since it connected, and trades
+  back to the day's start, as far as BRiSK's snapshot restores them.
+
+`Ticker.candles()` is the call that asks your broker's BRiSK. `5m` covers today only; how far
+back `1d`, `1w` and `1mo` go is up to BRiSK and not yet known. For bars from your own
+recordings, across days, use `Historical` (`ohlcv-1s` to `ohlcv-1d`).
+
+The local calls and the cloud API name the same data differently (`indicative_price` locally,
+`ind_match_price` in the cloud, for example). [docs/data-format.md](https://github.com/honvl/BRiSKapi/blob/main/docs/data-format.md#local-and-cloud-names)
+maps one to the other.
+
 ## Install
 
 Python 3.12+. Live feeds and recording also need Node 22+, because BRiSK's own
@@ -259,8 +283,8 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | `Ticker(code).info()` | Name, lot size, tick type, base price and daily limits |
 | `Ticker(code).quote(at=None)` | Bid/ask with their quantities and orders, the ten best book levels per side (`bids`, `asks`) and of the closing-condition orders (`closing_bids`, `closing_asks`), the board's order totals, indicative price/volume, market-order and closing quantities, last trade, turnover, issue status and `special_quote` (side, price, when its timer ends) |
 | `Ticker(code).auction(at=None, closing=False)` | The auction's indicative state, market orders and board totals with `market_order_imbalance` (market buy minus sell); `closing=True` for the closing auction |
-| `Ticker(code).history(start, end)` | Every update in order |
-| `Ticker(code).trades(start, end)` | Every execution: time, price, shares and the initiating side (`buy`, `sell`; None for most opening prints) |
+| `Ticker(code).history(start, end)` | Every update in order, from the loaded recording or feed (no network) |
+| `Ticker(code).trades(start, end)` | Every execution: time, price, shares and the initiating side (`buy`, `sell`; None for most opening prints), from the loaded recording or feed |
 | `Market().stocks()` | Master for every security |
 | `Market().snapshot(at=None)` | Every security's quote |
 | `Market().imbalances(at=None, top=None, closing=False)` | Securities ranked by absolute market-order imbalance (or the closing auction's) |
@@ -279,7 +303,7 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | `Historical().metadata.list_datasets()` / `.list_schemas(dataset)` / `.list_fields(schema)` / `.list_publishers()` / `.get_dataset_range(dataset)` | The catalogue; a dataset's first and last date with data |
 | `Historical().metadata.get_dataset_condition(dataset, start_date, end_date)` | Each date available or missing, and the clock windows (JST) your recordings cover |
 | `Historical().metadata.get_record_count(...)` / `.get_cost(...)` | How many records a request returns; its cost, always 0 (free, with quotas) |
-| `Ticker(code).candles(interval)` / `.margin(days)` | Broker BRiSK (SBI, e-shiten) price bars; margin balances and lending fees |
+| `Ticker(code).candles(interval)` / `.margin(days)` | BRiSK's own price bars from your broker (SBI, e-shiten): `5m` today only, how far back `1d`/`1w`/`1mo` go is up to BRiSK; margin balances and lending fees |
 | `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | Broker BRiSK market data |
 | `briskapi.brisk.login(site=...)` / `.connect()` | SBI (default) or e-shiten BRiSK session and live feed |
 | `briskapi.passkey.enroll()` / `.login()` / `.forget()` | Passkey sign-in to your broker's BRiSK |

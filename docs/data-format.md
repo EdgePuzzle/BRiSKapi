@@ -188,6 +188,35 @@ sessions (09:00–11:30 and 12:30–15:30 JST); `XTKS.BRISKDEMO` bars are open t
 - **`brisk-quotes`' book columns** are JSON arrays: in JSON as they are, in CSV as JSON text.
 - **`compression=zstd`** compresses the whole response.
 
+## Local and cloud names
+
+`Ticker` and `Market` (on a live feed or a loaded recording) and the cloud API return the same
+data under different names: the local calls keep BRiSK's, with yen and Tokyo times; the cloud
+API follows Databento's.
+
+| Local (`Ticker`, `Market`) | Cloud API | Note |
+| --- | --- | --- |
+| `code` | `symbol` (`raw_symbol` in `definition`) | The JPX code |
+| `issue_id` | `instrument_id` | Locally, that day's index into the master; in the cloud, fixed per code |
+| `time` | `ts_event` | Tokyo `datetime` locally; UTC nanoseconds in the cloud (`to_df(tz="Asia/Tokyo")`) |
+| `received_unix_ms` (`Market().frames()`) | `ts_recv` | When the recording computer received the frame |
+| `frame` | `sequence` | BRiSK's frame number |
+| `trades()`: `price`, `quantity`, `side` (`buy`, `sell`, None) | `trades`: `price`, `size`, `side` (`B`, `A`, `N`) | |
+| `bids`, `asks`: `[{price, quantity, orders}]` | `mbp-10`: `bid_px_NN`, `bid_sz_NN`, `bid_ct_NN` (and `ask_…`); `brisk-quotes`: `bids`, `asks` as `[{price, size, count}]` | Best level first |
+| `indicative_price`, `closing_indicative_price` | `imbalance`: `ind_match_price`, on `auction_type` `O` and `C` rows | |
+| `indicative_volume`, `closing_indicative_volume` | `imbalance`: `paired_qty` | |
+| `indicative_imbalance_side` (1 or 0) | `imbalance`: `side` (`A` or `B`) | 1 is `A`: sell exceeds buy |
+| `market_buy_quantity`, `market_sell_quantity` (and `closing_…`) | `imbalance`: `market_buy_qty`, `market_sell_qty` | |
+| `auction()`: `market_order_imbalance` (buy − sell) | `imbalance`: `market_imbalance_qty` and `market_imbalance_side` | Signed locally; size and side in the cloud |
+| `bid_total_quantity`, `ask_total_quantity` (and `bid_closing_…`) | `imbalance`: `bid_total_qty`, `ask_total_qty` | The closing ones on `C` rows |
+| `reference_price` | `imbalance`: `ref_price` | |
+| `special_quote`: `{side, price, until}` | `imbalance`: `auction_time`; `brisk-quotes`: `quote_side`, `special_quote_time` | |
+| `stocks()`: `name`, `lot_size`, `base_price`, `limit_up`, `limit_down`, `tick_type`, `issue_type` | `definition`: `name`, `min_lot_size_round_lot`, `base_price`, `high_limit_price`, `low_limit_price`, `tick_type`, `issue_type` | |
+| The other quote fields (`last_price`, `volume`, `turnover`, …) | `brisk-quotes`, same names | |
+
+OHLCV bars exist only in the cloud (`ohlcv-1s` to `ohlcv-1d`). `Ticker.candles()` is a different
+thing: BRiSK's own bars from your broker.
+
 ## Recordings
 
 A recording is a folder holding `data/order_book_depths.parquet`, `data/trades.parquet`,

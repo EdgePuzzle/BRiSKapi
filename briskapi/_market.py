@@ -49,7 +49,10 @@ class Ticker:
         return quote if raw else quote_view(quote, rec.trading_date)
 
     def history(self, start=None, end=None, raw=False) -> Table:
-        """Every recorded update for this security, oldest first, optionally bounded by time."""
+        """Every recorded update for this security, oldest first, optionally bounded by time.
+
+        Reads the loaded recording (exactly its span) or the live feed (with history=True: every update since it
+        connected); never the network. For more than one day, or bars, use briskapi.Historical."""
         rec = self.recording
         return Table(q if raw else quote_view(q, rec.trading_date) for q in rec.updates(self.code, start, end))
 
@@ -62,12 +65,16 @@ class Ticker:
 
     def trades(self, start=None, end=None, raw=False) -> Table:
         """Every trade (execution), oldest first, optionally bounded by time: price, shares and side
-        ('buy' or 'sell' for the initiating side; None for most opening auction prints)."""
+        ('buy' or 'sell' for the initiating side; None for most opening auction prints).
+
+        Reads the loaded recording (exactly its span) or the live feed (with history=True: back to the day's start,
+        as far as BRiSK's snapshot restores them); never the network. Across days: briskapi.Historical."""
         rec = self.recording
         return Table(t if raw else trade_view(t, rec.trading_date) for t in rec.trades(self.code, start, end))
 
     def candles(self, interval='1d') -> Table:
-        """Price bars from your broker's BRiSK: 5m (today), 1d, 1w or 1mo."""
+        """BRiSK's own price bars, from your broker's BRiSK servers: 5m (today only), 1d, 1w or 1mo. How far back
+        1d, 1w and 1mo go is up to BRiSK and not yet known. Bars from your own recordings: briskapi.Historical."""
         return _site(self._client).candles(self.code, interval)
 
     def margin(self, days=365) -> Table:

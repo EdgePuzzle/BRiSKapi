@@ -17,6 +17,30 @@ e支店（BRiSK Next）の BRiSK も利用できます（パスキーでのサ�
 >   使える場合:** BRiSK の市場データ（ローソク足、信用残、アラート、取引
 >   スケジュール、ウォッチリスト）と、試験的なライブフィード。
 
+## どの API を使うか
+
+| したいこと | 使うもの | 読むもの |
+| --- | --- | --- |
+| 気配・約定・板寄せをリアルタイムで | `briskapi.connect()` のあと `Ticker`/`Market` | ライブフィード |
+| 手元の記録をオフラインで、または NautilusTrader で | `briskapi.load(dir)` か `briskapi.pull(prefix)` のあと `Ticker`/`Market`、`brisk export` | その記録（記録したとおり） |
+| 複数日にわたる履歴や OHLCV バーを、ダウンロードせずに | `briskapi.Historical()`、`brisk query` | クラウドにある自分のアップロード（デモは誰でも） |
+| BRiSK 自身のローソク足、信用残、売買代金、リスト、イベント | `Ticker.candles()`、`.margin()`、`Market().turnover()` など | 証券会社の BRiSK のサーバー（ログインが必要） |
+| アップロードしたものの管理 | `briskapi.Archive()`、`brisk list`、`pull`、`delete`、`restore`、`prune` | 自分専用のアーカイブ |
+
+`Ticker.history()` と `.trades()` はネットワークを使いません。読み込んだ記録かライブフィードを
+読みます。
+- 記録なら、その記録の範囲がそのまま返ります。
+- ライブフィードは `history=True` が必要です。接続してからの更新をすべて保持し、約定は BRiSK の
+  スナップショットが復元できる範囲でその日の始めまでさかのぼります。
+
+証券会社の BRiSK に問い合わせるのは `Ticker.candles()` です。`5m` は当日のみで、`1d`・`1w`・
+`1mo` がどこまでさかのぼるかは BRiSK 次第で、まだ分かっていません。自分の記録から複数日の
+バーがほしい場合は `Historical`（`ohlcv-1s` 〜 `ohlcv-1d`）を使ってください。
+
+手元の呼び出しとクラウド API では、同じデータでも名前が異なります（たとえば手元の
+`indicative_price` はクラウドでは `ind_match_price`）。対応表は
+[docs/data-format.md](docs/data-format.md#local-and-cloud-names)（英語）にあります。
+
 ## インストール
 
 Python 3.12 以上が必要です。ライブフィードと記録には Node 22 以上も必要です
@@ -263,8 +287,8 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | `Ticker(code).info()` | 銘柄名、売買単位、呼値の種別、基準値、値幅制限 |
 | `Ticker(code).quote(at=None)` | 買い・売り気配とその数量・件数、板の各側の上位10本（`bids`、`asks`）と引け条件付き注文の上位10本（`closing_bids`、`closing_asks`）、板全体の注文合計、予想約定価格・数量、成行・引け条件付きの数量、直近の約定、売買代金、銘柄の状態、`special_quote`（特別気配の側・価格・タイマーの終了時刻） |
 | `Ticker(code).auction(at=None, closing=False)` | 板寄せの予想状態、成行注文、板の合計と `market_order_imbalance`（成行の買い数量 − 売り数量）。`closing=True` で引けの板寄せ |
-| `Ticker(code).history(start, end)` | すべての更新（時系列順） |
-| `Ticker(code).trades(start, end)` | すべての約定（歩み値）：時刻、価格、株数、仕掛けた側（`buy`、`sell`。寄付きの約定の多くは None） |
+| `Ticker(code).history(start, end)` | すべての更新（時系列順）。読み込んだ記録かフィードから（ネットワークは使わない） |
+| `Ticker(code).trades(start, end)` | すべての約定（歩み値）：時刻、価格、株数、仕掛けた側（`buy`、`sell`。寄付きの約定の多くは None）。読み込んだ記録かフィードから |
 | `Market().stocks()` | 全銘柄のマスター |
 | `Market().snapshot(at=None)` | 全銘柄の気配 |
 | `Market().imbalances(at=None, top=None, closing=False)` | 成行注文の売買差（絶対値）が大きい順の銘柄（引けの板寄せも可） |
@@ -283,7 +307,7 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | `Historical().metadata.list_datasets()` / `.list_schemas(dataset)` / `.list_fields(schema)` / `.list_publishers()` / `.get_dataset_range(dataset)` | カタログ、データセットにデータのある最初と最後の日付 |
 | `Historical().metadata.get_dataset_condition(dataset, start_date, end_date)` | 各日付が available か missing か、自分の記録がカバーする時間帯（日本時間） |
 | `Historical().metadata.get_record_count(...)` / `.get_cost(...)` | リクエストが返すレコード数、そのコスト（常に 0。無料で、上限あり） |
-| `Ticker(code).candles(interval)` / `.margin(days)` | 証券会社の BRiSK（SBI、e支店）のローソク足、信用残と貸株料 |
+| `Ticker(code).candles(interval)` / `.margin(days)` | 証券会社の BRiSK（SBI、e支店）自身のローソク足（`5m` は当日のみ、`1d`/`1w`/`1mo` がどこまでさかのぼるかは BRiSK 次第）、信用残と貸株料 |
 | `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | 証券会社の BRiSK の市場データ |
 | `briskapi.brisk.login(site=...)` / `.connect()` | SBI（既定）または e支店の BRiSK のセッションとライブフィード |
 | `briskapi.passkey.enroll()` / `.login()` / `.forget()` | 証券会社の BRiSK へのパスキーでのサインイン |
