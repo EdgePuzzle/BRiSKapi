@@ -31,9 +31,26 @@ container has 18,001 frames labelled 09:00:00.000–09:02:59.990, so it provides
 one genuine pre-open snapshot and the opening transition, not a pre-open time
 series or a full-depth book. Output is labelled `source=historical_mock`.
 
-Source clocks are preserved. Their origin is the decoder's feed clock, not an
-independently established exchange clock, so exchange provenance and exchange
-delay are unverified (`exchange_delay_ms` is always null). Live data needs an
+Source clocks are preserved. They are the stamps BRiSK's server sends; the decoder
+reads no clock of its own (its output is byte-identical under another time zone and
+system date). Each issue's snapshot record carries an absolute time in microseconds
+after JST midnight, and each later update a delta from that issue's previous update,
+which the decoder adds up; a catch-up reply carries deltas only, and an issue with no
+snapshot starts at 07:00. About once a minute a time message (microseconds since
+07:00 JST) moves the stream clock, `time()`, which is the latest of those ticks and the
+update times. Whether the server's stamps are TSE event times passed through or its
+own is not established. Its own looks likelier: an issue's updates are never stamped
+less than about 0.3 ms apart, mostly 0.4-0.45 ms, whatever the load and in both 2021
+and 2026, like a fixed per-issue processing step; the 09:00 status changes are stamped
+61-274 ms after 09:00, each on its own; and an update stamped exactly at the session's
+close ends it, so some stamps are conventions. Against that, they have true microsecond
+precision, are slightly out of order across issues, and a sweep's trades can share
+one. A live session with a snapshot, comparing update times with the server clock in
+its heartbeats, could settle it. Until then exchange provenance and exchange delay are
+unverified: `exchange_delay_ms` is always null, and `source_timestamp_origin` is
+`brisk_decoder_unverified`, a historical name for "as the decoder reports the server's
+stamps". `special_quote_time_us` is an issue's own update time plus 180 s, the same
+clock. Live data needs an
 authenticated Tachibana BRiSK Next session and validation of the current
 protocol: bootstrap, master/snapshot, WebSocket handshake, keepalives and
 catch-up. The demo's protocol version is 16000. The [recorder

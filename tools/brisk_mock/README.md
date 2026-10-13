@@ -135,8 +135,10 @@ imbalance side and SBI's issue status. An issue whose quote the decoder can't re
 (its state for that issue is inconsistent) is listed in the batch's
 `skipped_issues` instead, until it updates.
 
-`source_time_us` is microseconds since JST midnight on `trading_date`. Its origin
-is the decoder's feed clock, not an independently established exchange clock.
+`source_time_us` is microseconds since JST midnight on `trading_date`, as BRiSK's
+server stamps it: absolute in the snapshot, then moved by each update's delta. The
+decoder has no clock of its own, and whether the server's stamps are exchange event
+times is not established (see ARCHITECTURE.md).
 `received_unix_ms` on stream batches is the local mock replay receipt time with
 millisecond precision. `decode_ns` measures local decode plus quote extraction.
 Neither difference establishes live exchange latency.
