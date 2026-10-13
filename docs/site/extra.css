@@ -1,0 +1,359 @@
+/* The site's look, after Databento's documentation: Inter and Inconsolata, a violet accent, a lavender
+   sidebar with small uppercase section labels, and API pages with the method, an example and its response
+   in cards beside the description. */
+
+:root,
+[data-md-color-scheme="default"] {
+  --brisk-accent: #6266e5;
+  --brisk-ink: #323348;
+  --brisk-text: #212529;
+  --brisk-muted: #8d8ebc;
+  --brisk-card: #f9fafe;
+  --brisk-card-head: #f3f4fc;
+  --brisk-line: #d7d9ef;
+  --brisk-rule: #e8e9f6;
+  --brisk-sidebar: #f7f8fd;
+  --brisk-active: rgba(151, 165, 233, 0.18);
+  --brisk-code-ink: #6164a6;
+  --brisk-required: #c2410c;
+
+  --md-primary-fg-color: var(--brisk-accent);
+  --md-primary-fg-color--light: #8a8dec;
+  --md-primary-fg-color--dark: #4b4fc9;
+  --md-primary-bg-color: var(--brisk-ink);
+  --md-accent-fg-color: #4b4fc9;
+  --md-typeset-a-color: var(--brisk-accent);
+  --md-code-bg-color: var(--brisk-card);
+  --md-code-fg-color: var(--brisk-ink);
+}
+
+body {
+  background: #fff;
+}
+
+.md-grid {
+  max-width: 88rem;
+}
+
+/* Header: white, with a hairline under it */
+.md-header {
+  background: #fff;
+  color: var(--brisk-ink);
+  box-shadow: 0 1px 0 var(--brisk-rule);
+}
+.md-header--shadow {
+  box-shadow: 0 1px 0 var(--brisk-rule);
+}
+.md-header__title {
+  font-weight: 600;
+}
+.md-header__button.md-logo {
+  color: var(--brisk-accent);
+}
+.md-search__form {
+  background: var(--brisk-sidebar);
+  border: 1px solid var(--brisk-line);
+  border-radius: 6px;
+}
+.md-search__form:hover {
+  background: var(--brisk-card-head);
+}
+.md-search__input,
+.md-search__input::placeholder,
+.md-search__icon {
+  color: var(--brisk-ink);
+}
+[data-md-toggle="search"]:checked ~ .md-header .md-search__form {
+  background: #fff;
+}
+.md-source {
+  color: var(--brisk-ink);
+}
+.md-select__link {
+  color: var(--brisk-ink);
+}
+
+/* Sidebar */
+@media screen and (min-width: 76.25em) {
+  .md-sidebar--primary {
+    background: var(--brisk-sidebar);
+    border-right: 1px solid var(--brisk-rule);
+  }
+  .md-sidebar--primary .md-sidebar__scrollwrap {
+    background: var(--brisk-sidebar);
+  }
+}
+.md-nav {
+  font-size: 0.7rem;
+}
+@media screen and (min-width: 76.25em) {
+  .md-nav--primary > .md-nav__title {
+    display: none;   /* the site's name is in the header */
+  }
+}
+.md-nav__link {
+  color: var(--brisk-ink);
+}
+.md-nav--primary .md-nav__item--section > .md-nav__link,
+.md-nav--primary .md-nav__item--section > label.md-nav__link {
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--brisk-muted);
+  margin-top: 1.4em;
+}
+.md-nav__item .md-nav__link--active,
+.md-nav__item .md-nav__link--active code {
+  color: var(--brisk-ink);
+  font-weight: 600;
+}
+@media screen and (min-width: 76.25em) {
+  .md-nav--primary .md-nav__link {
+    border-radius: 4px;
+    padding: 0.2rem 0.5rem;
+    margin-top: 0.15em;
+  }
+  .md-nav--primary .md-nav__link--active {
+    background: var(--brisk-active);
+  }
+  .md-nav--primary .md-nav__item--section > .md-nav__link {
+    padding-left: 0.5rem;
+  }
+}
+
+/* Text */
+.md-typeset {
+  color: var(--brisk-text);
+  font-size: 0.78rem;
+  line-height: 1.65;
+}
+.md-typeset h1 {
+  font-size: 1.6rem;
+  font-weight: 600;
+  color: var(--brisk-ink);
+  letter-spacing: -0.01em;
+  margin-bottom: 1em;
+}
+.md-typeset h2 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: var(--brisk-ink);
+  letter-spacing: -0.01em;
+}
+.md-typeset h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--brisk-ink);
+}
+.md-typeset h4 {
+  font-weight: 600;
+  color: var(--brisk-ink);
+}
+.md-typeset :not(pre) > code {
+  background: var(--brisk-card);
+  border: 1px solid var(--brisk-line);
+  border-radius: 4px;
+  color: var(--brisk-code-ink);
+  padding: 0 4px;
+  font-size: 0.86em;
+  word-break: break-word;
+}
+.md-typeset a code {
+  color: var(--brisk-accent);
+}
+.md-typeset pre > code {
+  font-size: 0.82em;
+}
+.md-typeset .highlight,
+.md-typeset pre {
+  border-radius: 8px;
+}
+.md-typeset .highlight > pre,
+.md-typeset > pre {
+  border: 1px solid var(--brisk-line);
+}
+.md-typeset table:not([class]) {
+  border: 1px solid var(--brisk-line);
+  border-radius: 8px;
+  font-size: 0.72rem;
+}
+.md-typeset table:not([class]) th {
+  background: var(--brisk-card-head);
+  color: var(--brisk-ink);
+  font-weight: 600;
+}
+.md-typeset table:not([class]) td {
+  border-top: 1px solid var(--brisk-rule);
+}
+.md-typeset blockquote {
+  border-left: 3px solid var(--brisk-accent);
+  background: var(--brisk-card);
+  border-radius: 0 8px 8px 0;
+  color: var(--brisk-text);
+  padding: 0.4rem 1rem;
+}
+
+/* Home cards */
+.md-typeset .grid.cards > ul > li {
+  border: 1px solid var(--brisk-line);
+  border-radius: 8px;
+  background: #fff;
+}
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--brisk-accent);
+  box-shadow: 0 2px 10px rgba(98, 102, 229, 0.12);
+}
+.md-typeset .grid.cards > ul > li > hr {
+  border-bottom-color: var(--brisk-rule);
+}
+
+/* API method pages: the description and parameters, and beside them the cards */
+.md-typeset .api {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr);
+  gap: 2.4rem;
+  align-items: start;
+}
+@media screen and (max-width: 76.24em) {
+  .md-typeset .api {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.5rem;
+  }
+}
+.md-typeset .api-text > :first-child {
+  margin-top: 0;
+}
+.md-typeset .api-text h2 {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--brisk-muted);
+  margin: 2em 0 0.4em;
+}
+.md-typeset .api-text h2 .headerlink {
+  display: none;
+}
+.md-typeset .param {
+  border-top: 1px solid var(--brisk-rule);
+  padding: 0.7rem 0 0.2rem;
+}
+.md-typeset .param > p {
+  margin: 0.35em 0 0.5em;
+}
+.md-typeset .param-head {
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+.md-typeset .param-head code.param-name {
+  font-weight: 600;
+  color: var(--brisk-ink);
+  background: var(--brisk-card-head);
+  border-color: var(--brisk-line);
+  font-size: 0.95em;
+  margin-right: 0.3rem;
+}
+.md-typeset .param-required {
+  color: var(--brisk-required);
+  font-weight: 600;
+}
+.md-typeset .param-optional,
+.md-typeset .param-sep,
+.md-typeset .param-type {
+  color: var(--brisk-muted);
+}
+.md-typeset .param-type {
+  font-family: var(--md-code-font-family);
+  font-size: 1.05em;
+}
+
+.md-typeset .api-cards {
+  min-width: 0;
+}
+.md-typeset .card {
+  border: 1px solid var(--brisk-line);
+  border-radius: 8px;
+  background: var(--brisk-card);
+  margin: 0 0 1.4rem;
+  overflow: hidden;
+}
+.md-typeset .card-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #464774;
+  background: var(--brisk-card-head);
+  border-bottom: 1px solid var(--brisk-line);
+  padding: 0.5rem 0.9rem;
+}
+.md-typeset .card-note {
+  font-size: 0.64rem;
+  color: var(--brisk-muted);
+  padding: 0.45rem 0.9rem 0;
+}
+.md-typeset .card .highlight,
+.md-typeset .card pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+.md-typeset .card .highlight > pre {
+  border: 0;
+}
+.md-typeset .card pre > code {
+  background: var(--brisk-card);
+  max-height: 32rem;
+}
+.md-typeset .card .tabbed-set {
+  margin: 0;
+  border: 0;
+}
+.md-typeset .card .tabbed-labels {
+  background: var(--brisk-card-head);
+  border-bottom: 1px solid var(--brisk-line);
+  box-shadow: none;
+  padding: 0 0.5rem;
+}
+.md-typeset .card .tabbed-labels > label {
+  font-size: 0.66rem;
+  font-weight: 600;
+  padding: 0.55rem 0.5rem 0.45rem;
+}
+.md-typeset .card .tabbed-content {
+  padding: 0;
+}
+.md-typeset .card .tabbed-block > :first-child,
+.md-typeset .card .tabbed-block > .highlight {
+  margin: 0;
+}
+.md-typeset .card .linenos,
+.md-typeset .card .linenodiv {
+  background: var(--brisk-card);
+}
+.md-typeset .card .linenodiv pre {
+  color: #b1b3d4;
+}
+
+/* Footer */
+.md-footer {
+  background: var(--brisk-sidebar);
+  color: var(--brisk-ink);
+  border-top: 1px solid var(--brisk-rule);
+}
+.md-footer__link,
+.md-footer__title {
+  color: var(--brisk-ink);
+}
+.md-footer__direction {
+  color: var(--brisk-muted);
+}
+.md-footer-meta {
+  background: #fff;
+  color: var(--brisk-muted);
+}
+.md-footer-meta.md-typeset a,
+.md-copyright {
+  color: var(--brisk-muted);
+}

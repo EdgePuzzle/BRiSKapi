@@ -1,5 +1,7 @@
 # Cloud API
 
+[English](cloud-api.md) | [日本語](cloud-api.ja.md)
+
 A Databento-style historical API over each uploader's private archive: query your own
 recordings by dataset, symbols, schema and time range, across days, without downloading whole
 recordings. Status: phase 1 is built for 1.0 (see [Phases](#phases)); phases 2 and 3 are

@@ -1,5 +1,7 @@
 # Privacy policy
 
+[English](PRIVACY.md) | [日本語](PRIVACY.ja.md)
+
 Policy version 7, effective 13 October 2026. Applies to the `brisk` Python API and
 CLI in this repository, the private recording archive they upload to and its cloud API.
 

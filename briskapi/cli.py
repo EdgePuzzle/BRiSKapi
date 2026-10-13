@@ -52,6 +52,7 @@ Every clean, complete session uploads automatically (the default; you can declin
 Cookies, tokens and connection diagnostics are never uploaded. Your IP address is used
 only for upload rate limiting. No account, file, hostname or system details are sent.
 Policy: https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md
+(日本語: https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.ja.md)
 Opt out for one run with --no-upload (or --no-upload-market-data to keep a broker
 capture's market data local), and for good with `brisk consent --revoke` or BRISK_UPLOAD=0.
 '''

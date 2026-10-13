@@ -1,6 +1,6 @@
 # briskapi
 
-[English](https://github.com/honvl/BRiSKapi/blob/main/README.md) | [日本語](https://github.com/honvl/BRiSKapi/blob/main/README.ja.md)
+[English](https://github.com/honvl/BRiSKapi/blob/main/README.md) | [日本語](https://github.com/honvl/BRiSKapi/blob/main/README.ja.md) | [Documentation](https://honvl.github.io/BRiSKapi/)
 
 An unofficial, pybrisk-style Python API and `brisk` command line for BRiSK auction
 data. Consume a live feed, query recordings at any point in time, keep them in your own
@@ -473,7 +473,11 @@ The HTTP API behind both is described in
 
 ## More documentation
 
+The [documentation site](https://honvl.github.io/BRiSKapi/) has these documents and an API reference with
+an example of each call and what it returns.
+
 - [docs/data-format.md](https://github.com/honvl/BRiSKapi/blob/main/docs/data-format.md): every column of recordings and cloud API records, and how to read them
+- [docs/cloud-api.md](https://github.com/honvl/BRiSKapi/blob/main/docs/cloud-api.md): how the cloud API works
 - [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/main/ARCHITECTURE.md): how it works, data format, archive integrity and limits
 - [PRIVACY.md](https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md): privacy policy
 - [CONTRIBUTING.md](https://github.com/honvl/BRiSKapi/blob/main/CONTRIBUTING.md): development, tests and releases

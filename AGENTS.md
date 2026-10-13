@@ -17,11 +17,14 @@ the existing legacy wire capture is labeled sample_data and is not an ingest for
 Run focused archive, query and API coverage (minimum 85%, `--cov=archive_service
 --cov=query_engine --cov=query_service --cov=briskapi`), the fixture reference test,
 Node tests and Rust tests/fmt/Clippy. CI supplies downloaded demo fixtures. Keep README.md (usage only),
-its Japanese translation README.ja.md, ARCHITECTURE.md (internals), docs/cloud-api.md,
-PRIVACY.md, infra/README.md, docs/data-format.md (a test checks it names every API column) and
-schema documentation synchronized; changes to collected
+ARCHITECTURE.md (internals), docs/cloud-api.md, PRIVACY.md, infra/README.md, docs/data-format.md (a test
+checks it, and its translation, name every API column) and schema documentation synchronized, together with
+the Japanese translations README.ja.md, PRIVACY.ja.md, docs/cloud-api.ja.md and docs/data-format.ja.md
+(the English PRIVACY.md governs); changes to collected
 data bump `POLICY_VERSION`, and PRIVACY.md also covers how OHLCV bars are built and who
-receives them.
+receives them. The documentation site (`docs/site`, GitHub Pages) is built from these documents; when
+an API reference example changes, rerun `docs/site/capture.py` (it queries the demo dataset with a
+throwaway identity and uploads nothing).
 
 `infra/deploy.py` mutates AWS resources and is reserved for explicit deployment
 work. `cloud_smoke.py` uploads self-authored synthetic data under throwaway identities to

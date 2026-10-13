@@ -50,9 +50,9 @@ data is listed in `pyproject.toml`); CI installs the wheel outside the repositor
 and runs it. The cloud API's engine and service (`query_engine.py`, `query_service.py`)
 run only in the cloud, like `archive_service.py`, and are not in the wheel; its client is
 `briskapi/_historical.py`, and `tests/test_query.py` covers all three offline against the
-archive tests' in-memory S3 and DynamoDB. `PRIVACY.md` describes the shared OHLCV bars built
-from broker uploads, so a change to what they hold or who receives them (`covered` in
-`query_engine.py`) updates it like any change to what is collected. The BRiSK site client's tests (`tests/test_brisk.py`, `tools/brisk_mock/brisk.test.cjs`) use
+archive tests' in-memory S3 and DynamoDB. `PRIVACY.md` describes each owner's OHLCV bars, built
+from its own broker recordings, so a change to what they hold or who receives them (`build_bars`,
+`covered` in `query_engine.py`) updates it like any change to what is collected. The BRiSK site client's tests (`tests/test_brisk.py`, `tools/brisk_mock/brisk.test.cjs`) use
 pybrisk's SBI sample payloads and a fake server. Unless a user
 opts out, broker sessions (SBI, e-shiten) upload a timing report
 (`briskapi/timing.py`, validated by `validate_timing` in `briskapi/schema.py`) and, after each
@@ -62,6 +62,23 @@ and continuity checks, while its accuracy remains uploader-declared.
 Never archive cookies, tokens or connection diagnostics. New uploads must be
 decoded; the existing legacy wire capture is labeled `sample_data` and is not an
 ingest format.
+
+## Documentation site
+
+`.github/workflows/pages.yml` publishes https://honvl.github.io/BRiSKapi/ from `main`: the README's
+sections as guides, the other documents as pages (their `.ja.md` translations as the Japanese site's)
+and an API reference generated from `docs/site/reference.py`. Each reference page shows its example's
+real output, kept in `docs/site/responses.json`; after changing an example, run it again:
+
+```sh
+python3 -m venv .venv-docs && .venv-docs/bin/python -m pip install -r docs/site/requirements.txt
+.venv-docs/bin/python docs/site/build.py --serve      # http://127.0.0.1:8000; --strict, as in CI
+.venv/bin/brisk record --web --speed 0 --no-upload --output /tmp/brisk-demo
+.venv/bin/python docs/site/capture.py --demo /tmp/brisk-demo --only python/ticker_quote
+```
+
+`capture.py` queries the public demo dataset with a throwaway identity it never saves and uploads
+nothing. Examples that need a broker login or your own uploads carry written, illustrative responses.
 
 ## Releases
 

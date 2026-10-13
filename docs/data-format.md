@@ -1,5 +1,7 @@
 # Data format
 
+[English](data-format.md) | [日本語](data-format.ja.md)
+
 What the Parquet (and CSV and JSON) that briskapi gives you contains, column by column. It comes
 from two places:
 
@@ -110,7 +112,7 @@ of your recordings overlap, each record appears once.
 | `side` | string | 'A' when sell exceeds buy at that price (or nothing matches), else 'B' |
 | `market_buy_qty` | uint64 | Market buy orders (shares) |
 | `market_sell_qty` | uint64 | Market sell orders (shares) |
-| `market_imbalance_qty` | uint64 | |market buy - market sell| (shares) |
+| `market_imbalance_qty` | uint64 | The difference between market buy and market sell orders, without sign (shares) |
 | `market_imbalance_side` | string | 'B' more market buying, 'A' more selling, 'N' equal |
 | `bid_total_qty` | uint64 | Shares bid on the whole board |
 | `ask_total_qty` | uint64 | Shares offered on the whole board |

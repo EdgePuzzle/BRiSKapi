@@ -1,0 +1,85 @@
+# The documentation site's configuration. docs/site/build.py fills in the navigation and writes the site's
+# pages beside a copy of this file, in build/site.
+site_name: briskapi
+site_url: https://honvl.github.io/BRiSKapi/
+site_description: An unofficial Python API and command line for BRiSK auction data, with your own private archive and a Databento-style cloud API.
+repo_url: https://github.com/honvl/BRiSKapi
+repo_name: honvl/BRiSKapi
+edit_uri: ''
+docs_dir: docs
+site_dir: html
+copyright: An independent project, not affiliated with or endorsed by BRiSK, Tachibana, SBI, TSE or JPX. Software is MIT licensed.
+
+theme:
+  name: material
+  font:
+    text: Inter
+    code: Inconsolata
+  palette:
+    scheme: default
+    primary: custom
+    accent: custom
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/chart-timeline-variant
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+    - toc.follow
+
+extra_css:
+  - assets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: ja
+          name: 日本語
+          build: true
+          site_description: BRiSK の板寄せデータのための非公式 Python API とコマンドライン。自分専用のアーカイブと Databento 風のクラウド API 付き。
+          nav_translations:
+{nav_translations}
+
+nav:
+{nav}
+
+validation:
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: info
+    unrecognized_links: warn

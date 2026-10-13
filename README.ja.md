@@ -1,6 +1,6 @@
 # briskapi
 
-[English](README.md) | [日本語](README.ja.md)
+[English](README.md) | [日本語](README.ja.md) | [ドキュメント](https://honvl.github.io/BRiSKapi/ja/)
 
 BRiSK の板寄せデータを扱う、非公式の pybrisk 風 Python API と `brisk`
 コマンドラインツールです。ライブフィードの購読、記録データの任意時点での照会、
@@ -39,7 +39,7 @@ e支店（BRiSK Next）の BRiSK も利用できます（パスキーでのサ�
 
 手元の呼び出しとクラウド API では、同じデータでも名前が異なります（たとえば手元の
 `indicative_price` はクラウドでは `ind_match_price`）。対応表は
-[docs/data-format.md](docs/data-format.md#local-and-cloud-names)（英語）にあります。
+[docs/data-format.ja.md](docs/data-format.ja.md#手元とクラウドの名前)にあります。
 
 ## インストール
 
@@ -106,7 +106,7 @@ briskapi.Market().snapshot(at="09:00:00").to_pandas()
 `data/custom/BriskBatch.parquet`（フレームごとの計測値）からなります。デモ全体で約
 41 MB です。pandas、Polars、DuckDB でそのまま読めます。`brisk export` で
 NautilusTrader のカタログや JSONL に書き出せます。全列の説明と pandas・Polars・DuckDB での読み方は
-[docs/data-format.md](docs/data-format.md)（英語）にあります。
+[docs/data-format.ja.md](docs/data-format.ja.md)にあります。
 
 時刻の照会には、バッチではなく各気配のタイムスタンプを使います。デモの
 7203 の最初の気配は日本時間 08:59:59.993551 で、それより前は `NotFoundError`
@@ -373,7 +373,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 指定可）。秘密の値を持つ人はアーカイブにとってあなた本人なので、他人に渡さないでください。
 これも保存したコピーもなくすと、アップロードにはアクセスできなくなります。ほかの
 ホスティングサービスと同様に、アーカイブの運営者は保存されたデータにアクセスできます。
-詳しくは [PRIVACY.md](PRIVACY.md)（英語）をご覧ください。
+詳しくは [PRIVACY.ja.md](PRIVACY.ja.md) をご覧ください（相違がある場合は英語版の [PRIVACY.md](PRIVACY.md) が優先します）。
 
 アップロードは既定でオンです。コマンドラインで初めて記録またはライブセッションを始めると、
 アップロードされる内容が表示され、一度だけ確認されます（Enter で同意、`n` で拒否）。答えは
@@ -457,7 +457,7 @@ path=None)` はストアを返します。`path` を指定すると Parquet フ�
 11:31 までの記録なら、午前の1分と1時間のバーは受け取れますが、1日のバーは受け取れません。つまり、
 バーを得るにはアップロードが必要です。他の人のアップロードが自分のバーに入ることはなく、自分の
 アップロードが他の人のバーに入ることもありません（`XTKS.BRISKDEMO` のバーは、デモ自身の約定から
-作ります）。詳しくは [PRIVACY.md](PRIVACY.md)（英語、ポリシーバージョン7）をご覧ください。`Ticker.candles()` は別のもので、
+作ります）。詳しくは [PRIVACY.ja.md](PRIVACY.ja.md)（ポリシーバージョン7）をご覧ください。`Ticker.candles()` は別のもので、
 証券会社の BRiSK 自身のバーです（証券会社へのログインが必要）。
 
 コマンドラインでは、`brisk query` は CSV を標準出力に書きます。`--encoding json` または `parquet` で
@@ -468,13 +468,20 @@ path=None)` はストアを返します。`path` を指定すると Parquet フ�
 brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13 > toyota-1m.csv
 ```
 
-その裏にある HTTP API は [docs/cloud-api.md](docs/cloud-api.md)（英語）に説明があります。
+その裏にある HTTP API は [docs/cloud-api.ja.md](docs/cloud-api.ja.md)に説明があります。
 
-## その他のドキュメント（英語）
+## その他のドキュメント
 
-- [docs/data-format.md](docs/data-format.md): 記録とクラウド API のレコードの全列、その読み方
+[ドキュメントサイト](https://honvl.github.io/BRiSKapi/ja/)には、これらの文書と、呼び出しごとの例と
+その結果を載せた API リファレンスがあります。
+
+- [docs/data-format.ja.md](docs/data-format.ja.md): 記録とクラウド API のレコードの全列、その読み方
+- [docs/cloud-api.ja.md](docs/cloud-api.ja.md): クラウド API の仕組み
+- [PRIVACY.ja.md](PRIVACY.ja.md): プライバシーポリシー（相違がある場合は英語版の [PRIVACY.md](PRIVACY.md) が優先）
+
+英語のみ:
+
 - [ARCHITECTURE.md](ARCHITECTURE.md): 仕組み、データ形式、アーカイブの改ざん対策と制限
-- [PRIVACY.md](PRIVACY.md): プライバシーポリシー
 - [CONTRIBUTING.md](CONTRIBUTING.md): 開発、テスト、リリース
 - [tools/brisk_mock/README.md](tools/brisk_mock/README.md): フィールド定義、タイミングとレイテンシー、SBI のマスター配置の確認、任意の Rust コレクター
 - [infra/README.md](infra/README.md): アーカイブのデプロイ

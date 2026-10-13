@@ -520,7 +520,8 @@ def test_every_schema_returns_exactly_its_documented_fields(archive):
     describes each one."""
     s3, db, put = archive
     put(session(0, 150))
-    docs = (Path(__file__).resolve().parents[1] / 'docs' / 'data-format.md').read_text()
+    root = Path(__file__).resolve().parents[1] / 'docs'
+    docs, translated = (root / 'data-format.md').read_text(), (root / 'data-format.ja.md').read_text()   # both name every field
     for name in engine.SCHEMAS:
         expected = pa.schema([(f, kind) for f, kind, _ in engine.FIELDS[name]])
         for start in ('2026-10-13', '2026-10-20'):          # a day with data, and one without
@@ -528,6 +529,7 @@ def test_every_schema_returns_exactly_its_documented_fields(archive):
             assert got.schema.equals(expected), (name, start)
         assert query(s3, OWNER, dataset='XTKS.BRISK', schema=name, start='2026-10-13').num_rows or name in {'ohlcv-1h', 'ohlcv-1d'}
         for field, _, text in engine.FIELDS[name]:
-            assert text and f'`{field}`' in docs or field.split('_')[0] in {'bid', 'ask'} and '_NN' in docs, (name, field)
+            for doc in (docs, translated):
+                assert text and f'`{field}`' in doc or field.split('_')[0] in {'bid', 'ask'} and '_NN' in doc, (name, field)
     book = query(s3, OWNER, dataset='XTKS.BRISK', schema='brisk-quotes', symbols='7203', start=at(0), end=at(1)).to_pylist()[0]
     assert book['bids'] == [{'price': 2999.0, 'size': 300, 'count': 3}, {'price': 2998.0, 'size': 200, 'count': 2}]

@@ -1,0 +1,132 @@
+{
+ "_captured": {
+  "date": "2026-10-13",
+  "briskapi": "1.0.1"
+ },
+ "historical/client": {
+  "Python": "['XTKS.BRISK', 'XTKS.BRISKDEMO']",
+  "HTTP": "[\n  \"XTKS.BRISK\",\n  \"XTKS.BRISKDEMO\"\n]"
+ },
+ "historical/metadata/get_cost": {
+  "Python": "0.0",
+  "HTTP": "0.0"
+ },
+ "historical/metadata/get_dataset_condition": {
+  "Python": "[{'date': '2021-09-27',\n  'condition': 'available',\n  'last_modified_date': None,\n  'windows': [['08:00:00', '09:02:59']]}]",
+  "HTTP": "[\n  {\n    \"date\": \"2021-09-27\",\n    \"condition\": \"available\",\n    \"last_modified_date\": null,\n    \"windows\": [\n      [\n        \"08:00:00\",\n        \"09:02:59\"\n      ]\n    ]\n  }\n]"
+ },
+ "historical/metadata/get_dataset_range": {
+  "Python": "{'start': '2021-09-27', 'end': '2021-09-27'}",
+  "HTTP": "{\n  \"start\": \"2021-09-27\",\n  \"end\": \"2021-09-27\"\n}"
+ },
+ "historical/metadata/get_record_count": {
+  "Python": "312",
+  "HTTP": "312"
+ },
+ "historical/metadata/list_datasets": {
+  "Python": "['XTKS.BRISK', 'XTKS.BRISKDEMO']",
+  "HTTP": "[\n  \"XTKS.BRISK\",\n  \"XTKS.BRISKDEMO\"\n]"
+ },
+ "historical/metadata/list_fields": {
+  "Python": "{'name': 'ts_recv', 'type': 'timestamp[ns, tz=UTC]', 'description': \"When the uploader's computer received the frame (millisecond precision; the demo: ts_event)\"}\n{'name': 'ts_event', 'type': 'timestamp[ns, tz=UTC]', 'description': \"BRiSK's server stamp for the frame (microseconds); not established to be the exchange's time\"}\n{'name': 'publisher_id', 'type': 'uint16', 'description': '1 for XTKS.BRISK, 2 for XTKS.BRISKDEMO (metadata.list_publishers)'}\n{'name': 'instrument_id', 'type': 'uint32', 'description': 'Fixed per code: digits-only codes are their number, others 100,000 plus base 36'}\n{'name': 'action', 'type': 'string', 'description': \"'T'\"}",
+  "HTTP": "[\n  {\n    \"name\": \"ts_recv\",\n    \"type\": \"timestamp[ns, tz=UTC]\",\n    \"description\": \"When the uploader's computer received the frame (millisecond precision; the demo: ts_event)\"\n  },\n  {\n    \"name\": \"ts_event\",\n    \"type\": \"timestamp[ns, tz=UTC]\",\n    \"description\": \"BRiSK's server stamp for the frame (microseconds); not established to be the exchange's time\"\n  },\n  {\n    \"name\": \"publisher_id\",\n    \"type\": \"uint16\",\n    \"description\": \"1 for XTKS.BRISK, 2 for XTKS.BRISKDEMO (metadata.list_publishers)\"\n  },\n  {\n    \"name\": \"instrument_id\",\n    \"type\": \"uint32\",\n    \"description\": \"Fixed per code: digits-only codes are their number, others 100,000 plus base 36\"\n  },\n  {\n    \"name\": \"action\",\n    \"type\": \"string\",\n    \"description\": \"'T'\"\n  },\n  {\n    \"name\": \"side\",\n    \"type\": \"string\",\n    \"description\": \"The aggressor: 'B' buyer-initiated, 'A' seller-initiated, 'N' none (most opening prints)\"\n  },\n  {\n    \"name\": \"depth\",\n    \"type\": \"uint8\",\n    \"description\": \"0\"\n  },\n  {\n    \"name\": \"price\",\n    \"type\": \"double\",\n    \"description\": \"Trade price (yen)\"\n…"
+ },
+ "historical/metadata/list_publishers": {
+  "Python": "[{'publisher_id': 1,\n  'dataset': 'XTKS.BRISK',\n  'venue': 'XTKS',\n  'description': 'Tokyo Stock Exchange via BRiSK'},\n {'publisher_id': 2,\n  'dataset': 'XTKS.BRISKDEMO',\n  'venue': 'XTKS',\n  'description': 'Tokyo Stock Exchange, BRiSK Next demo replay'}]",
+  "HTTP": "[\n  {\n    \"publisher_id\": 1,\n    \"dataset\": \"XTKS.BRISK\",\n    \"venue\": \"XTKS\",\n    \"description\": \"Tokyo Stock Exchange via BRiSK\"\n  },\n  {\n    \"publisher_id\": 2,\n    \"dataset\": \"XTKS.BRISKDEMO\",\n    \"venue\": \"XTKS\",\n    \"description\": \"Tokyo Stock Exchange, BRiSK Next demo replay\"\n  }\n]"
+ },
+ "historical/metadata/list_schemas": {
+  "Python": "['trades',\n 'mbp-10',\n 'definition',\n 'imbalance',\n 'brisk-quotes',\n 'ohlcv-1s',\n 'ohlcv-1m',\n 'ohlcv-1h',\n 'ohlcv-1d']",
+  "HTTP": "[\n  \"trades\",\n  \"mbp-10\",\n  \"definition\",\n  \"imbalance\",\n  \"brisk-quotes\",\n  \"ohlcv-1s\",\n  \"ohlcv-1m\",\n  \"ohlcv-1h\",\n  \"ohlcv-1d\"\n]"
+ },
+ "historical/store/replay": {
+  "Python": "2021-09-27 00:00:00.072765+00:00 10155.0 305500\n2021-09-27 00:00:00.327866+00:00 10155.0 400\n2021-09-27 00:00:00.801729+00:00 10155.0 700\n2021-09-27 00:00:00.803944+00:00 10160.0 100\n2021-09-27 00:00:00.817904+00:00 10150.0 100\n2021-09-27 00:00:00.876274+00:00 10160.0 100\n2021-09-27 00:00:01.671092+00:00 10160.0 100\n2021-09-27 00:00:02.104003+00:00 10160.0 100\n2021-09-27 00:00:02.168343+00:00 10160.0 5400\n2021-09-27 00:00:02.176897+00:00 10155.0 100\n2021-09-27 00:00:02.176897+00:00 10150.0 400\n2021-09-27 00:00:02.183538+00:00 10155.0 100\n2021-09-27 00:00:02.186961+00:00 10160.0 100\n2021-09-27 00:00:03.038753+00:00 10160.0 100\n2021-09-27 00:00:03.038753+00:00 10165.0 100\n2021-09-27 00:00:03.068028+00:00 10160.0 100\n2021-09-27 00:00:03.068028+00:00 10165.0 100\n2021-09-27 00:00:03.824183+00:00 10160.0 400\n2021-09-27 00:00:04.746295+00:00 10150.0 100\n2021-09-27 00:00:04.817684+00:00 10155.0 100"
+ },
+ "historical/store/to_csv": {
+  "Python": "ts_recv,ts_event,publisher_id,instrument_id,action,side,depth,price,size,flags,sequence,trade_id,symbol\n2021-09-27 00:00:00.072765+00:00,2021-09-27 00:00:00.072765+00:00,2,7203,T,A,0,10155.0,305500,0,8224,8224-0,7203\n2021-09-27 00:00:00.327866+00:00,2021-09-27 00:00:00.327866+00:00,2,7203,T,A,0,10155.0,400,0,8229,8229-0,7203\n2021-09-27 00:00:00.801729+00:00,2021-09-27 00:00:00.801729+00:00,2,7203,T,A,0,10155.0,700,0,"
+ },
+ "historical/store/to_df": {
+  "Python": "                                 symbol    price    size side\nts_recv\n2021-09-27 09:00:00.072765+09:00   7203  10155.0  305500    A\n2021-09-27 09:00:00.327866+09:00   7203  10155.0     400    A\n2021-09-27 09:00:00.801729+09:00   7203  10155.0     700    A\n2021-09-27 09:00:00.803944+09:00   7203  10160.0     100    B\n2021-09-27 09:00:00.817904+09:00   7203  10150.0     100    A\n2021-09-27 09:00:00.876274+09:00   7203  10160.0     100    B\n2021-09-27 09:00:01.671092+09:00   7203  10160.0     100    B\n2021-09-27 09:00:02.104003+09:00   7203  10160.0     100    B\n2021-09-27 09:00:02.168343+09:00   7203  10160.0    5400    B\n2021-09-27 09:00:02.176897+09:00   7203  10155.0     100    A\n2021-09-27 09:00:02.176897+09:00   7203  10150.0     400    A\n2021-09-27 09:00:02.183538+09:00   7203  10155.0     100    A\n2021-09-27 09:00:02.186961+09:00   7203  10160.0     100    B\n2021-09-27 09:00:03.038753+09:00   7203  10160.0     100    B\n2021-09-27 09:00:03.038753+09:00   7203  10165.0     100    B\n2021-09-27 09:00:03.068028+09:00   7203  10160.0     100    B\n2021-09-27 09:00:03.068028+09:00   7203  10165.0     100    B\n2021-09-27 09:00:03.824183+09:00   7203  10160.0     400    B\n2021-09-27 09:00:04.746295+09:00   7203  10150.0     100    A\n2021-09-27 09:00:04.817684+09:00   7203  10155.0     100    B"
+ },
+ "historical/store/to_file": {
+  "Python": "trades.parquet"
+ },
+ "historical/store/to_json": {
+  "Python": "{\n  \"ts_recv\": \"2021-09-27T00:00:00.072765000Z\",\n  \"ts_event\": \"2021-09-27T00:00:00.072765000Z\",\n  \"publisher_id\": 2,\n  \"instrument_id\": 7203,\n  \"action\": \"T\",\n  \"side\": \"A\",\n  \"depth\": 0,\n  \"price\": 10155.0,\n  \"size\": 305500,\n  \"flags\": 0,\n  \"sequence\": 8224,\n  \"trade_id\": \"8224-0\",\n  \"symbol\": \"7203\"\n}"
+ },
+ "historical/store/to_ndarray": {
+  "Python": "('ts_recv', 'ts_event', 'publisher_id', 'instrument_id', 'action', 'side')\n[10155. 10155. 10155. 10160. 10150.]"
+ },
+ "historical/store/to_parquet": {
+  "Python": "ts_recv: timestamp[ns, tz=UTC]\nts_event: timestamp[ns, tz=UTC]\npublisher_id: uint16\ninstrument_id: uint32\naction: string\nside: string\ndepth: uint8\nprice: double\nsize: uint64\nflags: uint8\nsequence: uint64\ntrade_id: string\nsymbol: string"
+ },
+ "historical/timeseries/get_range": {
+  "Python": "ts_event         2021-09-27 09:00:00.072765+09:00\npublisher_id                                    2\ninstrument_id                                7203\naction                                          T\nside                                            A\ndepth                                           0\nprice                                     10155.0\nsize                                       305500\nflags                                           0\nsequence                                     8224\ntrade_id                                   8224-0\nsymbol                                       7203\nName: 2021-09-27 09:00:00.072765+09:00, dtype: object",
+  "HTTP": "{\n  \"ts_recv\": \"2021-09-27T00:00:00.072765000Z\",\n  \"ts_event\": \"2021-09-27T00:00:00.072765000Z\",\n  \"publisher_id\": 2,\n  \"instrument_id\": 7203,\n  \"action\": \"T\",\n  \"side\": \"A\",\n  \"depth\": 0,\n  \"price\": 10155.0,\n  \"size\": 305500,\n  \"flags\": 0,\n  \"sequence\": 8224,\n  \"trade_id\": \"8224-0\",\n  \"symbol\": \"7203\"\n}",
+  "CLI": "\"ts_recv\",\"ts_event\",\"publisher_id\",\"instrument_id\",\"action\",\"side\",\"depth\",\"price\",\"size\",\"flags\",\"sequence\",\"trade_id\",\"symbol\"\n\"2021-09-27T00:00:00.072765000Z\",\"2021-09-27T00:00:00.072765000Z\",2,7203,\"T\",\"A\",0,10155,305500,0,8224,\"8224-0\",\"7203\""
+ },
+ "historical/timeseries/get_range_bars": {
+  "Python": "                           publisher_id  instrument_id     open     high      low    close  volume symbol\nts_event\n2021-09-27 09:00:00+09:00             2           6758  13190.0  13200.0  13070.0  13115.0  297600   6758\n2021-09-27 09:00:00+09:00             2           7203  10155.0  10175.0  10150.0  10175.0  342300   7203\n2021-09-27 09:01:00+09:00             2           6758  13105.0  13110.0  13050.0  13080.0   73400   6758\n2021-09-27 09:01:00+09:00             2           7203  10175.0  10230.0  10175.0  10220.0  177700   7203\n2021-09-27 09:02:00+09:00             2           6758  13085.0  13110.0  13075.0  13080.0   92200   6758\n2021-09-27 09:02:00+09:00             2           7203  10230.0  10245.0  10225.0  10240.0   49100   7203",
+  "HTTP": "\"ts_event\",\"publisher_id\",\"instrument_id\",\"open\",\"high\",\"low\",\"close\",\"volume\",\"symbol\"\n\"2021-09-27T00:00:00.000000000Z\",2,6758,13190,13200,13070,13115,297600,\"6758\"\n\"2021-09-27T00:00:00.000000000Z\",2,7203,10155,10175,10150,10175,342300,\"7203\"\n\"2021-09-27T00:01:00.000000000Z\",2,6758,13105,13110,13050,13080,73400,\"6758\"\n\"2021-09-27T00:01:00.000000000Z\",2,7203,10175,10230,10175,10220,177700,\"7203\"\n\"2021-09-27T00:02:00.000000000Z\",2,6758,13085,13110,13075,13080,92200,\"6758\"\n\"2021-09-27T00:02:00.000000000Z\",2,7203,10230,10245,10225,10240,49100,\"7203\"",
+  "CLI": "\"ts_event\",\"publisher_id\",\"instrument_id\",\"open\",\"high\",\"low\",\"close\",\"volume\",\"symbol\"\n\"2021-09-27T00:00:00.000000000Z\",2,6758,13190,13200,13070,13115,297600,\"6758\"\n\"2021-09-27T00:00:00.000000000Z\",2,7203,10155,10175,10150,10175,342300,\"7203\"\n\"2021-09-27T00:01:00.000000000Z\",2,6758,13105,13110,13050,13080,73400,\"6758\"\n\"2021-09-27T00:01:00.000000000Z\",2,7203,10175,10230,10175,10220,177700,\"7203\"\n\"2021-09-27T00:02:00.000000000Z\",2,6758,13085,13110,13075,13080,92200,\"6758\"\n\"2021-09-27T00:02:00.000000000Z\",2,7203,10230,10245,10225,10240,49100,\"7203\""
+ },
+ "python/connect": {
+  "Python": "Feed(status='running', seq=0)\n10150.0"
+ },
+ "python/consent": {
+  "Python": "{'policy_version': 7, 'enabled': True, 'default': True}",
+  "CLI": "{\n  \"policy_version\": 7,\n  \"enabled\": true,\n  \"default\": true\n}"
+ },
+ "python/feed_on_quote": {
+  "Python": "1796 [10150.0, 10150.0, 10155.0]"
+ },
+ "python/feed_quotes": {
+  "Python": "2021-09-27 08:59:59.993551+09:00 10150.0 0\n2021-09-27 09:00:00.008850+09:00 10150.0 0\n2021-09-27 09:00:00.019149+09:00 10155.0 0"
+ },
+ "python/feed_snapshot": {
+  "Python": "   code  indicative_price  indicative_volume\n0  6758           13200.0             245900\n1  7203           10150.0             304700"
+ },
+ "python/load": {
+  "Python": "20210927"
+ },
+ "python/market_frames": {
+  "Python": "   seq       type                             time  quote_count  trade_count\n0    0  bootstrap 2021-09-27 08:59:59.999955+09:00         4131            0\n1    1     quotes 2021-09-27 09:00:00.009934+09:00          588            0\n2    2     quotes 2021-09-27 09:00:00.019972+09:00          594            0\n3    3     quotes 2021-09-27 09:00:00.029661+09:00         1257            0\n4    4     quotes 2021-09-27 09:00:00.039928+09:00         1179            0"
+ },
+ "python/market_imbalances": {
+  "Python": "   code  indicative_price  market_order_imbalance\n0  8918              12.0               -11223800\n1  7647              27.0                 5779500\n2  8306             680.0                 4280100\n3  1689               2.0                -3462500\n4  9318               9.0                -1103500"
+ },
+ "python/market_snapshot": {
+  "Python": "      code  last_price    volume\n2525  7647        27.0  37356900\n1924  8918        12.0  15685600\n1283  6740        37.0   6820600\n3279  1689         2.0   4086700\n2141  9831       481.0   3210600"
+ },
+ "python/market_special_quotes": {
+  "Python": "   code side   price                            until  indicative_price  indicative_volume\n0  1433  buy  1484.0 2021-09-27 09:03:00.094915+09:00            1539.0              17800\n1  1605  buy   833.0 2021-09-27 09:03:00.095846+09:00             838.0            1369900\n2  1824  buy   892.0 2021-09-27 09:03:00.148947+09:00             895.0              43000\n3  1909  buy  2393.0 2021-09-27 09:03:00.072910+09:00            2423.0               8900\n4  2148  buy  2435.0 2021-09-27 09:03:00.075793+09:00            2464.0               9500"
+ },
+ "python/market_stocks": {
+  "Python": "   issue_id  code  tick_type  base_price  limit_up  limit_down  lot_size  issue_type    name\n0         0  1301          1      3065.0    3765.0      2365.0       100         111      極洋\n1         1  1332          1       659.0     759.0       559.0       100         111      日水\n2         2  1333          1      2684.0    3185.0      2184.0       100         111  マルハニチロ"
+ },
+ "python/market_summary": {
+  "Python": "source: historical_mock\ntrading_date: 20210927\nsecurities: 4131\nmarket_issue_count: 4131\nstart: 2021-09-27 08:59:59.999955+09:00\nend: 2021-09-27 09:02:59.999896+09:00\nbatches: 18002"
+ },
+ "python/market_trades": {
+  "Python": "   code                             time    price  quantity  side\n0  1570 2021-09-27 09:00:00.061377+09:00  17300.0    132271   buy\n1  1357 2021-09-27 09:00:00.061508+09:00    367.0   1315414  sell\n2  4098 2021-09-27 09:00:00.062243+09:00   1970.0      2200   NaN\n3  4176 2021-09-27 09:00:00.062262+09:00   1601.0      5700  sell\n4  7367 2021-09-27 09:00:00.062287+09:00   1101.0       200   NaN"
+ },
+ "python/record": {
+  "Python": "18002 40471726",
+  "CLI": "{\n  \"schema\": \"brisk-nautilus-parquet-v2\",\n  \"sha256\": \"a73270c2f03289e161f6a7be73b8e18635f9130c5ea2bfaa7e7312ab6eab8fad\",\n  \"bytes\": 40471961,\n  \"summary\": {\n    \"source\": \"historical_mock\",\n    \"trading_date\": \"20210927\",\n    \"first_source_time_us\": 32399999955,\n    \"last_source_time_us\": 32579999896,\n    \"codes\": [\n      \"1301\",\n      \"1305\",\n      \"1306\",\n      \"1308\",\n      \"1309\",\n      \"… 4126 more\"\n    ],\n    \"batches\": 18002,\n    \"quote_updates\": 735382,\n    \"expanded_bytes\": 965408433\n  }\n}"
+ },
+ "python/ticker_auction": {
+  "Python": "code: 7203\ntime: 2021-09-27 08:59:59.993551+09:00\nindicative_price: 10150.0\nindicative_volume: 304700\nindicative_imbalance_side: 1\nindicative_open_price: 10150.0\nmarket_buy_quantity: 201300\nmarket_sell_quantity: 105700\nbid_total_quantity: 1017700\nask_total_quantity: 932700\nmarket_order_imbalance: 95600"
+ },
+ "python/ticker_history": {
+  "Python": "                              time  last_price  volume  bid_price  ask_price\n0 2021-09-27 09:00:00.008850+09:00         NaN       0    10150.0    10155.0\n1 2021-09-27 09:00:00.019149+09:00         NaN       0    10155.0    10160.0\n2 2021-09-27 09:00:00.072765+09:00     10155.0  305500    10155.0    10160.0\n3 2021-09-27 09:00:00.213898+09:00     10155.0  305500    10155.0    10160.0\n4 2021-09-27 09:00:00.269884+09:00     10155.0  305500    10155.0    10160.0"
+ },
+ "python/ticker_info": {
+  "Python": "{'issue_id': 1424,\n 'code': '7203',\n 'tick_type': 3,\n 'base_price': 10100.0,\n 'limit_up': 13100.0,\n 'limit_down': 7100.0,\n 'lot_size': 100,\n 'issue_type': 111,\n 'name': 'トヨタ自'}"
+ },
+ "python/ticker_quote": {
+  "Python": "time 2021-09-27 08:59:59.993551+09:00\nindicative_price 10150.0\nindicative_volume 304700\nlast_price None\nbid_price 10145.0\nask_price 10150.0\nvolume 0"
+ },
+ "python/ticker_trades": {
+  "Python": "                              time    price  quantity  side\n0 2021-09-27 09:00:00.072765+09:00  10155.0    305500  sell\n1 2021-09-27 09:00:00.327866+09:00  10155.0       400  sell\n2 2021-09-27 09:00:00.801729+09:00  10155.0       700  sell\n3 2021-09-27 09:00:00.803944+09:00  10160.0       100   buy\n4 2021-09-27 09:00:00.817904+09:00  10150.0       100  sell\n5 2021-09-27 09:00:00.876274+09:00  10160.0       100   buy"
+ }
+}
