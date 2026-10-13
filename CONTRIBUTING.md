@@ -50,7 +50,10 @@ data is listed in `pyproject.toml`); CI installs the wheel outside the repositor
 and runs it. The cloud API's engine and service (`query_engine.py`, `query_service.py`)
 run only in the cloud, like `archive_service.py`, and are not in the wheel; its client is
 `briskapi/_historical.py`, and `tests/test_query.py` covers all three offline against the
-archive tests' in-memory S3 and DynamoDB. `PRIVACY.md` describes the shared OHLCV bars built
+archive tests' in-memory S3 and DynamoDB. Their record schemas are `briskapi/records.py`, which
+ships in the wheel because `briskapi.Live` projects the same records from a local feed;
+`tests/test_gateway.py` runs a session through a feed's gateway and checks every live schema
+against the cloud API's records for it. `PRIVACY.md` describes the shared OHLCV bars built
 from broker uploads, so a change to what they hold or who receives them (`covered` in
 `query_engine.py`) updates it like any change to what is collected. The BRiSK site client's tests (`tests/test_brisk.py`, `tools/brisk_mock/brisk.test.cjs`) use
 pybrisk's SBI sample payloads and a fake server. Unless a user

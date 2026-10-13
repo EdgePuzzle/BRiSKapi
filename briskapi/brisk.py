@@ -293,7 +293,7 @@ def _check_session(session: Session) -> None:
 
 
 def connect(codes=None, history=False, node='node', timeout=120, upload=None, trace_protocol=False, profile=None,
-            upload_market_data=None, output=None, on_day=None):
+            upload_market_data=None, output=None, on_day=None, gateway=False):
     """Experimental live feed from the logged-in site: its own WASM decoder under Node, never Chrome.
 
     Returns a briskapi.Feed (the default source for briskapi.Ticker and Market).
@@ -320,6 +320,7 @@ def connect(codes=None, history=False, node='node', timeout=120, upload=None, tr
     starts from a fresh snapshot. Each finished day is packaged on a worker thread, kept in `output`
     (a folder named SOURCE_YYYYMMDD_FROM-TO, FROM and TO its first and last source clock, JST HHMMSS)
     if given, and uploaded as chosen; `on_day(result)` is then called and `feed.recordings` lists it.
+    gateway=True also serves the feed to briskapi.Live on this computer, as dataset XTKS.BRISK.
     """
     from briskapi import cli, load
     from briskapi._live import Feed
@@ -335,8 +336,8 @@ def connect(codes=None, history=False, node='node', timeout=120, upload=None, tr
     env = {**os.environ, SITES[session.site].cookies_env: json.dumps(session.cookies), 'BRISK_SITE': session.site}
     if profile:
         env['BRISK_PROFILE'] = json.dumps(profile)
-    feed = Feed(command=command, env=env, history=history, upload=upload,
-                timing=SITES[session.site].source, upload_market_data=upload_market_data, output=output, on_day=on_day)
+    feed = Feed(command=command, env=env, history=history, upload=upload, timing=SITES[session.site].source,
+                upload_market_data=upload_market_data, output=output, on_day=on_day, gateway=gateway)
     try:
         return load(feed.ready(timeout))
     except BaseException:

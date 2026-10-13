@@ -397,7 +397,8 @@ def record_events(events, web=False, cache=None, codes=None, limit_frames=None, 
         subprocess.run([node, str(DECODER), *options], check=True, stdout=out)
 
 def live(args):
-    """Print each quote update as one JSON line; a complete session is uploaded per consent."""
+    """Print each quote update as one JSON line (unless --quiet), and serve the feed to briskapi.Live on this
+    computer (unless --no-gateway); a complete session is uploaded per consent."""
     from briskapi import brisk, connect  # The API package builds on this module.
     codes = args.codes.split(',') if args.codes else None
     if args.site:
@@ -408,15 +409,20 @@ def live(args):
         report = lambda day: print(json.dumps({'day': day}), file=sys.stderr, flush=True)  # noqa: E731
         if args.site:
             feed = brisk.connect(codes=codes, trace_protocol=args.trace_protocol, upload=args.upload,
-                                 upload_market_data=args.upload_market_data, output=args.output, on_day=report)
+                                 upload_market_data=args.upload_market_data, output=args.output, on_day=report,
+                                 gateway=args.gateway)
         else:
             feed = connect(web=args.web, cache=args.cache, codes=codes, speed=args.speed, limit_frames=args.limit_frames,
-                           upload=args.upload, output=args.output, on_day=report)
+                           upload=args.upload, output=args.output, on_day=report, gateway=args.gateway)
     for warning in caught:
         print(warning.message, file=sys.stderr)
+    if feed.gateway:
+        print(f'Serving {feed.gateway.dataset} to briskapi.Live() on this computer only '
+              f'(127.0.0.1:{feed.gateway.port}; --no-gateway turns this off)', file=sys.stderr, flush=True)
     try:
-        for quote in feed.quotes(raw=args.raw):
-            print(json.dumps(quote, ensure_ascii=False, default=lambda value: value.isoformat()), flush=True)
+        if not args.quiet:
+            for quote in feed.quotes(raw=args.raw):
+                print(json.dumps(quote, ensure_ascii=False, default=lambda value: value.isoformat()), flush=True)
         feed.wait()
     finally:
         feed.close()
@@ -483,6 +489,10 @@ def _main(argv):
     p.add_argument('--speed', type=float, default=1)
     p.add_argument('--limit-frames', type=int)
     p.add_argument('--raw', action='store_true', help='Vendor fields (price10, microseconds) instead of yen/ISO times')
+    p.add_argument('--quiet', action='store_true', help='Print no quote updates: only record, upload and serve briskapi.Live')
+    p.add_argument('--gateway', action=argparse.BooleanOptionalAction, default=True,
+                   help='Serve the feed to briskapi.Live() on this computer only (127.0.0.1, with a key in an owner-only '
+                        'file; default: yes)')
     p.add_argument('--output', type=Path, metavar='DIR',
                    help='Keep each finished day here as SOURCE_YYYYMMDD_FROM-TO (its first and last clock, JST HHMMSS)')
     group.add_argument('--sbi', action='store_const', dest='site', const='sbi',

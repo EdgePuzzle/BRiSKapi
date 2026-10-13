@@ -33,8 +33,8 @@ def ignore_exists(call, **kwargs):
             raise
 
 def package():
-    """The Lambda zip (both functions): the services, the query engine, the shared schema and Parquet format,
-    and reference fingerprints only."""
+    """The Lambda zip (both functions): the services, the query engine, the shared schema, Parquet format and
+    records, and reference fingerprints only."""
     code=io.BytesIO()
     with zipfile.ZipFile(code,'w',zipfile.ZIP_DEFLATED) as z:
         for name in ('archive_service.py','query_engine.py','query_service.py'):
@@ -43,6 +43,7 @@ def package():
         z.writestr('briskapi/__init__.py','')
         z.write(ROOT/'briskapi/schema.py','briskapi/schema.py')
         z.write(ROOT/'briskapi/_parquet.py','briskapi/_parquet.py')
+        z.write(ROOT/'briskapi/records.py','briskapi/records.py')
         # Reference fingerprints verify demo/synthetic content; broker recordings are structurally checked.
         for path in sorted((ROOT/'briskapi/references').glob('*.json')):
             z.write(path,f'briskapi/references/{path.name}')

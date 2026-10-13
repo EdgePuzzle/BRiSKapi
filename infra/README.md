@@ -58,7 +58,7 @@ whole recording. Nothing is configured for this, and an owner's delete leaves th
 alone. The synthetic probe of `cloud_smoke.py` leaves its own copy under
 `reference/synthetic_test/` the same way. The deployment package (one zip, both functions) holds
 `archive_service.py`, `query_engine.py`, `query_service.py`, `briskapi/schema.py`,
-`briskapi/_parquet.py` and
+`briskapi/_parquet.py`, `briskapi/records.py` (the record schemas, shared with `briskapi.Live`) and
 `briskapi/references/*.json`, with an empty package init so the client API stays
 out of it. pyarrow and numpy come from a layer the deployer builds from their pinned
 manylinux arm64 wheels (`LAYER_REQUIREMENTS`; pip downloads them from PyPI) and

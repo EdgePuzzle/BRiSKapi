@@ -14,10 +14,13 @@ itself. For usage, see the [README](README.md).
 | Auction state | `rust/brisk_quote_ingest` | Optional Rust tools: `brisk_quote_ingest` validates batches, keeps per-security state and publishes latest-state files; `brisk_recording` reconstructs a saved recording. |
 | Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL serves each owner's uploads, listings, downloads, deletions and restores; S3-triggered ingest validates and stores and keeps each owner's OHLCV bars in step; DynamoDB holds quotas. |
 | Cloud API | `query_engine.py`, `query_service.py`, `briskapi/_historical.py` | A second Lambda function URL answers Databento-style queries over an owner's recordings and the demo's, with OHLCV bars built from every broker upload; `briskapi.Historical` and `brisk query` are its client. The engine and the service run only in the cloud and are not in the wheel. |
+| Records | `briskapi/records.py` | The Databento-style schemas (`FIELDS`) and the projections from a recording's tables to them, shared by the cloud API's engine and `briskapi.Live`, so a record is the same in history and live. |
+| Live gateway | `briskapi/_gateway.py` | A feed's server on 127.0.0.1 that hands its batches to `briskapi.Live` sessions on the same computer; `brisk live` runs one by default. |
 
 ```
 demo assets (HTTPS, pinned) ─► decoder.cjs ─┐
 SBI/e-shiten session ────────► brisk.cjs ───┴─► JSON batches ─┬─► briskapi.Feed: live state, callbacks, iterators
+                                                             │     └─► gateway (127.0.0.1) ─► briskapi.Live: Databento-style records
                                                              ├─► brisk live: JSON lines
                                                              └─► briskapi.record ─► Parquet recording (demo only)
 
@@ -141,8 +144,9 @@ bootstrap only after an end, and at it the feed's state resets (the quotes, and 
 A demo replay is one day; a broker's live host (see [Trading days](#trading-days)) goes
 on to the next.
 
-When uploads are enabled or `output` is given, the feed also writes each day to a
-temporary file as it arrives. At the day's end it hands the file to a worker thread (a
+When uploads are enabled, `output` is given or the feed has a gateway, the feed also writes
+each day to a temporary file as it arrives (a gateway replays from it; a day kept only for
+that is not packaged). At the day's end it hands the file to a worker thread (a
 `ThreadPoolExecutor` of one, so days finish in order) and reads on. The worker packages
 the day, keeps it in `output` as `SOURCE_YYYYMMDD_FROM-TO` (`schema.local_name`; FROM and
 TO are the day's first and last source clock, JST HHMMSS; a folder already there is left
@@ -163,6 +167,59 @@ reached its end is packaged, kept or uploaded. A day that is unfinished when the
 closes or fails is discarded, its temporary file with it: its market data is never kept
 or uploaded, and a broker feed closed on purpose uploads only that day's timing summary. `wait()` and
 `close()` return after the days already finished are kept and uploaded.
+
+## Live gateway
+
+A feed started with `gateway=True` (`brisk live` unless `--no-gateway`) serves its batches
+to `briskapi.Live` sessions in other processes on the same computer. Only the feed signs in
+to the broker; a session needs the gateway's key and nothing else.
+
+- **Reach.** `Gateway` listens on 127.0.0.1 (an ephemeral port) and writes its port and a
+  random key (`secrets.token_urlsafe(32)`) to `~/.config/brisk/gateway/DATASET.json`, created
+  owner-only (0600) and replaced atomically. `Live` reads that file. A session's first line
+  must carry the key (compared in constant time), the protocol version (1) and the gateway's
+  dataset, or it is answered with an error and closed. A file whose gateway no longer answers
+  (a killed feed) is replaced by the next one; while one answers, a second feed for the same
+  dataset serves nothing, with a warning. Closing the feed removes the file. A broker feed is
+  `XTKS.BRISK`, the demo `XTKS.BRISKDEMO`, as in the cloud API.
+- **Protocol.** Newline-delimited JSON. The session asks for symbols (or all), a replay and a
+  snapshot. The gateway answers `{"gateway": "session"}` with the day's bootstrap (its master,
+  without quotes and trades) and, if asked, each security's latest quote; then, if asked and
+  the day is running, the day so far; then `{"gateway": "live"}`; then each batch as it
+  arrives; and last `{"gateway": "closed", "status", "error"}` when the feed ends. Batches are
+  the decoder's own lines: unchanged for a session that asked for all symbols, and rewritten
+  with only its codes' master entries, quotes and trades (a batch left empty is skipped) for
+  one that named symbols.
+- **No batch missed or repeated.** `Feed._run` writes and flushes each line to the day's file,
+  applies it, then calls `Gateway.publish`, which updates the gateway's own bootstrap, latest
+  quotes and the file's length, and queues the batch for every session, all under one lock.
+  A new session takes its bootstrap, its snapshot and the file's length, opens the file and
+  registers under that lock, so its replay (the file up to that length, sent with `sendfile`)
+  and its queue meet exactly. At a day's end the gateway stops offering replays: the worker
+  packages and deletes the file, and a session already replaying holds it open.
+- **Slow sessions.** Each session has its own sending thread and queue. The feed never waits
+  for one: a session more than `MAX_BEHIND` (1 GiB) behind has its queue dropped, is sent an
+  error and is disconnected (after 10 seconds if it still reads nothing), so a stalled program
+  cannot slow the feed or its recording. At most 32 sessions at once.
+- **Records on the client.** `Live` projects each batch itself, so the feed process does no
+  work per session beyond queueing (and, for named symbols, rewriting) lines. It builds a
+  batch's depths and trades tables with `_parquet.stream_tables` (the recording's own row
+  encoding, in arrival order) and the day's equity table once, then applies
+  `briskapi.records`' projections: the same code the cloud API runs over stored tables, which
+  is why a live record equals the stored one. `ts_recv` is the batch's `received_unix_ms` for
+  `XTKS.BRISK` and `ts_event` for the demo, as in the cloud. Trade IDs (`FRAME-PLACE`) carry
+  each issue's last frame and place across batches (`Columns.trade_ids(carry)`), so a replay
+  from the day's start numbers them as the stored recording does. A session that named
+  symbols skips, unparsed, replayed lines that mention none of its codes. Records come per
+  batch, sorted within it as the cloud API sorts (`ts_event`, `instrument_id`, `sequence`);
+  across batches, in arrival order. `start` filters on `ts_event`; definitions (stamped at
+  JST midnight) are given at a session's start, or by a replayed bootstrap, and at each new
+  day. A snapshot is projected as a bootstrap batch (`seq` 0), so `mbp-10` flags it 32.
+- **Delivery.** Callbacks and streams run on the session's thread; a callback's exception goes
+  to its `exception_callback` or a warning. Iteration uses a bounded queue (10,000 records)
+  that blocks the session's reader, and through TCP the gateway's queue, never the feed.
+  `stop()` shuts the socket down. A session that loses its connection without the closing line
+  ends with an error, as does one whose feed failed.
 
 ## Timing reports
 
@@ -940,15 +997,16 @@ decided and the plan for later schemas are in [docs/cloud-api.md](docs/cloud-api
 in the [README](README.md).
 
 - `query_engine.py` reads the archive bucket (through `Bucket`, a boto3-style client) and
-  turns recordings into records and bars.
+  turns recordings into records (with `briskapi/records.py`, which `briskapi.Live` shares)
+  and bars.
 - `query_service.py` is the Lambda function URL `brisk-recorder-query`: authentication,
   endpoints, quotas and delivery of results.
 - `briskapi/_historical.py` is the client (`Historical`, `DataStore` and `brisk query`).
 
 The engine and the service are server side, like `archive_service.py`, which imports the
 engine to keep owners' bars in step: the wheel ships only `briskapi/`, and `package()` in
-`deploy.py` puts them in the one zip both functions run. OHLCV bars therefore come only from
-the cloud.
+`deploy.py` puts them, with `briskapi/schema.py`, `_parquet.py` and `records.py`, in the one
+zip both functions run. OHLCV bars therefore come only from the cloud.
 
 ### Datasets and requests
 

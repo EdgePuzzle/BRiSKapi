@@ -1220,7 +1220,7 @@ def test_lambda_package_is_self_contained(tmp_path):
     deploy = importlib.util.module_from_spec(spec); spec.loader.exec_module(deploy)
     with zipfile.ZipFile(io.BytesIO(deploy.package())) as z:
         assert sorted(z.namelist()) == ['archive_service.py', 'briskapi/__init__.py', 'briskapi/_parquet.py',
-                                        'briskapi/references/historical_mock.json', 'briskapi/schema.py',
+                                        'briskapi/records.py', 'briskapi/references/historical_mock.json', 'briskapi/schema.py',
                                         'query_engine.py', 'query_service.py']
         z.extractall(tmp_path)
     check = ("import archive_service, query_service, briskapi, briskapi.schema as s, sys; "
