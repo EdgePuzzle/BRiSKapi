@@ -27,6 +27,9 @@ SBI, TSE or JPX.
 | BRiSK's own bars, margin, turnover, lists, events | `Ticker.candles()`, `.margin()`, `Market().turnover()` and the like | Your broker's BRiSK servers (needs a login) |
 | What you have uploaded | `briskapi.Archive()`, `brisk list`, `pull`, `delete`, `restore`, `prune` | Your private archive |
 
+Recording isn't on this list: `brisk live`, `brisk record` and their Python forms record as
+they run, and what they record is read through the calls above ([Recording](#recording)).
+
 `Ticker.history()` and `.trades()` never go to the network. They read the loaded recording
 or the live feed:
 - A recording gives exactly the span it covers.
@@ -55,6 +58,33 @@ include them. Optional prebuilt Rust tools (`brisk_quote_ingest`,
 `brisk_recording`) for Linux, macOS and Windows are attached to each
 [GitHub release](https://github.com/honvl/BRiSKapi/releases). To work from source,
 clone the repository and run `pip install -e '.[pandas]'`.
+
+## Recording
+
+Recording isn't a third API. The live calls record as they run, and `brisk live` and
+`brisk record` are their command-line form, with the same code, options and upload choice.
+
+| Command line | Python | Records | Kept on disk | Uploaded |
+| --- | --- | --- | --- | --- |
+| `brisk live --sbi` or `--site e-shiten` | `brisk.connect()` | Your broker's live feed, one recording per trading day, until you stop it | Each finished day, with `--output DIR` (`output=`) | Each finished day, unless you opt out |
+| `brisk live --web` | `briskapi.connect(web=True)` | The demo replay, printed as JSON lines | With `--output DIR` | If the replay completes |
+| `brisk record --web --output DIR` | `briskapi.record(DIR, web=True)` | The demo replay | Always, in `DIR` | If the replay completes |
+
+What you record is then read through the other two APIs:
+- **On your computer:** `briskapi.load("days/sbi_live_20261013_085800-153512")`, then `Ticker`
+  and `Market`, exactly as recorded; `brisk export` for NautilusTrader or JSONL; or the Parquet
+  tables themselves ([data format](https://github.com/honvl/BRiSKapi/blob/main/docs/data-format.md)).
+  `brisk pull` (`briskapi.pull()`) brings an uploaded recording back to disk.
+- **In the cloud:** `briskapi.Historical()` or `brisk query XTKS.BRISK` reads every broker day
+  you uploaded, merged across days, with OHLCV bars. Demo recordings aren't in `XTKS.BRISK`;
+  everyone can query the same demo as `XTKS.BRISKDEMO`.
+
+Without `--output`, `brisk live` keeps nothing on disk: each finished day goes to your
+[archive](#your-private-archive) and its local copy is removed. With uploads off as well
+(`--no-upload`, or `--no-upload-market-data` for a broker's market recording), that day isn't
+kept anywhere, so add `--output DIR` to keep it. A day is recorded once it ends: stopping
+partway keeps none of that day's market data (a broker session still uploads its timing
+summary unless you opt out).
 
 ## Live feed
 
@@ -140,7 +170,7 @@ market.watchlist()    # your saved codes
 
 feed = brisk.connect(codes=["7203"])        # live (experimental); each finished day uploaded unless you opt out
 toyota.quote()                              # same calls as any feed
-# upload_market_data=False keeps each day's market recording local; upload=False keeps all of it
+# upload_market_data=False uploads no market recordings, upload=False nothing; output="days" keeps each day
 ```
 
 A broker feed records continuously, one recording per trading day, and keeps running across
@@ -151,7 +181,8 @@ fresh snapshot. `output=DIR` (`brisk.connect(output=...)`, `briskapi.connect(out
 `brisk live --output DIR`) also keeps each finished day in DIR, in a folder named
 `SOURCE_YYYYMMDD_FROM-TO` (the day's first and last source clock, JST HHMMSS), such as
 `sbi_live_20261013_085800-153512`. `feed.recordings` lists the finished days (`trading_date`,
-`name`, `path`, `uploaded`, `timing_uploaded`), and `on_day=callback` is called for each. A
+`name`, `path`, `uploaded`, `timing_uploaded`), and `on_day=callback` is called for each.
+Without `output`, a finished day is kept only in your archive, and with uploads off, nowhere. A
 day still open when you stop the feed is not uploaded, only its timing summary.
 
 Results use the conventions below. Errors are `brisk.SessionExpiredError` (log in
@@ -341,10 +372,24 @@ brisk identity [--recovery-code | --recover CODE]  # your owner ID; its recovery
 Each command has `--help`. `pull` verifies everything before writing and never
 overwrites an existing folder.
 
+Each command is the command-line form of a Python call:
+
+| Command | Python |
+| --- | --- |
+| `brisk live --web` (or `--cache DIR`) | `briskapi.connect(web=True)` |
+| `brisk live --sbi`, `--site e-shiten` | `brisk.login()`, then `brisk.connect()` |
+| `brisk record` | `briskapi.record()` |
+| `brisk query` | `briskapi.Historical().timeseries.get_range()` |
+| `brisk list` (`--deleted`, `--timing`) | `briskapi.recordings()` (`Archive().deleted()`, `.timing()`) |
+| `brisk pull`, `upload`, `delete`, `restore`, `prune` | `briskapi.pull()`, `Archive().upload()`, `.delete()`, `.restore()`, `.prune()` |
+| `brisk consent` | `briskapi.consent()` |
+| `brisk enroll`, `login`, `forget` | `briskapi.passkey.enroll()`, `.login()`, `.forget()` |
+| `brisk export`, `brisk identity` | Command line only |
+
 `brisk live --sbi` and `--site e-shiten` run until you stop them, one recording per trading
 day. Unless you opt out, they upload each finished day's market recording and timing summary
-without asking; `--no-upload-market-data` keeps the recordings local and `--no-upload` keeps
-both. `brisk list --source sbi_live` (or `eshiten_live`) lists your broker recordings.
+without asking; `--no-upload-market-data` stops uploading the recordings and `--no-upload` both
+(add `--output DIR` to keep them on disk). `brisk list --source sbi_live` (or `eshiten_live`) lists your broker recordings.
 
 ## Your private archive
 
@@ -393,8 +438,8 @@ Python), until you decide with `brisk consent --accept` or `--revoke`
   diagnostics are never uploaded. The day's trades also give you OHLCV bars in the cloud,
   built from your own recordings only (see [below](#querying-your-archive-in-the-cloud)).
 - **Opting out:** `--no-upload` for one run (`upload=False` in Python);
-  `--no-upload-market-data` (`upload_market_data=False`) keeps only a broker capture's
-  market recording local; `BRISK_UPLOAD=0` for every run in that environment;
+  `--no-upload-market-data` (`upload_market_data=False`) uploads a broker session's timing
+  summary but not its market recording (`--output DIR` keeps that); `BRISK_UPLOAD=0` for every run in that environment;
   `brisk consent --revoke` for good.
 - **Deleting and restoring:** `brisk delete PREFIX` removes an upload from your archive, so
   you can no longer list or download it. For 30 days you can bring it back:

@@ -27,6 +27,9 @@ e支店（BRiSK Next）の BRiSK も利用できます（パスキーでのサ�
 | BRiSK 自身のローソク足、信用残、売買代金、リスト、イベント | `Ticker.candles()`、`.margin()`、`Market().turnover()` など | 証券会社の BRiSK のサーバー（ログインが必要） |
 | アップロードしたものの管理 | `briskapi.Archive()`、`brisk list`、`pull`、`delete`、`restore`、`prune` | 自分専用のアーカイブ |
 
+記録はこの表にありません。`brisk live`、`brisk record` とその Python 版が動きながら記録し、
+記録したものを上の呼び出しで読みます（[記録する](#記録する)）。
+
 `Ticker.history()` と `.trades()` はネットワークを使いません。読み込んだ記録かライブフィードを
 読みます。
 - 記録なら、その記録の範囲がそのまま返ります。
@@ -56,6 +59,33 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 [GitHub リリース](https://github.com/honvl/BRiSKapi/releases)に添付されています。
 ソースから使う場合は、リポジトリをクローンして `pip install -e '.[pandas]'` を
 実行してください。
+
+## 記録する
+
+記録は3つ目の API ではありません。ライブの呼び出しが動きながら記録し、`brisk live` と
+`brisk record` はそのコマンドライン版です（コード、オプション、アップロードの選択は同じです）。
+
+| コマンドライン | Python | 記録するもの | ディスクに残るもの | アップロード |
+| --- | --- | --- | --- | --- |
+| `brisk live --sbi` または `--site e-shiten` | `brisk.connect()` | 証券会社のライブフィード。止めるまで、取引日ごとに1つの記録 | `--output DIR`（`output=`）を指定すると、終わった日ごと | 終わった日ごと（オプトアウトした場合を除く） |
+| `brisk live --web` | `briskapi.connect(web=True)` | デモの再生（JSON の行として出力） | `--output DIR` を指定した場合 | 再生が最後まで終わった場合 |
+| `brisk record --web --output DIR` | `briskapi.record(DIR, web=True)` | デモの再生 | 常に `DIR` に | 再生が最後まで終わった場合 |
+
+記録したものは、残りの2つの API で読みます。
+- **手元で:** `briskapi.load("days/sbi_live_20261013_085800-153512")` のあと `Ticker` と `Market`
+  （記録したとおり）。NautilusTrader や JSONL には `brisk export`、または Parquet のテーブルを直接
+  読みます（[データ形式](docs/data-format.ja.md)）。アップロードした記録は `brisk pull`
+  （`briskapi.pull()`）でディスクに戻せます。
+- **クラウドで:** `briskapi.Historical()` または `brisk query XTKS.BRISK` は、アップロードした
+  証券会社の記録の全日を日をまたいでまとめて読み、OHLCV バーも返します。デモの記録は
+  `XTKS.BRISK` に入りません。同じデモは誰でも `XTKS.BRISKDEMO` として照会できます。
+
+`--output` を指定しないと、`brisk live` はディスクに何も残しません。終わった日は
+[自分のアーカイブ](#自分専用のアーカイブ)に送られ、手元のコピーは削除されます。さらにアップロードも
+オフにすると（`--no-upload`、または証券会社の市場データの記録なら `--no-upload-market-data`）、
+その日はどこにも残らないので、残すには `--output DIR` を付けてください。1日は終わった時点で記録に
+なります。途中で止めると、その日の市場データは残りません（証券会社のセッションは、オプトアウトしない
+限りタイミングの要約をアップロードします）。
 
 ## ライブフィード
 
@@ -143,7 +173,7 @@ market.watchlist()    # 保存済みの銘柄コード
 
 feed = brisk.connect(codes=["7203"])        # ライブ（試験的）。オプトアウトしない限り、終わった日ごとにアップロード
 toyota.quote()                              # 他のフィードと同じ呼び出し
-# upload_market_data=False で各日の市場データの記録を、upload=False ですべてをローカルに残す
+# upload_market_data=False で市場データの記録を、upload=False ですべてをアップロードしない（残すには output="days"）
 ```
 
 証券会社のフィードは連続して記録し、取引日ごとに1つの記録を作ります。日をまたいでも動き続けます。
@@ -154,6 +184,7 @@ toyota.quote()                              # 他のフィードと同じ呼び�
 終わった日ごとに、`SOURCE_YYYYMMDD_FROM-TO`（その日の最初と最後のソース時刻、日本時間 HHMMSS）という名前の
 フォルダー（例: `sbi_live_20261013_085800-153512`）が DIR に残ります。`feed.recordings` は終わった日の一覧
 （`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded`）で、`on_day=callback` はその日ごとに呼ばれます。
+`output` を指定しないと、終わった日は自分のアーカイブにだけ残り、アップロードもオフならどこにも残りません。
 フィードを止めた時点でまだ終わっていない日はアップロードされず、タイミングの要約だけがアップロードされます。
 
 結果は下記の規約に従います。エラーは `brisk.SessionExpiredError`（再ログインが
@@ -345,10 +376,24 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 各コマンドの詳細は `--help` で確認できます。`pull` はすべて検証してから
 書き込み、既存のフォルダーを上書きすることはありません。
 
+各コマンドは、Python の呼び出しのコマンドライン版です。
+
+| コマンド | Python |
+| --- | --- |
+| `brisk live --web`（または `--cache DIR`） | `briskapi.connect(web=True)` |
+| `brisk live --sbi`、`--site e-shiten` | `brisk.login()` のあと `brisk.connect()` |
+| `brisk record` | `briskapi.record()` |
+| `brisk query` | `briskapi.Historical().timeseries.get_range()` |
+| `brisk list`（`--deleted`、`--timing`） | `briskapi.recordings()`（`Archive().deleted()`、`.timing()`） |
+| `brisk pull`、`upload`、`delete`、`restore`、`prune` | `briskapi.pull()`、`Archive().upload()`、`.delete()`、`.restore()`、`.prune()` |
+| `brisk consent` | `briskapi.consent()` |
+| `brisk enroll`、`login`、`forget` | `briskapi.passkey.enroll()`、`.login()`、`.forget()` |
+| `brisk export`、`brisk identity` | コマンドラインのみ |
+
 `brisk live --sbi` と `--site e-shiten` は、止めるまで動き続け、取引日ごとに1つの記録を作ります。
 オプトアウトしない限り、終わった日ごとの市場データの記録とタイミングの要約を確認なしで
-アップロードします。`--no-upload-market-data` で記録だけを、`--no-upload` で両方をローカルに
-残せます。`brisk list --source sbi_live`（または `eshiten_live`）で自分の証券会社の記録を
+アップロードします。`--no-upload-market-data` で記録を、`--no-upload` で両方をアップロードしなくなります
+（ディスクに残すには `--output DIR`）。`brisk list --source sbi_live`（または `eshiten_live`）で自分の証券会社の記録を
 一覧できます。
 
 ## 自分専用のアーカイブ
@@ -397,8 +442,8 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
   ローカルの計測値）。Cookie、トークン、接続の診断情報はアップロードしません。その日の約定からは、
   クラウドで自分の記録だけから OHLCV バーが作られます（[下記](#クラウドでアーカイブを照会する)）。
 - **アップロードをやめる:** 1回だけなら `--no-upload`（Python では `upload=False`）。
-  `--no-upload-market-data`（`upload_market_data=False`）は証券会社の記録の市場データだけを
-  ローカルに残します。その環境のすべての実行では `BRISK_UPLOAD=0`、恒久的には
+  `--no-upload-market-data`（`upload_market_data=False`）は証券会社のセッションのタイミングの
+  要約だけをアップロードし、市場データの記録はアップロードしません（残すには `--output DIR`）。その環境のすべての実行では `BRISK_UPLOAD=0`、恒久的には
   `brisk consent --revoke`。
 - **削除と復元:** `brisk delete PREFIX` でアップロードを自分のアーカイブから削除し、一覧にも
   ダウンロードにも出なくなります。30日間は元に戻せます。`brisk list --deleted` で削除したもの

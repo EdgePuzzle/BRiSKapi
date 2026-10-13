@@ -37,6 +37,7 @@ SLUG = slugify(case='lower')
 SECTIONS = [
     ('guides/which-api.md', 'Which API should I use?', 'どの API を使うか'),
     ('guides/install.md', 'Install', 'インストール'),
+    ('guides/recording.md', 'Recording', '記録する'),
     ('guides/live-feed.md', 'Live feed', 'ライブフィード'),
     ('guides/recordings.md', 'Recordings', '記録データ'),
     ('guides/broker.md', 'Your broker\'s BRiSK', '証券会社の BRiSK'),
@@ -148,7 +149,8 @@ class Site:
 
     def add(self, page, text, source, japanese=False):
         meta, text = re.match(r'(---\n.*?\n---\n)?(.*)', LANGUAGE_LINE.sub('', text).lstrip('\n'), re.S).groups()
-        text = (meta or '') + markdown_lists(text)
+        text = markdown_lists(text)
+        text = (meta or '') + (join_japanese(text) if japanese else text)
         self.pages[page.replace('.md', '.ja.md') if japanese else page] = self.rewrite(text, source, page)
 
     def readmes(self):
@@ -212,6 +214,26 @@ def markdown_lists(text):
     return '\n'.join(out) + '\n'
 
 
+CJK = re.compile(r'[\u3000-\u30ff\u3400-\u9fff\uff00-\uffef]')
+BLOCK = re.compile(r'\s*(#|\||>|[-*] |\d+\. |<|```|~~~|---|===|$)')
+
+
+def join_japanese(text):
+    """Japanese wrapped across source lines, joined: a browser shows each line break in a paragraph as a space,
+    which Japanese doesn't put between words."""
+    out = []
+    for line, code in lines_outside_code(text):
+        previous = out[-1] if out else ''
+        if (not code and out and not BLOCK.match(line) and not BLOCK.match(previous) or
+                not code and out and line.startswith('  ') and not BLOCK.match(line.lstrip()) and previous.strip()) and \
+                previous.strip() and not previous.startswith(('    ', '\t')) and \
+                CJK.match(previous.rstrip()[-1]) and CJK.match(line.lstrip()[0]):
+            out[-1] = previous.rstrip() + line.lstrip()
+        else:
+            out.append(line)
+    return '\n'.join(out) + '\n'
+
+
 def english_anchors(translation, original):
     """The translation with the original's heading anchors too, so that a link to #local-and-cloud-names also
     works on the Japanese page (the English reference pages link there from the Japanese site)."""
@@ -233,6 +255,10 @@ def home(intro, japanese):
     cards = [('guides/which-api.md', 'Which API should I use?', 'どの API を使うか',
               'A live feed, a recording, the cloud API or your broker\'s BRiSK.', 'ライブフィード、記録、クラウド API、証券会社の BRiSK。'),
              ('guides/install.md', 'Install', 'インストール', 'pip, Node and the demo.', 'pip、Node、デモ。'),
+             ('guides/recording.md', 'Recording', '記録する', 'What brisk live and brisk record keep and upload, and what reads it.',
+              'brisk live と brisk record が何を残しアップロードし、何で読むか。'),
+             ('guides/cli.md', 'Command line', 'コマンドライン', 'Every brisk command, and the Python call it stands for.',
+              'brisk の全コマンドと、対応する Python の呼び出し。'),
              ('reference/historical/timeseries/get_range.md', 'Cloud API', 'クラウド API',
               'Databento-style queries over your uploads, and the public demo.', 'アップロードした記録と公開デモへの Databento 風の照会。'),
              ('reference/python/ticker_quote.md', 'Python API', 'Python API',
@@ -331,11 +357,11 @@ def nav_yaml():
     def item(title, page, depth):
         return '  ' * depth + f'- {json.dumps(title, ensure_ascii=False)}: {page}'
 
+    guides = {s[0].removeprefix('guides/').removesuffix('.md'): item(s[1], s[0], 1) for s in SECTIONS if s}
     lines = [item('Home', 'index.md', 0), '- "Getting started":']
-    lines += [item(s[1], s[0], 1) for s in SECTIONS[:6] if s]
-    lines += ['- "Your archive":', item(SECTIONS[8][1], SECTIONS[8][0], 1), item(SECTIONS[9][1], SECTIONS[9][0], 1)]
-    lines += ['- "Reference":', item(SECTIONS[7][1], SECTIONS[7][0], 1), item(SECTIONS[6][1], SECTIONS[6][0], 1),
-              item(DOCUMENTS[0][2], DOCUMENTS[0][1], 1)]
+    lines += [guides[name] for name in ('which-api', 'install', 'recording', 'live-feed', 'recordings', 'broker', 'passkey')]
+    lines += ['- "Your archive":', guides['archive'], guides['cloud']]
+    lines += ['- "Reference":', guides['cli'], guides['api-overview'], item(DOCUMENTS[0][2], DOCUMENTS[0][1], 1)]
     for title, methods in reference.REFERENCE:
         lines.append(f'- {json.dumps(title)}:')
         current = None
