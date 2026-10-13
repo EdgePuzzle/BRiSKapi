@@ -260,7 +260,7 @@ async function assertNoLeftovers(message = 'Chrome with the ephemeral profile is
 function leftovers() {
   const listing = process.platform === 'win32'
     ? execFileSync('powershell.exe', ['-NoProfile', '-Command', "Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }"], { maxBuffer: 64 << 20 }).toString()
-    : execFileSync('ps', ['-axo', 'command']).toString();
+    : execFileSync('ps', ['-axo', 'command'], { maxBuffer: 64 << 20 }).toString();
   return listing.split('\n').filter((line) => line.includes('--user-data-dir=') && line.includes('brisk-passkey-')).length;
 }
 
