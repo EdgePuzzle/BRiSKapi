@@ -16,6 +16,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -110,16 +111,23 @@ def download(cache: Path) -> None:
         print(f'{name}: {len(data):,} bytes', file=sys.stderr)
 
 
-def check(cache: Path, node: str = 'node') -> int:
+def check(cache: Path, node: str = 'node', demo_cache: Path | None = None) -> int:
     script = Path(__file__).with_name('sbi_master_layout.cjs')
-    return subprocess.run([node, '--permission', f'--allow-fs-read={cache.resolve()}', f'--allow-fs-read={ROOT / "briskapi"}',
-                           f'--allow-fs-read={script}', str(script), str(cache.resolve())], check=False).returncode
+    demo = [f'--allow-fs-read={demo_cache.resolve()}'] if demo_cache else []
+    return subprocess.run([node, '--permission', f'--allow-fs-read={cache.resolve()}', *demo, f'--allow-fs-read={ROOT / "briskapi"}',
+                           f'--allow-fs-read={script}', str(script), str(cache.resolve()),
+                           *([str(demo_cache.resolve())] if demo_cache else [])], check=False).returncode
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--cache', required=True, type=Path)
     parser.add_argument('--node', default='node')
+    parser.add_argument('--demo-cache', type=Path, default=os.environ.get('BRISK_MOCK_CACHE'),
+                        help="the demo's assets (download_mock.py; default $BRISK_MOCK_CACHE): also load the demo's snapshot")
     args = parser.parse_args()
     download(args.cache.expanduser())
-    sys.exit(check(args.cache.expanduser(), args.node))
+    demo = Path(args.demo_cache).expanduser() if args.demo_cache else None
+    if demo and not (demo / 'snapshot.dat').exists():
+        sys.exit(f'{demo} has no demo snapshot; run tools/brisk_mock/download_mock.py --cache {demo} first')
+    sys.exit(check(args.cache.expanduser(), args.node, demo))

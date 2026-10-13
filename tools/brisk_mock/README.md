@@ -80,8 +80,11 @@ also holds their expired session). It then runs the `Decoder` on them under Node
 permission model and prints a report: issues, record size, agreement with the master
 file, tick types, a limit change read back, and the catch-up with and without the
 schedule (price bars, issues advanced, stock views that read back the decoder's frame
-numbers, and whether briskapi's catch-up request is the vendor client's). Like the
-demo assets, these stay in your cache and out of Git. Needs Node 22.13 or later.
+numbers, and whether briskapi's catch-up request is the vendor client's). With the
+demo's assets (`--demo-cache`, default `$BRISK_MOCK_CACHE`) it also loads the 2021 demo's
+snapshot into SBI's decoder under 2021's hours and compares every quote with the demo
+decoder's. Like the demo assets, these stay in your cache and out of Git. Needs Node
+22.13 or later.
 
 A live Next adapter still needs an authenticated Next session to establish its
 actual bootstrap, master/snapshot, WebSocket handshake, keepalives and catch-up

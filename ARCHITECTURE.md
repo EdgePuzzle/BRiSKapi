@@ -204,10 +204,15 @@ take an eighth `_initialize` argument that the demo's doesn't: the session sched
 made by `_createSchedule` from the boot's `schedule_info` (seven session times in
 microseconds after midnight, then `sq_jump_interval`, in the boot's order). The host
 passes it whenever the decoder exports `_createSchedule`; the demo's build starts as
-before. Without it these decoders keep no price bars (`_ohlcLength` is 0), can't
-return a stock view, and refuse even the demo's snapshot with `deque` (fita.cc:1133);
-with it they keep 66 five-minute bars. Moving an open or close time by 30 minutes
-moves that count by 6, which pins the order of the times that set the bars.
+before. `_createSchedule` stores the eight values as integers and counts the bars as
+(morning close - open) / 5 min + (afternoon close - open) / 5 min; every stock keeps a
+pointer to the schedule, and a trade's time is turned into its bar through it. Without
+a schedule these decoders keep no price bars (`_ohlcLength` is 0), can't return a stock
+view, and fail on a snapshot with `deque` (fita.cc:1133). A snapshot's bars must match
+the schedule's count: anything else is refused with `Invalid unserialize`. The demo's
+snapshot (60 bars: TSE closed at 15:00 in 2021) loads into both 2026 builds only under
+2021's hours, and then every one of its 4,131 quotes equals the demo decoder's, field
+for field; under 2026's hours (66 bars) it is refused.
 
 The catch-up request is the vendor client's, as pybrisk's capture recorded it:
 `POST /api/stocks_update/<series>?date=<date>` with the JSON object
@@ -222,8 +227,9 @@ that capture's master, schedule and catch-up reply: the catch-up advances each o
 1,552 issues by the updates requested, briskapi's request for them is the one the
 vendor client sent, and 1,549 stock views read back the decoder's frame numbers (the
 other three, the busiest, trap in the decoder's own arithmetic with no snapshot under
-them); started without the schedule, none does (`tools/brisk_mock/sbi_master_layout.py`).
-The October build did the same in a one-off check. The demo
+them); started without the schedule, none does. Given the demo's assets, the same tool
+also loads the demo's snapshot as above (`tools/brisk_mock/sbi_master_layout.py`). The
+October build did the same in a one-off check. The demo
 decoder is tested against the vendor client's own indices on real data, and its
 heartbeat, ping reply and callbacks through its function table; the ping loop and
 the whole flow run offline against fake servers (plain, Engine.IO 3 and 4) using it.

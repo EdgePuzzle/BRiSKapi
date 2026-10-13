@@ -6,6 +6,9 @@
 // the decoder keeps its price bars, takes the catch-up reply and returns a readable view for every
 // caught-up issue; briskapi's catch-up request for those issues is the one the vendor client sent.
 // The same start without the schedule is reported for comparison (no price bars, no readable view).
+// With the demo's cache (download_mock.py) it also loads the 2021 demo's master and snapshot into this
+// 2026 decoder: a snapshot's price bars must match the schedule's, so the demo's (TSE closed at 15:00
+// then: 60 bars) loads only under 2021's hours, and every quote must equal the demo decoder's own.
 // Prints one JSON report and exits 1 on any failure.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -47,7 +50,45 @@ async function catchUp(assets, sent, reply, schedule) {
     views_read_wrong: mismatches, decoder_traps: traps, full_quotes: quotes, ...(viewError ? { first_view_error: viewError } : {}), ...(quoteError ? { first_quote_error: quoteError } : {}) };
 }
 
-async function main(cache) {
+// TSE's hours on the demo's trading date, 2021-09-27 (microseconds after midnight); there was no
+// pre-close period then, so it is set to the close. 9:00-11:30 and 12:30-15:00 give 60 five-minute bars.
+const H = 3600e6, MIN = 60e6;
+const DEMO_SCHEDULE = { morning_session_pre_open_time: 8 * H, morning_session_open_time: 9 * H,
+  morning_session_close_time: 11 * H + 30 * MIN, afternoon_session_pre_open_time: 12 * H + 5 * MIN,
+  afternoon_session_open_time: 12 * H + 30 * MIN, afternoon_session_pre_close_time: 15 * H,
+  afternoon_session_close_time: 15 * H, sq_jump_interval: 180 };
+
+// The demo's snapshot in this 2026 decoder under 2021's hours, quote for quote against the demo
+// decoder; and what the same snapshot gets under 2026's hours and with no schedule.
+async function demoSnapshot(decoderAssets, demoCache, schedule2026) {
+  const read = name => fs.readFileSync(path.join(demoCache, name));
+  const demo = { 'master.dat': read('master.dat'), 'snapshot.dat': read('snapshot.dat') };
+  const reference = await Decoder.create({ 'fita.js': read('fita.js'), 'fita.wasm': read('fita.wasm'), ...demo });
+  const attempt = async schedule => {
+    try {
+      return { decoder: await Decoder.create({ ...decoderAssets, ...demo }, { protocolVersion: 18000, check: checkAbi, schedule }) };
+    } catch (e) { return { error: e.message.replace(/ \(File:.*$/, '') }; }
+  };
+  const { decoder, error } = await attempt(DEMO_SCHEDULE);
+  const out = { issues: reference.master.length };
+  if (decoder) {
+    let same = 0, first = null;
+    for (let i = 0; i < reference.master.length; i++) {
+      const a = reference.quote(i), b = decoder.quote(i);
+      const differs = Object.keys(a).filter(k => k !== 'issue_status' && typeof a[k] !== 'object' && String(a[k]) !== String(b[k]));
+      if (!differs.length && reference.master[i].code === decoder.master[i].code) same++; else first = first || `${a.code}: ${differs.join(', ')}`;
+    }
+    Object.assign(out, { with_2021_hours: 'loaded', price_bars: decoder.ohlc, quotes_equal_to_the_demo_decoder: same,
+      ...(first ? { first_difference: first } : {}) });
+  } else {
+    out.with_2021_hours = error;
+  }
+  out.with_2026_hours = (await attempt(schedule2026)).error || 'loaded';
+  out.without_schedule = (await attempt(undefined)).error || 'loaded';
+  return out;
+}
+
+async function main(cache, demoCache) {
   const read = name => fs.readFileSync(path.join(cache, name));
   const assets = { 'fita.js': read('fita.js'), 'fita.wasm': read('fita.wasm'), 'master.dat': read('master.dat'),
     'snapshot.dat': Buffer.alloc(0) };
@@ -71,9 +112,11 @@ async function main(cache) {
   try { assert.deepStrictEqual(JSON.parse(CATCH_UP_FORMATS[DEFAULT_CATCH_UP](lagging).body), sent); } catch { requestMatches = false; }
   report.catch_up = { request_matches_the_vendor_client: requestMatches, with_schedule: await catchUp(assets, sent, reply, schedule),
     without_schedule: await catchUp(assets, sent, reply, undefined) };
+  if (demoCache) report.demo_snapshot = await demoSnapshot(assets, demoCache, schedule);
   console.log(JSON.stringify(report, null, 2));
+  const demoOk = !demoCache || report.demo_snapshot.quotes_equal_to_the_demo_decoder === report.demo_snapshot.issues;
   const scheduled = report.catch_up.with_schedule;
-  if (!report.limits_read_back || !requestMatches || scheduled.price_bars !== 66
+  if (!report.limits_read_back || !requestMatches || !demoOk || scheduled.price_bars !== 66
     || scheduled.advanced_by_the_requested_updates !== scheduled.issues || scheduled.views_read_wrong !== 0
     || scheduled.views_with_the_decoders_frame < 0.99 * scheduled.issues) {
     process.exitCode = 1;
@@ -81,5 +124,5 @@ async function main(cache) {
 }
 
 if (require.main === module) {
-  main(process.argv[2]).catch(error => { console.error(error.message); process.exitCode = 1; });
+  main(process.argv[2], process.argv[3]).catch(error => { console.error(error.message); process.exitCode = 1; });
 }

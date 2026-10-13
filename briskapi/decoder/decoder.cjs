@@ -92,16 +92,19 @@ const MASTER_LAYOUT = { 16000: { size: 144, shift: 0 }, 18000: { size: 148, shif
 
 // The 2026 decoders take an eighth _initialize argument: the session schedule, which the
 // vendor client builds with _createSchedule from the boot response's schedule_info. Without
-// it they keep no price bars (_ohlcLength 0) and their stock views can't be read. The
-// arguments are schedule_info's fields in the boot's own order; moving an open or close time by
-// 30 minutes moves the bar count by 6 (66 five-minute bars for 9:00-11:30 and 12:30-15:30).
+// it they keep no price bars (_ohlcLength 0), their stock views can't be read and a snapshot fails
+// ("deque"); a snapshot whose bar count differs from the schedule's is refused ("Invalid
+// unserialize"). The arguments are schedule_info's fields in the boot's own order, as integers in
+// microseconds after midnight; _createSchedule counts (morning close - open) / 5 min + (afternoon
+// close - open) / 5 min bars (66 for 9:00-11:30 and 12:30-15:30).
 const SCHEDULE_FIELDS = ['morning_session_pre_open_time', 'morning_session_open_time', 'morning_session_close_time',
   'afternoon_session_pre_open_time', 'afternoon_session_open_time', 'afternoon_session_pre_close_time',
   'afternoon_session_close_time', 'sq_jump_interval'];
 
 function scheduleArgs(schedule) {
   if (schedule === null || typeof schedule !== 'object') throw new Error('The boot response has no schedule_info, which this decoder needs');
-  const missing = SCHEDULE_FIELDS.filter(key => !Number.isFinite(schedule[key]));
+  // _createSchedule truncates each value to an unsigned integer: a negative or missing one traps the WASM.
+  const missing = SCHEDULE_FIELDS.filter(key => !Number.isFinite(schedule[key]) || schedule[key] < 0);
   if (missing.length) throw new Error(`The boot schedule_info has no usable ${missing.join(', ')}`);
   return SCHEDULE_FIELDS.map(key => schedule[key]);
 }
