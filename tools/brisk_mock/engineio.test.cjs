@@ -258,12 +258,12 @@ const us = (h, m = 0, s = 0) => 1e6 * (3600 * h + 60 * m + s);
 
 test('stale data: the decoder clock may lag the server by 90 s during trading hours, not more', () => {
   let clock = 0;
-  const stale = staleDataCheck({ date: '2021-09-27', now: () => clock });
+  const stale = staleDataCheck({ date: '2021-09-27', now: () => clock, name: 'e-shiten BRiSK Next' });
   assert.equal(stale.check(us(9, 58)), null, 'nothing is checked before the first heartbeat');
   stale.beat(jstNs(10));
   assert.equal(stale.check(us(9, 59)), null, '60 s behind is fine');
   assert.equal(stale.check(us(9, 58, 30)), null, 'exactly 90 s is fine');
-  assert.match(stale.check(us(9, 58)).message, /data is stale: the decoder's clock is 120s behind the server \(limit 90s\)/);
+  assert.match(stale.check(us(9, 58)).message, /^e-shiten BRiSK Next data is stale: the decoder's clock is 120s behind the server \(limit 90s\)/);
   assert.equal(stale.check(0), null, 'a decoder that has no time yet is not stale');
   clock += 100_000;                      // the server clock keeps running between heartbeats
   assert.match(stale.check(us(10)).message, /100s behind/);

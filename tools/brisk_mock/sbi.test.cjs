@@ -638,3 +638,7 @@ test('the ping loop runs through the real decoder: pings are forwarded, echoes b
     pingingSocket.last?.close(1000);                                   // a failed assertion must not leave a session running
   }
 });
+
+test('a live session allows the SBI app\'s 10 s between server heartbeats', () => {
+  assert.equal(require('../../briskapi/decoder/sbi.cjs').HEARTBEAT_MS, 10000);
+});

@@ -159,7 +159,7 @@ bundle) and in pybrisk's SBI research (`engineio.cjs` and `sbi.cjs`):
    frame and every other issue where it was; a reply pushed twice, or a repeated or
    stray update, stops the session (on SBI's March data the real reply passes and a
    second push of it is refused).
-4. The server heartbeat, decoded by the WASM, is watched: no beat for 7 s after the
+4. The server heartbeat, decoded by the WASM, is watched: no beat for 10 s after the
    first one is a connection failure, as in the vendor client. A second rule is the
    vendor's too: during trading hours (08:00-15:00 JST, not 11:30-12:10) the
    decoder's data time may lag the server clock, taken from the heartbeat, by at

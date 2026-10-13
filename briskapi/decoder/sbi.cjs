@@ -91,6 +91,10 @@ const DEFAULT_CATCH_UP = 'issue-lists';
 // the other headers; whether the subprotocol is all the server wants is not yet confirmed.
 const STREAM_PROTOCOL = 'flex';
 
+// The SBI app's connection check fails when no server heartbeat has come for 10 s
+// (heartbeatIntervalMilliSeconds: 1e4 in its configuration); heartbeats come every 5 s.
+const HEARTBEAT_MS = 10000;
+
 // Fetch the frames between the snapshot and the stream's first frame. Mirrors the vendor
 // client: up to five retries, but never for an expired session or a snapshot that is too old.
 async function fetchCatchUp(session, { app, issues, format = DEFAULT_CATCH_UP, retries = 5, backoffMs = n => 1000 + 1000 * n, trace }) {
@@ -187,7 +191,7 @@ function checkAbi(wasm) {
 }
 
 async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImpl = WebSocket, startTimeoutMs = 60000,
-  protocolVersion, profile: overrides = {}, trace = null, catchUp = null, heartbeatMs = 7000,
+  protocolVersion, profile: overrides = {}, trace = null, catchUp = null, heartbeatMs = HEARTBEAT_MS,
   staleSeconds = 90, connectTimeoutMs = 15000, catchUpBackoffMs, site: siteId = 'sbi' }) {
   const where = site(siteId);
   const profile = resolveProfile(overrides);
@@ -216,7 +220,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     settle({ code: -1, reason: '' });
   };
   let monitor = null, timer = null;  // started with the link and always stopped, so a failure cannot leave the process hanging
-  const stale = staleSeconds ? staleDataCheck({ date: app.date, thresholdUs: staleSeconds * 1e6 }) : null;
+  const stale = staleSeconds ? staleDataCheck({ date: app.date, thresholdUs: staleSeconds * 1e6, name: where.name }) : null;
   const decoder = await Decoder.create(assets, { protocolVersion, check: checkAbi,
     checkMaster: master => checkMaster(master, protocolVersion), schedule: app.schedule_info ?? null,
     boot: { exceptional_sq: app.exceptional_sq, base_prices: app.base_prices }, callbacks: {
@@ -369,6 +373,7 @@ async function main(argv, env = process.env) {
 }
 
 module.exports = { Session, SITES, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, main, fetchCatchUp, CATCH_UP_FORMATS, DEFAULT_CATCH_UP,
+  HEARTBEAT_MS,
   PROTOCOL_VERSION, REQUIRED };
 if (require.main === module) main(process.argv.slice(2)).catch(error => {
   console.error(error.message); process.exitCode = 1;

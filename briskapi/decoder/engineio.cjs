@@ -269,7 +269,7 @@ function heartbeatMonitor({ intervalMs = 7000, checkEveryMs = 1000, onFail, now 
 // 11:30-12:10 break) the decoder's data time must not lag the server clock by more than 90 s.
 // The server clock comes from the heartbeat; nothing is checked before the first one, or on a
 // day other than the market date.
-function staleDataCheck({ date, thresholdUs = 90_000_000, now = Date.now }) {
+function staleDataCheck({ date, thresholdUs = 90_000_000, now = Date.now, name = 'BRiSK' }) {
   let server = null;
   return {
     beat(ns) { server = { serverMs: Number(ns / 1_000_000n), localMs: now() }; },
@@ -281,7 +281,7 @@ function staleDataCheck({ date, thresholdUs = 90_000_000, now = Date.now }) {
       if (hour >= 15 || hour <= 7 || (hour === 11 && minute >= 30) || (hour === 12 && minute < 10)) return null;
       const lag = 1e6 * (60 * (60 * hour + minute) + jst.getUTCSeconds()) - decoderTimeUs;
       return lag > thresholdUs
-        ? new Error(`SBI BRiSK data is stale: the decoder's clock is ${Math.round(lag / 1e6)}s behind the server (limit ${thresholdUs / 1e6}s)`)
+        ? new Error(`${name} data is stale: the decoder's clock is ${Math.round(lag / 1e6)}s behind the server (limit ${thresholdUs / 1e6}s)`)
         : null;
     },
   };
