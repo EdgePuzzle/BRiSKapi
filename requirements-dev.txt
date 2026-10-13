@@ -2,4 +2,6 @@
 # The archive service (and its tests) run on boto3, which AWS Lambda provides.
 boto3>=1.41,<2
 pytest>=9,<10
+# The cloud API store's DataFrame conversions (briskapi[pandas]).
+pandas>=2
 pytest-cov>=7,<8

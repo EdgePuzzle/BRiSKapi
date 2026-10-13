@@ -55,6 +55,11 @@ class DataStore:
         return pq.read_table(io.BytesIO(self._data))
 
     def _frame(self, price_type='float', pretty_ts=True, map_symbols=True, tz='UTC'):
+        try:
+            import pandas  # noqa: F401 - Arrow's to_pandas needs it
+        except ImportError as e:
+            raise ImportError("Install pandas (pip install 'briskapi[pandas]') for to_df(), to_ndarray(), to_csv() "
+                              'and to_json(); to_parquet(), to_file(), replay() and iteration work without it') from e
         frame = self._arrow().to_pandas()
         if not map_symbols and 'symbol' in frame.columns:
             frame = frame.drop(columns='symbol')

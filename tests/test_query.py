@@ -364,6 +364,14 @@ def test_the_python_client(archive, monkeypatch, tmp_path):
     records = []
     data.replay(records.append)
     assert len(records) == 15 and records == list(data) and records[0]['symbol'] == '7203'
+    import builtins
+    real_import = builtins.__import__
+    monkeypatch.setattr(builtins, '__import__', lambda name, *a, **k: (_ for _ in ()).throw(ImportError(name))
+                        if name == 'pandas' else real_import(name, *a, **k))
+    with pytest.raises(ImportError, match=r"briskapi\[pandas\]"):
+        data.to_df()
+    assert len(list(data)) == 15                       # iteration needs no pandas
+    monkeypatch.setattr(builtins, '__import__', real_import)
     with pytest.raises(ValueError, match='stype_out'):
         client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', stype_out='raw_symbol')
     assert client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', schema='ohlcv-1m').to_df().index.name == 'ts_event'
