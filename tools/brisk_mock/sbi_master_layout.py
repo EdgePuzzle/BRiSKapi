@@ -4,8 +4,9 @@ layout, the session schedule and the catch-up.
 Downloads pinned copies from pybrisk's research (https://github.com/obichan117/pybrisk): SBI's decoder
 and, from pybrisk's capture of sbi.brisk.jp, only the master file it served, the boot's schedule_info,
 and the catch-up request's issue lists with the reply. The capture also holds pybrisk's own (expired)
-session, so those are taken out of it in memory and nothing else is kept. None of this belongs in Git:
-the cache is yours. Then runs briskapi's Decoder on them under Node's permission model (reads only, no
+session, so those are taken out of it in memory and nothing else is kept. It also downloads the public
+archive's copy of pybrisk's recording of SBI's market stream that day (the `sample_data` wire capture),
+pinned by its hash. None of this belongs in Git: the cache is yours. Then runs briskapi's Decoder on them under Node's permission model (reads only, no
 child processes) through sbi_master_layout.cjs.
 
     python tools/brisk_mock/sbi_master_layout.py --cache /tmp/sbi-master-cache
@@ -25,6 +26,11 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[2]
 PYBRISK = 'https://raw.githubusercontent.com/obichan117/pybrisk/ca4c77d1553dfd4debdad3de41dbe77ef66dc104/research/'
 CAPTURE = (PYBRISK + 'sbi.brisk.jp.har', '59cdf8088b7c0eeac0902d88dbb03f1657fb997667aa2c72ad7df92e0f2adc74')
+# The archive's legacy wire capture: pybrisk's 30,505 binary messages of SBI's stream, 2026-03-11
+# (content addressed; the same bytes as pybrisk's per-message files).
+STREAM = ('https://brisk-recordings-honvl-tokyo.s3.ap-northeast-1.amazonaws.com/archive/20260311/'
+          'cca870a51e7f96f16009c3709c3f597d314b22ed8922bb3ea7fa1acc67a0f85f/events.jsonl.gz',
+          'cca870a51e7f96f16009c3709c3f597d314b22ed8922bb3ea7fa1acc67a0f85f')
 DECODER = {
     'fita.wasm': (PYBRISK + 'ws_frames/fita.wasm', '5ee4f6010b825924da53aeb878616fc04370ff6ae875a031f82128c3ddcd6572'),
     'fita.js': (PYBRISK + 'ws_frames/fita_wasm.js', '7e0bec622c2526bbd7c2ee91e3e07452be04effcf0264a67aef5712ae6748b24'),
@@ -99,7 +105,8 @@ def download(cache: Path) -> None:
              'master.dat': (MASTER, lambda: master_from_capture(from_capture())),
              'stocks_update.dat': (CATCH_UP, lambda: catch_up_from_capture(from_capture())[1]),
              'stocks_update_request.json': (None, lambda: catch_up_from_capture(from_capture())[0]),
-             'schedule_info.json': (None, lambda: schedule_from_capture(from_capture()))}
+             'schedule_info.json': (None, lambda: schedule_from_capture(from_capture())),
+             'stream.jsonl.gz': (STREAM[1], lambda: fetch(*STREAM))}
     for name, (sha256, make) in files.items():
         dest = cache / name
         if dest.exists() and (sha256 is None or hashlib.sha256(dest.read_bytes()).hexdigest() == sha256):

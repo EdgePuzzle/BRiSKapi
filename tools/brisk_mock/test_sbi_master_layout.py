@@ -33,26 +33,27 @@ def capture(master, token='v2.local.SECRET', reply=b'catch-up reply'):
 
 
 def test_only_the_pinned_master_leaves_the_capture_and_files_are_cached(tmp_path, monkeypatch):
-    master, wasm, glue = b'm' * 180, b'\0asm', b'var CC;'
+    master, wasm, glue, stream = b'm' * 180, b'\0asm', b'var CC;', b'stream'
     har = capture(master)
-    files = {'har': har, 'wasm': wasm, 'js': glue}
+    files = {'har': har, 'wasm': wasm, 'js': glue, 'stream': stream}
     monkeypatch.setattr(module, 'MASTER', hashlib.sha256(master).hexdigest())
     monkeypatch.setattr(module, 'CATCH_UP', hashlib.sha256(b'catch-up reply').hexdigest())
     monkeypatch.setattr(module, 'CAPTURE', ('har', hashlib.sha256(har).hexdigest()))
+    monkeypatch.setattr(module, 'STREAM', ('stream', hashlib.sha256(stream).hexdigest()))
     monkeypatch.setattr(module, 'DECODER', {'fita.wasm': ('wasm', hashlib.sha256(wasm).hexdigest()),
                                             'fita.js': ('js', hashlib.sha256(glue).hexdigest())})
     calls = []
     monkeypatch.setattr(module, 'urlopen', lambda url, timeout: calls.append(url) or BytesIO(files[url]))
     module.download(tmp_path)
     assert sorted(p.name for p in tmp_path.iterdir()) == ['fita.js', 'fita.wasm', 'master.dat', 'schedule_info.json',
-                                                          'stocks_update.dat', 'stocks_update_request.json']
+                                                          'stocks_update.dat', 'stocks_update_request.json', 'stream.jsonl.gz']
     assert (tmp_path / 'master.dat').read_bytes() == master
     assert json.loads((tmp_path / 'schedule_info.json').read_text()) == SCHEDULE
     assert json.loads((tmp_path / 'stocks_update_request.json').read_text()) == SENT
     assert (tmp_path / 'stocks_update.dat').read_bytes() == b'catch-up reply'
     assert b'SECRET' not in b''.join(p.read_bytes() for p in tmp_path.iterdir()), 'the capture\'s session is never kept'
     module.download(tmp_path)
-    assert sorted(calls) == ['har', 'js', 'wasm']
+    assert sorted(calls) == ['har', 'js', 'stream', 'wasm']
     (tmp_path / 'fita.wasm').unlink()
     files['wasm'] = b'changed'
     with pytest.raises(ValueError, match='changed; re-audit'):

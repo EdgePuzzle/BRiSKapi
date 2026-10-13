@@ -6,11 +6,17 @@
 // the decoder keeps its price bars, takes the catch-up reply and returns a readable view for every
 // caught-up issue; briskapi's catch-up request for those issues is the one the vendor client sent.
 // The same start without the schedule is reported for comparison (no price bars, no readable view).
+// Then the recorded stream: it starts partway into its connection, without the opening message that
+// gives each issue's update number, so one is made in the demo's layout (0x88, a 16-bit issue count, a
+// 32-bit number per issue: here all 0). After it, every message must be accepted and many issues updated
+// (values are relative to the missing snapshot), and the decoder's replies to the server's pings must be
+// those pings echoed back unchanged, as the browser's were.
 // With the demo's cache (download_mock.py) it also loads the 2021 demo's master and snapshot into this
 // 2026 decoder: a snapshot's price bars must match the schedule's, so the demo's (TSE closed at 15:00
 // then: 60 bars) loads only under 2021's hours, and every quote must equal the demo decoder's own.
 // Prints one JSON report and exits 1 on any failure.
 const fs = require('node:fs');
+const zlib = require('node:zlib');
 const path = require('node:path');
 const assert = require('node:assert');
 const { Decoder, parseStockView } = require('../../briskapi/decoder/decoder.cjs');
@@ -48,6 +54,40 @@ async function catchUp(assets, sent, reply, schedule) {
   }
   return { price_bars: decoder.ohlc, issues: ids.length, advanced_by_the_requested_updates: advanced, views_with_the_decoders_frame: views,
     views_read_wrong: mismatches, decoder_traps: traps, full_quotes: quotes, ...(viewError ? { first_view_error: viewError } : {}), ...(quoteError ? { first_quote_error: quoteError } : {}) };
+}
+
+// The opening frame-number message in the demo's layout, which the 2026 builds also accept.
+function openingMessage(issues) {
+  const message = Buffer.alloc(3 + 4 * issues);
+  message[0] = 0x88;
+  message.writeUInt16LE(issues, 1);
+  return message;
+}
+
+// The recorded stream behind a made-up opening message.
+async function stream(assets, schedule, file) {
+  const messages = zlib.gunzipSync(file).toString('utf8').trim().split('\n').map(line => JSON.parse(line))
+    .filter(event => event.type === 'wire').map(event => Buffer.from(event.payload_base64, 'base64'));
+  const pongs = [];
+  let numbers = null, heartbeats = 0;
+  const decoder = await Decoder.create(assets, { protocolVersion: 18000, check: checkAbi, schedule, callbacks: {
+    frameNumbers: n => { numbers = n.length; }, heartbeat: () => heartbeats++, send: bytes => pongs.push(bytes.toString('hex')) } });
+  decoder.feed(openingMessage(decoder.master.length));
+  const opening = numbers === decoder.master.length && decoder.laggingIssues().length === 0;
+  decoder.begin();
+  const updated = new Set();
+  let accepted = 0, changes = 0, error = null;
+  for (const message of messages) {
+    try { decoder.feed(message); accepted++; } catch (e) { error = typeof e === 'number' ? `C++ exception at message ${accepted}` : e.message; break; }
+    const ids = decoder.changed();
+    changes += ids.length;
+    ids.forEach(id => updated.add(id));
+  }
+  // Server pings are the type-0 messages; each reply must be the ping it answers.
+  const pings = messages.filter(m => (m[0] & 15) === 0).map(m => m.toString('hex'));
+  const echoed = pongs.filter((pong, k) => pong === pings[k]).length;
+  return { messages: messages.length, opening_accepted: opening, accepted, ...(error ? { stopped: error } : {}), quote_changes: changes,
+    issues_updated: updated.size, server_pings: pings.length, replies: pongs.length, replies_echoing_their_ping: echoed, heartbeats };
 }
 
 // TSE's hours on the demo's trading date, 2021-09-27 (microseconds after midnight); there was no
@@ -112,11 +152,15 @@ async function main(cache, demoCache) {
   try { assert.deepStrictEqual(JSON.parse(CATCH_UP_FORMATS[DEFAULT_CATCH_UP](lagging).body), sent); } catch { requestMatches = false; }
   report.catch_up = { request_matches_the_vendor_client: requestMatches, with_schedule: await catchUp(assets, sent, reply, schedule),
     without_schedule: await catchUp(assets, sent, reply, undefined) };
+  report.stream = await stream(assets, schedule, read('stream.jsonl.gz'));
   if (demoCache) report.demo_snapshot = await demoSnapshot(assets, demoCache, schedule);
   console.log(JSON.stringify(report, null, 2));
   const demoOk = !demoCache || report.demo_snapshot.quotes_equal_to_the_demo_decoder === report.demo_snapshot.issues;
+  const s = report.stream;
+  const streamOk = s.opening_accepted && s.accepted === s.messages && s.issues_updated >= 1000 && s.heartbeats > 0
+    && s.replies > 0 && s.replies_echoing_their_ping === s.replies;
   const scheduled = report.catch_up.with_schedule;
-  if (!report.limits_read_back || !requestMatches || !demoOk || scheduled.price_bars !== 66
+  if (!report.limits_read_back || !requestMatches || !demoOk || !streamOk || scheduled.price_bars !== 66
     || scheduled.advanced_by_the_requested_updates !== scheduled.issues || scheduled.views_read_wrong !== 0
     || scheduled.views_with_the_decoders_frame < 0.99 * scheduled.issues) {
     process.exitCode = 1;

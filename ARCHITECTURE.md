@@ -246,7 +246,12 @@ pybrisk's SBI stream (2026-03-11, the `sample_data` wire capture) are all accept
 without an error; the decoder reads the server heartbeat (12:12:40-12:13:15 JST that
 day) and its first eight ping replies are byte for byte the browser's. The recording
 starts partway into the connection, without the opening frame-number message, so the
-decoder applies no stock updates from it and answers only those first eight pings.
+decoder applies no stock update from it on its own. Given one made in the demo's layout
+(`0x88`, a 16-bit issue count, a 32-bit update number per issue, here all 0), which the
+2026 builds accept, it applies 14,160 quote changes to 1,949 issues. The values are
+relative to the missing snapshot (Toyota's bid and ask read 0), and it still answers
+only the first eight of the 60 server pings, each echoing its ping. The offline check
+(`tools/brisk_mock/sbi_master_layout.py`) replays this too.
 (pybrisk's own `capture_summary.json` has wrong bytes in 2,478 of these messages; the
 archive's copy matches pybrisk's per-message files.)
 What is not verified against a live session: any of the above on SBI itself, the
