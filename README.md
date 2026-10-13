@@ -123,12 +123,12 @@ binary WebSocket, as in the Next client. Should the server open with Socket.IO
 instead, the host joins its `/v2/user` namespace with unverified parameters that
 `sbi.connect(profile={...})` can set. See what the server answers with
 `trace_protocol=True` (every token redacted); anything unexpected stops with an
-explicit error rather than a guess. Please report what you see. Sessions on
-2026-10-08 got through sign-in, the data endpoints and the decoder download, then
-stopped at the stock master. The master is now read with the current build's record
-layout, found with SBI's decoder of March 2026 and checked against the master file at
-every start; the steps after it (the stream and its first quotes) have not run against
-a live session yet. Your cookies
+explicit error rather than a guess. Please report what you see. Live sessions now
+get through sign-in, the data endpoints, the decoder download, the stock master and
+the snapshot (loaded with the session schedule). The WebSocket upgrade to
+`api.brisk.jp` was then answered with HTTP 502; those sessions didn't ask for the
+`flex` subprotocol the vendor client asks for, which this version does, and whether
+that is enough is not known yet. Your cookies
 go only to sbi.brisk.jp. SBI market data is shared only after an explicit choice for
 that capture; the Python API requires `share_market_data=True`. With contribution
 on, a timing summary is shared even when market-data sharing is declined.

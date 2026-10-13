@@ -139,8 +139,11 @@ bundle) and in pybrisk's SBI research (`engineio.cjs` and `sbi.cjs`):
    every 5 seconds and the browser echoes each one back unchanged. The vendor
    client has no ping timer of its own.
 2. The link detects the server's dialect from its first message. The Next client
-   uses a plain binary WebSocket, and SBI's stream (`wss://sbi.brisk.jp/realtime/0`) is
-   recorded as one too. If a server opens with an Engine.IO packet instead, the host
+   uses a plain binary WebSocket, and SBI's stream is recorded as one too. It is
+   `/realtime/0` on the API host the frontend boot names (`api.brisk.jp`); pybrisk's notes
+   give `sbi.brisk.jp`, but the boot in the same capture already named `api.brisk.jp`, and
+   the site host now answers `/realtime/0` with 404. The host asks for the WebSocket
+   subprotocol `flex`, as the vendor client does (`new WebSocket(url, "flex")`). If a server opens with an Engine.IO packet instead, the host
    falls back to joining a Socket.IO namespace (`/v2/user`) with a query, sending a
    `startLive` event and answering Engine.IO keepalives (clients ping on version 3,
    servers on version 4). That fallback comes from a separate Socket.IO connection in
@@ -348,8 +351,12 @@ check (`tools/brisk_mock/sbi_master_layout.py`) replays the stream both ways.
 archive's copy matches pybrisk's per-message files.)
 What is not verified against a live session: any of the above on SBI itself, the
 18000 master layout on today's build (found on SBI's of March 2026; each start checks it
-against the master file), loading a live snapshot, the stream's opening messages and
-whether it is plain binary as recorded. The Socket.IO fallback's parameters live in a
+against the master file), the stream's opening messages and whether it is plain binary
+as recorded. Live, the master and the snapshot load with the schedule; the WebSocket
+upgrade to `api.brisk.jp` was then answered with HTTP 502 (400 without the `session`
+parameter, 404 on the site host, and no HTTP/2 extended CONNECT) with every header
+variant tried, all without the `flex` subprotocol, which the host now asks for; whether
+that is all the server wants is not known yet. The Socket.IO fallback's parameters live in a
 profile (`BRISK_SBI_PROFILE`, or `sbi.connect(profile=...)`) and are unverified. The
 profile can also name another catch-up format (`catchUp`).
 `--trace-protocol` prints the connection with every token redacted, so a first
