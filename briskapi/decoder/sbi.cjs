@@ -73,23 +73,24 @@ class Session {
   }
 }
 
-// How the catch-up request is written. UNVERIFIED: the vendor client holds
-// {issueCodeIdx, from, to} for every issue whose snapshot is behind the stream, but the
-// body it sends is not public, so no format is used unless the profile names one.
+// How the catch-up request is written. The vendor client's, as pybrisk's public capture of
+// sbi.brisk.jp (March 2026) recorded it: one JSON object of three parallel lists, each issue's
+// update numbers from the snapshot's up to the stream's first. Its binary reply is pushed into
+// the decoder as it comes. A profile can still name another format (catchUp).
 const CATCH_UP_FORMATS = {
-  'json-vendor': issues => ({ contentType: 'application/json',
-    body: JSON.stringify(issues.map(i => ({ issueCodeIdx: i.issue_id, from: i.from, to: i.to }))) }),
+  'issue-lists': issues => ({ contentType: 'application/json',
+    body: JSON.stringify({ issue_ids: issues.map(i => i.issue_id), update_numbers_from: issues.map(i => i.from),
+      update_numbers_to: issues.map(i => i.to) }) }),
 };
+const DEFAULT_CATCH_UP = 'issue-lists';
 
 // Fetch the frames between the snapshot and the stream's first frame. Mirrors the vendor
 // client: up to five retries, but never for an expired session or a snapshot that is too old.
-async function fetchCatchUp(session, { app, issues, format, retries = 5, backoffMs = n => 1000 + 1000 * n, trace }) {
+async function fetchCatchUp(session, { app, issues, format = DEFAULT_CATCH_UP, retries = 5, backoffMs = n => 1000 + 1000 * n, trace }) {
   const build = CATCH_UP_FORMATS[format];
-  if (!format || !build) {
+  if (!build) {
     throw new Error(`The snapshot is ${issues.length} issues behind the stream, so it must be caught up with `
-      + 'POST /api/stocks_update, but the request body is not public'
-      + (format ? ` and "${format}" is not a known format (known: ${Object.keys(CATCH_UP_FORMATS).join(', ')})`
-        : '. Name a format in the profile (catchUp), for example {"catchUp":"json-vendor"}, and run with --trace-protocol'));
+      + `POST /api/stocks_update, but "${format}" is not a known format (known: ${Object.keys(CATCH_UP_FORMATS).join(', ')})`);
   }
   const { contentType, body } = build(issues);
   const path = `/api/stocks_update/${encodeURIComponent(app.series)}?date=${encodeURIComponent(app.date)}`;
@@ -210,7 +211,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   let monitor = null, timer = null;  // started with the link and always stopped, so a failure cannot leave the process hanging
   const stale = staleSeconds ? staleDataCheck({ date: app.date, thresholdUs: staleSeconds * 1e6 }) : null;
   const decoder = await Decoder.create(assets, { protocolVersion, check: checkAbi,
-    checkMaster: master => checkMaster(master, protocolVersion),
+    checkMaster: master => checkMaster(master, protocolVersion), schedule: app.schedule_info ?? null,
     boot: { exceptional_sq: app.exceptional_sq, base_prices: app.base_prices }, callbacks: {
     send: bytes => { if (link) link.send(bytes); },
     heartbeat: ns => { monitor?.beat(); stale?.beat(ns); },
@@ -218,7 +219,8 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     marketFinished: () => { marketFinished = true; },
   } });
   trace?.(`master: ${decoder.master.length} issues, ${decoder.layout.size}-byte records, agreeing with the master file`
-    + (decoder.boot.skipped_exceptional_sq ? `; special quotes not sent for ${decoder.boot.skipped_exceptional_sq.join(',')}` : ''));
+    + (decoder.boot.skipped_exceptional_sq ? `; special quotes not sent for ${decoder.boot.skipped_exceptional_sq.join(',')}` : '')
+    + (decoder.scheduled ? `; schedule applied (${decoder.ohlc} price bars)` : ''));
   const selected = new Set(codes);
   const master = decoder.master.filter(m => !selected.size || selected.has(m.code));
   const missing = codes.filter(code => !master.some(m => m.code === code));
@@ -229,7 +231,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     decoder: paths, decoder_sha256: crypto.createHash('sha256').update(assets['fita.wasm']).digest('hex'),
     setup_ms: performance.now() - began };
 
-  const requestCatchUp = catchUp || (issues => fetchCatchUp(session, { app, issues, format: profile.catchUp,
+  const requestCatchUp = catchUp || (issues => fetchCatchUp(session, { app, issues, format: profile.catchUp ?? DEFAULT_CATCH_UP,
     backoffMs: catchUpBackoffMs, trace }));
   const wsSession = wsUrl.searchParams.get('session');
   // Only a Socket.IO server needs these; a plain WebSocket never asks for the market token.
@@ -360,7 +362,7 @@ async function main(argv, env = process.env) {
     } });
 }
 
-module.exports = { Session, SITES, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, main, fetchCatchUp, CATCH_UP_FORMATS,
+module.exports = { Session, SITES, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, main, fetchCatchUp, CATCH_UP_FORMATS, DEFAULT_CATCH_UP,
   PROTOCOL_VERSION, REQUIRED };
 if (require.main === module) main(process.argv.slice(2)).catch(error => {
   console.error(error.message); process.exitCode = 1;

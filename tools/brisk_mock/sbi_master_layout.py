@@ -1,10 +1,12 @@
-"""Check the 18000 master record layout on SBI's decoder of March 2026, offline and without an account.
+"""Check briskapi on SBI's decoder of March 2026, offline and without an account: the 18000 master record
+layout, the session schedule and the catch-up.
 
 Downloads pinned copies from pybrisk's research (https://github.com/obichan117/pybrisk): SBI's decoder
-and, from pybrisk's capture of sbi.brisk.jp, only the master file it served. The capture also holds
-pybrisk's own (expired) session, so the master is taken out of it in memory and nothing else is kept.
-None of this belongs in Git: the cache is yours. Then runs briskapi's Decoder on them under Node's
-permission model (reads only, no child processes) through sbi_master_layout.cjs.
+and, from pybrisk's capture of sbi.brisk.jp, only the master file it served, the boot's schedule_info,
+and the catch-up request's issue lists with the reply. The capture also holds pybrisk's own (expired)
+session, so those are taken out of it in memory and nothing else is kept. None of this belongs in Git:
+the cache is yours. Then runs briskapi's Decoder on them under Node's permission model (reads only, no
+child processes) through sbi_master_layout.cjs.
 
     python tools/brisk_mock/sbi_master_layout.py --cache /tmp/sbi-master-cache
 """
@@ -28,6 +30,12 @@ DECODER = {
 }
 # sbi.brisk.jp names a master by its SHA-256: /api/master/<hash>.
 MASTER = 'f7b029c68758670afe9ac226db629fceab7e56076dcbe703e6d6891234945a72'
+# The binary reply to the capture's catch-up (POST /api/stocks_update/<series>).
+CATCH_UP = '9579d467868fe32345c1f4f1fb918f76cc9f1cb9f4c49133b1e7d257fe67da53'
+SCHEDULE_KEYS = ('morning_session_pre_open_time', 'morning_session_open_time', 'morning_session_close_time',
+                 'afternoon_session_pre_open_time', 'afternoon_session_open_time', 'afternoon_session_pre_close_time',
+                 'afternoon_session_close_time', 'sq_jump_interval')
+LISTS = ('issue_ids', 'update_numbers_from', 'update_numbers_to')
 
 
 def fetch(url: str, sha256: str) -> bytes:
@@ -47,14 +55,55 @@ def master_from_capture(capture: bytes) -> bytes:
     raise ValueError('The capture holds no master file with the pinned hash')
 
 
+def _entries(capture: bytes, path: str):
+    for entry in json.loads(capture)['log']['entries']:
+        if path in entry['request']['url'].split('?')[0]:
+            yield entry
+
+
+def schedule_from_capture(capture: bytes) -> bytes:
+    """Only schedule_info from the app boot (the rest of it names the session)."""
+    for entry in _entries(capture, '/api/app/boot'):
+        schedule = json.loads(entry['response']['content'].get('text') or '{}').get('schedule_info')
+        if isinstance(schedule, dict) and all(isinstance(schedule.get(key), (int, float)) for key in SCHEDULE_KEYS):
+            return json.dumps({key: schedule[key] for key in SCHEDULE_KEYS}).encode()
+    raise ValueError('The capture holds no app boot with a complete schedule_info')
+
+
+def catch_up_from_capture(capture: bytes) -> tuple[bytes, bytes]:
+    """The catch-up request's three issue lists and its pinned binary reply."""
+    for entry in _entries(capture, '/api/stocks_update/'):
+        content = entry['response']['content']
+        reply = base64.b64decode(content.get('text') or '') if content.get('encoding') == 'base64' else b''
+        if hashlib.sha256(reply).hexdigest() != CATCH_UP:
+            continue
+        sent = json.loads((entry['request'].get('postData') or {}).get('text') or '{}')
+        if not all(isinstance(sent.get(key), list) and len(sent[key]) == len(sent['issue_ids']) for key in LISTS):
+            raise ValueError('The capture\'s catch-up request is not three issue lists of one length')
+        return json.dumps({key: sent[key] for key in LISTS}).encode(), reply
+    raise ValueError('The capture holds no catch-up reply with the pinned hash')
+
+
 def download(cache: Path) -> None:
     cache.mkdir(parents=True, exist_ok=True)
-    wanted = {**{name: sha for name, (_, sha) in DECODER.items()}, 'master.dat': MASTER}
-    for name, sha256 in wanted.items():
+    capture = None
+
+    def from_capture() -> bytes:
+        nonlocal capture
+        capture = capture or fetch(*CAPTURE)
+        return capture
+
+    # Files with a pin are re-checked; the two small JSON files are derived from the pinned capture.
+    files = {**{name: (sha, lambda url=url, sha=sha: fetch(url, sha)) for name, (url, sha) in DECODER.items()},
+             'master.dat': (MASTER, lambda: master_from_capture(from_capture())),
+             'stocks_update.dat': (CATCH_UP, lambda: catch_up_from_capture(from_capture())[1]),
+             'stocks_update_request.json': (None, lambda: catch_up_from_capture(from_capture())[0]),
+             'schedule_info.json': (None, lambda: schedule_from_capture(from_capture()))}
+    for name, (sha256, make) in files.items():
         dest = cache / name
-        if dest.exists() and hashlib.sha256(dest.read_bytes()).hexdigest() == sha256:
+        if dest.exists() and (sha256 is None or hashlib.sha256(dest.read_bytes()).hexdigest() == sha256):
             continue
-        data = master_from_capture(fetch(*CAPTURE)) if name == 'master.dat' else fetch(*DECODER[name])
+        data = make()
         temp = dest.with_suffix(dest.suffix + '.tmp')
         temp.write_bytes(data)
         temp.replace(dest)

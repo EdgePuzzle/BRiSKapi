@@ -223,7 +223,7 @@ def test_protocol_options_reach_the_host_without_putting_the_profile_in_argv(tmp
         f"for (const b of {json.dumps(sbi_session())}) console.log(JSON.stringify(b));\n")
     monkeypatch.setattr(sbi, 'DECODER', script)
     sbi.login({'session_bfaf77a2': 'v'})
-    profile = {'connectQuery': {'_v': 'build-9'}, 'catchUp': 'json-vendor'}
+    profile = {'connectQuery': {'_v': 'build-9'}, 'catchUp': 'issue-lists'}
     sbi.connect(codes=['7203'], trace_protocol=True, profile=profile).wait()
     seen = json.loads(capfd.readouterr().err.strip())
     assert seen['argv'] == ['--codes', '7203', '--trace-protocol']

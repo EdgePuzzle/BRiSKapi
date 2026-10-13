@@ -66,18 +66,22 @@ downloads SBI's decoder, master and snapshot, opens the WebSocket itself and run
 the same Node `Decoder` as this demo host (protocol version 18000 for SBI). It is
 experimental and has not been validated against a live SBI session.
 
-Its 18000 master record layout can be checked offline, without an account:
+Its 18000 master record layout, the session schedule and the catch-up can be checked
+offline, without an account:
 
 ```sh
 .venv/bin/python tools/brisk_mock/sbi_master_layout.py --cache /tmp/sbi-master-cache
 ```
 
-This downloads pinned copies of SBI's decoder of March 2026 and the master file it
-served from pybrisk's research (only the master is taken out of pybrisk's capture,
-which also holds their expired session), then runs the `Decoder` on them under
-Node's permission model and prints a report: issues, record size, agreement with the
-master file, tick types and a limit change read back. Like the demo assets, these
-stay in your cache and out of Git. Needs Node 22.13 or later.
+This downloads pinned copies of SBI's decoder of March 2026 and, from pybrisk's
+capture of sbi.brisk.jp, the master file, the boot's `schedule_info` and the catch-up
+request's issue lists with its reply (only these are taken out of the capture, which
+also holds their expired session). It then runs the `Decoder` on them under Node's
+permission model and prints a report: issues, record size, agreement with the master
+file, tick types, a limit change read back, and the catch-up with and without the
+schedule (price bars, issues advanced, stock views that read back the decoder's frame
+numbers, and whether briskapi's catch-up request is the vendor client's). Like the
+demo assets, these stay in your cache and out of Git. Needs Node 22.13 or later.
 
 A live Next adapter still needs an authenticated Next session to establish its
 actual bootstrap, master/snapshot, WebSocket handshake, keepalives and catch-up

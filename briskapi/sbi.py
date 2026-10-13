@@ -298,10 +298,11 @@ def connect(codes=None, history=False, node='node', timeout=120, contribute=None
     The host follows the vendor client's connect sequence: it feeds the WASM from the
     first frame, catches the snapshot up to the stream, forwards the WASM's pings and
     watches the server heartbeat. It also joins SBI's Socket.IO namespace when the
-    server speaks it. Three wire details are not public, so they can be set with
-    `profile` (a dict, sent through the environment because it may name tokens):
+    server speaks it. Two wire details are not public, so they can be set with
+    `profile` (a dict, sent through the environment because it may name tokens), as can
+    the catch-up request's format (by default the vendor client's, "issue-lists"):
 
-        profile={"connectQuery": {"_v": "..."}, "startLive": {...}, "catchUp": "json-vendor"}
+        profile={"connectQuery": {"_v": "..."}, "startLive": {...}, "catchUp": "issue-lists"}
 
     `trace_protocol=True` prints the connection steps to stderr with every token
     redacted, to see what the server answers. The protocol has not been validated end to

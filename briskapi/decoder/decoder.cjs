@@ -90,6 +90,22 @@ function parseStockView(words, ohlc, shift) {
 // with the file on code, prices, lot size and issue type. Any other version is refused.
 const MASTER_LAYOUT = { 16000: { size: 144, shift: 0 }, 18000: { size: 148, shift: 4 } };
 
+// The 2026 decoders take an eighth _initialize argument: the session schedule, which the
+// vendor client builds with _createSchedule from the boot response's schedule_info. Without
+// it they keep no price bars (_ohlcLength 0) and their stock views can't be read. The
+// arguments are schedule_info's fields in the boot's own order; moving an open or close time by
+// 30 minutes moves the bar count by 6 (66 five-minute bars for 9:00-11:30 and 12:30-15:30).
+const SCHEDULE_FIELDS = ['morning_session_pre_open_time', 'morning_session_open_time', 'morning_session_close_time',
+  'afternoon_session_pre_open_time', 'afternoon_session_open_time', 'afternoon_session_pre_close_time',
+  'afternoon_session_close_time', 'sq_jump_interval'];
+
+function scheduleArgs(schedule) {
+  if (schedule === null || typeof schedule !== 'object') throw new Error('The boot response has no schedule_info, which this decoder needs');
+  const missing = SCHEDULE_FIELDS.filter(key => !Number.isFinite(schedule[key]));
+  if (missing.length) throw new Error(`The boot schedule_info has no usable ${missing.join(', ')}`);
+  return SCHEDULE_FIELDS.map(key => schedule[key]);
+}
+
 function masterLayout(protocolVersion) {
   if (!(protocolVersion in MASTER_LAYOUT)) {
     throw new Error(`Master layout for protocol ${protocolVersion} is not known (known: ${Object.keys(MASTER_LAYOUT).join(', ')})`);
@@ -170,7 +186,9 @@ class Decoder {
     return new Decoder(wasm, assets, options);
   }
 
-  constructor(w, assets, { protocolVersion = manifest.protocol_version, callbacks = {}, boot = {}, checkMaster } = {}) {
+  // options.schedule: the boot's schedule_info. Used only by decoders that take one (the 2026
+  //   builds export _createSchedule; the 2021 demo's doesn't); null there is an error.
+  constructor(w, assets, { protocolVersion = manifest.protocol_version, callbacks = {}, boot = {}, checkMaster, schedule } = {}) {
     this.w = w;
     this.layoutShift = stockViewShift(protocolVersion);
     this.layout = masterLayout(protocolVersion);
@@ -178,6 +196,9 @@ class Decoder {
     this.authError = false;
     this.marketFinished = false;
     this.initialFrames = null;
+    // A schedule is created before _initialize copies it in; the 2021 demo's build takes none.
+    this.scheduled = typeof w._createSchedule === 'function' && schedule !== undefined;
+    const scheduleArg = this.scheduled ? [w._createSchedule(...scheduleArgs(schedule))] : [];
     this.lastHeartbeat = null;
     // The signatures are the vendor client's own (an indirect call with another type traps).
     const add = (fn, sig) => w.addFunction(fn, sig);
@@ -199,7 +220,7 @@ class Decoder {
       add((id, issueIndex) => { this.basePriceQueue.add(issueIndex); callbacks.basePrice?.(issueIndex); }, 'vii'),
       add(() => { this.authError = true; callbacks.authError?.(); }, 'vii'),
       add(() => { this.marketFinished = true; callbacks.marketFinished?.(); }, 'vi'),
-      protocolVersion);
+      protocolVersion, ...scheduleArg);
     this.buf = w._malloc(BUFFER);
     this.aux = w._malloc(64);
     this.push(assets['master.dat']);
@@ -455,7 +476,7 @@ async function main(argv) {
     } });
 }
 
-module.exports = { Decoder, QuoteHistory, frames, u64, looseU64, readMasterRecord, masterLayout, MASTER_LAYOUT,
+module.exports = { Decoder, QuoteHistory, frames, u64, looseU64, readMasterRecord, masterLayout, MASTER_LAYOUT, SCHEDULE_FIELDS, scheduleArgs,
   parseMasterFile, checkMasterFile, loadAssets, replay, main, parseStockView, stockViewShift, STOCK_VIEW_SHIFT };
 if (require.main === module) main(process.argv.slice(2)).catch(error => {
   console.error(error.message); process.exitCode = 1;

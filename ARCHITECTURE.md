@@ -199,18 +199,40 @@ file's differ (the decoder keeps `Ｕ－ＮＥＸＴ` whole but drops a market p
 does not look like a market (security codes, base prices inside their limits, plausible
 lot sizes, names).
 
+The 2026 decoders (SBI's of March 2026, and the build both sites served from October)
+take an eighth `_initialize` argument that the demo's doesn't: the session schedule,
+made by `_createSchedule` from the boot's `schedule_info` (seven session times in
+microseconds after midnight, then `sq_jump_interval`, in the boot's order). The host
+passes it whenever the decoder exports `_createSchedule`; the demo's build starts as
+before. Without it these decoders keep no price bars (`_ohlcLength` is 0), can't
+return a stock view, and refuse even the demo's snapshot with `deque` (fita.cc:1133);
+with it they keep 66 five-minute bars. Moving an open or close time by 30 minutes
+moves that count by 6, which pins the order of the times that set the bars.
+
+The catch-up request is the vendor client's, as pybrisk's capture recorded it:
+`POST /api/stocks_update/<series>?date=<date>` with the JSON object
+`{"issue_ids": [...], "update_numbers_from": [...], "update_numbers_to": [...]}`, one
+entry per issue whose snapshot is behind the stream. The binary reply is pushed into
+the decoder as it comes.
+
 What is verified: the decoder SBI served in pybrisk's March 2026 capture exports
 the demo's interface apart from `_getPortfolio` (so SBI quotes have no
-`issue_status`), and it initializes under Node with protocol 18000. The demo
+`issue_status`), and it initializes under Node with protocol 18000. Offline, it loads
+that capture's master, schedule and catch-up reply: the catch-up advances each of its
+1,552 issues by the updates requested, briskapi's request for them is the one the
+vendor client sent, and 1,549 stock views read back the decoder's frame numbers (the
+other three, the busiest, trap in the decoder's own arithmetic with no snapshot under
+them); started without the schedule, none does (`tools/brisk_mock/sbi_master_layout.py`).
+The October build did the same in a one-off check. The demo
 decoder is tested against the vendor client's own indices on real data, and its
 heartbeat, ping reply and callbacks through its function table; the ping loop and
 the whole flow run offline against fake servers (plain, Engine.IO 3 and 4) using it.
 What is not verified against a live session: any of the above on SBI itself, the
 18000 master layout on today's build (found on SBI's of March 2026; each start checks it
-against the master file), and three wire details that are not public: the Socket.IO
-connect parameters, the `startLive` payload and the catch-up request body. They live in a profile
+against the master file), loading a live snapshot, and two wire details that are not
+public: the Socket.IO connect parameters and the `startLive` payload. They live in a profile
 (`BRISK_SBI_PROFILE`, or `sbi.connect(profile=...)`); the defaults are labelled
-unverified, and the catch-up request is used only when the profile names a format.
+unverified. The profile can also name another catch-up format (`catchUp`).
 `--trace-protocol` prints the connection with every token redacted, so a first
 attempt shows what the server answers. Anything wrong ends in an explicit error (a
 stream that never initializes, a refused namespace, a rejected catch-up, an

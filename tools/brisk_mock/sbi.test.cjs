@@ -307,19 +307,18 @@ test('a snapshot behind the stream is caught up while frames keep arriving', { s
   } finally { restore(); Decoder.prototype.feed = realFeed; }
 });
 
-test('a catch-up that does not close the gap, or has no known format, fails loudly', { skip: !cache }, async () => {
+test('a catch-up that does not close the gap, or names an unknown format, fails loudly', { skip: !cache }, async () => {
   const { files, chunks } = demo();
   const run = options => live({ cookies: { s: 'v' }, emit: async () => {}, protocolVersion: 16000,
     fetchImpl: server(files).fetchImpl, WebSocketImpl: socketFrom(chunks), catchUpBackoffMs: () => 1, ...options });
   let restore = snapshotBehind(5, () => false);
   try {
     await assert.rejects(run({ catchUp: async () => Buffer.alloc(0) }), /Catch-up left \d+ issues behind the stream/);
-    await assert.rejects(run({}), /request body is not public\. Name a format in the profile \(catchUp\)/);
-    await assert.rejects(run({ profile: { catchUp: 'guess' } }), /"guess" is not a known format \(known: json-vendor\)/);
+    await assert.rejects(run({ profile: { catchUp: 'guess' } }), /"guess" is not a known format \(known: issue-lists\)/);
   } finally { restore(); }
 });
 
-test('the json-vendor catch-up request, its retries and its refusals', { skip: !cache }, async () => {
+test('the catch-up request (the vendor client\'s issue lists, by default), its retries and its refusals', { skip: !cache }, async () => {
   const { files, chunks } = demo();
   let caught = false;
   const restore = snapshotBehind(3, () => caught);
@@ -335,7 +334,7 @@ test('the json-vendor catch-up request, its retries and its refusals', { skip: !
       caught = false; attempts.length = 0;
       const host = server(files, { '/api/stocks_update/0': respond(plan) });
       return live({ cookies: { session_x: 'v' }, emit: async () => {}, protocolVersion: 16000, fetchImpl: host.fetchImpl,
-        WebSocketImpl: socketFrom(chunks), profile: { catchUp: 'json-vendor' }, catchUpBackoffMs: () => 1 })
+        WebSocketImpl: socketFrom(chunks), catchUpBackoffMs: () => 1 })
         .then(summary => ({ summary, host }), error => ({ error, host }));
     };
     let result = await run([{ status: 500 }, { status: 502 }, 'ok']);
@@ -348,7 +347,13 @@ test('the json-vendor catch-up request, its retries and its refusals', { skip: !
     assert.equal(post.headers.authorization, 'Bearer token');
     assert.equal(post.headers.cookie, 'session_x=v');
     const body = JSON.parse(post.body);
-    assert.deepEqual(Object.keys(body[0]).sort(), ['from', 'issueCodeIdx', 'to']);
+    assert.deepEqual(Object.keys(body), ['issue_ids', 'update_numbers_from', 'update_numbers_to']);
+    // The decoder is held 3 updates behind on every issue that has any: one entry each, in three parallel lists.
+    assert.ok(body.issue_ids.length > 1000);
+    assert.equal(body.update_numbers_from.length, body.issue_ids.length);
+    assert.equal(body.update_numbers_to.length, body.issue_ids.length);
+    assert.ok(body.issue_ids.every((id, k) => Number.isInteger(id)
+      && body.update_numbers_to[k] - body.update_numbers_from[k] >= 1 && body.update_numbers_to[k] - body.update_numbers_from[k] <= 3));
     result = await run([{ status: 401 }]);
     assert.match(result.error.message, /session expired/);
     assert.equal(attempts.length, 1, 'an expired session is not retried');
@@ -356,7 +361,7 @@ test('the json-vendor catch-up request, its retries and its refusals', { skip: !
     assert.match(result.error.message, /snapshot is too old/);
     assert.equal(attempts.length, 1, 'a too-old snapshot is not retried');
     result = await run(Array(8).fill({ status: 500 }));
-    assert.match(result.error.message, /Catch-up failed: .*HTTP 500 \(the server rejected format "json-vendor"\)/);
+    assert.match(result.error.message, /Catch-up failed: .*HTTP 500 \(the server rejected format "issue-lists"\)/);
     assert.equal(attempts.length, 6, 'one try and five retries');
   } finally { restore(); }
 });
@@ -464,9 +469,17 @@ test('arguments and profile are validated before anything is fetched', async () 
   await assert.rejects(main([], { BRISK_SBI_COOKIES: cookies, BRISK_SBI_PROFILE: '{"nope":1}' }), /Unknown SBI profile keys: nope/);
 });
 
-test('fetchCatchUp names its own problem when no format is configured', async () => {
-  await assert.rejects(fetchCatchUp({}, { app: { series: 0, date: '2021-09-27' }, issues: [{ issue_id: 1, from: 1, to: 2 }] }),
-    /1 issues behind the stream.*POST \/api\/stocks_update.*not public/s);
+test('fetchCatchUp sends the vendor client\'s issue lists unless told otherwise, and names an unknown format', async () => {
+  const sent = [];
+  const session = { request: async (path, init) => { sent.push({ path, ...init }); return Buffer.from('reply'); } };
+  const issues = [{ issue_id: 0, from: 3678, to: 3680 }, { issue_id: 5, from: 8678, to: 8681 }];
+  const reply = await fetchCatchUp(session, { app: { series: 0, date: '2026-03-11' }, issues });
+  assert.equal(reply.toString(), 'reply');
+  assert.equal(sent[0].path, '/api/stocks_update/0?date=2026-03-11');
+  assert.equal(sent[0].contentType, 'application/json');
+  assert.equal(sent[0].body, '{"issue_ids":[0,5],"update_numbers_from":[3678,8678],"update_numbers_to":[3680,8681]}');
+  await assert.rejects(fetchCatchUp(session, { app: { series: 0, date: '2026-03-11' }, issues, format: 'guess' }),
+    /2 issues behind the stream.*POST \/api\/stocks_update.*"guess" is not a known format \(known: issue-lists\)/s);
 });
 
 test('a live() that fails leaves no timers behind, so the process can exit', { skip: !cache }, async () => {
