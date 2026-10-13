@@ -388,7 +388,7 @@ def _check_client(site):
 def _deliver(site, cookies, remember):
     if site.client:
         from briskapi import brisk
-        client = brisk.login(cookies=cookies, remember=remember, site=site.client)
+        client = brisk._login(site=site.client, cookies=cookies, remember=remember)
         return SignIn(site, cookies, client, brisk.cookies_path(site.client) if remember else None)
     path = None
     if remember:

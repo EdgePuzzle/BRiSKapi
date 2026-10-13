@@ -60,7 +60,7 @@ live architecture reference; it is not a verified Tachibana BRiSK Next connector
 The reader also polls every 500 ms and extracts QR events, which does not provide
 the complete auction state this collector needs.
 
-briskapi's own broker live feed (`briskapi.brisk.connect`, `brisk live --sbi` or
+briskapi's own broker live feed (`briskapi.connect(site=...)`, `brisk live --sbi` or
 `--site e-shiten`) does not use a browser or CDP. `briskapi/decoder/brisk.cjs` logs in
 with your session cookies, downloads the site's decoder, master and snapshot, opens the
 WebSocket itself and runs the same Node `Decoder` as this demo host (protocol version

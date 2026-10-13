@@ -20,7 +20,7 @@ class Ticker:
         t = Ticker("7203")
         t.info(); t.quote(); t.quote(at="09:00:00"); t.history().to_pandas(); t.trades()
         t.auction(); t.auction(closing=True)
-        t.candles("5m"); t.margin()     # your broker's BRiSK session (briskapi.brisk.login)
+        t.candles("5m"); t.margin()     # your broker's BRiSK session (briskapi.login)
     """
 
     def __init__(self, code, recording: Recording | None = None, client=None):

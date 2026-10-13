@@ -69,7 +69,7 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 
 | コマンドライン | Python | 記録するもの | ディスクに残るもの | アップロード |
 | --- | --- | --- | --- | --- |
-| `brisk live --sbi` または `--site e-shiten` | `brisk.connect()` | 証券会社のライブフィード。止めるまで、取引日ごとに1つの記録 | `--output DIR`（`output=`）を指定すると、終わった日ごと | 終わった日ごと（オプトアウトした場合を除く） |
+| `brisk live --sbi` または `--site e-shiten` | `briskapi.connect(site="sbi")` | 証券会社のライブフィード。止めるまで、取引日ごとに1つの記録 | `--output DIR`（`output=`）を指定すると、終わった日ごと | 終わった日ごと（オプトアウトした場合を除く） |
 | `brisk live --web` | `briskapi.connect(web=True)` | デモの再生（JSON の行として出力） | `--output DIR` を指定した場合 | 再生が最後まで終わった場合 |
 | `brisk record --web --output DIR` | `briskapi.record(DIR, web=True)` | デモの再生 | 常に `DIR` に | 再生が最後まで終わった場合 |
 
@@ -112,9 +112,16 @@ briskapi.Market().imbalances(top=10).to_pandas()
 feed.wait()           # または feed.close()。`with briskapi.connect(...) as feed:` も使えます
 ```
 
-主なオプション: `web=True`（デモサイトから取得）または `cache=DIR`（デモ
-データのローカルコピー）、`codes`（銘柄コード）、`speed`（`1` で実時間、`0` で
-最速）、`history=True`（`Ticker.history()` のために更新を保持）。コールバックと
+`briskapi.connect()` は、`brisk live` と同じく、データ源を1つ取ります。
+- `web=True`: 公開の BRiSK Next デモ。ライブの接続ではありません。デモサイトは2021年9月27日の記録を
+  ファイル（BRiSK のデコーダー、マスター、スナップショット、ストリーム）として配信しており、それを
+  ダウンロードし、固定したハッシュと照合して、記録されたペースで再生します（`speed`: `1` で実時間、
+  `0` で最速。`limit_frames` で途中で止める）。
+- `cache=DIR`: 以前ダウンロードした同じファイルのコピーから、同じデモを再生します。
+- `site="sbi"` または `site="e-shiten"`: お使いの証券会社のライブの BRiSK（[下記](#お使いの証券会社の-brisk)）。
+
+そのほかのオプション: `codes`（銘柄コード）、`history=True`（`Ticker.history()` のために更新を保持）、
+`upload`、`output`、`on_day`、`gateway`。コールバックと
 イテレーターは、まず各銘柄の現在の気配を受け取り、その後すべての更新を順番
 どおりに受け取ります。受け取る側の処理が遅い場合、更新を捨てずにフィードの
 ほうが待ちます。
@@ -158,8 +165,7 @@ for record in live:             # または live.add_callback(fn); live.start();
   出ることはありません。1 GB を超えて遅れたセッションは、フィードやその記録を遅らせる代わりに
   切断されます。
 - **配信:** `brisk live` は `--no-gateway` を指定しない限り配信します。1つのデータセットを配信できる
-  フィードは同時に1つです。Python では `briskapi.connect()` か `briskapi.brisk.connect()` に
-  `gateway=True` を渡します。
+  フィードは同時に1つです。Python では `briskapi.connect()` に `gateway=True` を渡します。
 
 ## 記録データと自分のアーカイブ
 
@@ -205,9 +211,7 @@ NautilusTrader のカタログや JSONL に書き出せます。全列の説明�
 サインインさせることもできます（[下記](#パスキーでのサインイン試験的)）。
 
 ```python
-from briskapi import brisk
-
-brisk.login(cookies={"session_bfaf77a2": "v2.local..."})   # remember=True で保存（本人のみ読み取り可）
+briskapi.login(cookies={"session_bfaf77a2": "v2.local..."})   # remember=True で保存（本人のみ読み取り可）
 toyota = briskapi.Ticker("7203")
 toyota.candles("5m").to_pandas()   # ローソク足: 5分（当日）、日、週、月（5m, 1d, 1w, 1mo）
 toyota.margin(days=30)             # 信用残と貸株料
@@ -218,7 +222,7 @@ market.events()       # バスケット注文、ストップ高・安、出来�
 market.schedule()     # 取引日、状態、取引時間
 market.watchlist()    # 保存済みの銘柄コード
 
-feed = brisk.connect(codes=["7203"])        # ライブ（試験的）。オプトアウトしない限り、終わった日ごとにアップロード
+feed = briskapi.connect(site="sbi", codes=["7203"])   # ライブ（試験的）。オプトアウトしない限り、終わった日ごとにアップロード
 toyota.quote()                              # 他のフィードと同じ呼び出し
 # upload_market_data=False で市場データの記録を、upload=False ですべてをアップロードしない（残すには output="days"）
 ```
@@ -227,15 +231,15 @@ toyota.quote()                              # 他のフィードと同じ呼び�
 サイトが次の取引日を配信し始めたとき（10分ごとに確認）、またはサーバーが市場の終了後にストリームを
 閉じたときにその日が終わり、パッケージ化されてアップロードされ（市場データの記録とタイミングの要約。
 オプトアウトした場合を除く）、次の日は新しいスナップショットから記録を始めます。`output=DIR`
-（`brisk.connect(output=...)`、`briskapi.connect(output=...)`、`brisk live --output DIR`）を指定すると、
+（`briskapi.connect(output=...)`、`brisk live --output DIR`）を指定すると、
 終わった日ごとに、`SOURCE_YYYYMMDD_FROM-TO`（その日の最初と最後のソース時刻、日本時間 HHMMSS）という名前の
 フォルダー（例: `sbi_live_20261013_085800-153512`）が DIR に残ります。`feed.recordings` は終わった日の一覧
 （`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded`）で、`on_day=callback` はその日ごとに呼ばれます。
 `output` を指定しないと、終わった日は自分のアーカイブにだけ残り、アップロードもオフならどこにも残りません。
 フィードを止めた時点でまだ終わっていない日はアップロードされず、タイミングの要約だけがアップロードされます。
 
-結果は下記の規約に従います。エラーは `brisk.SessionExpiredError`（再ログインが
-必要）、`briskapi.NotFoundError`、`brisk.RateLimitError`、`brisk.APIError` です。
+結果は下記の規約に従います。エラーは `briskapi.brisk.SessionExpiredError`（再ログインが
+必要）、`briskapi.NotFoundError`、`briskapi.brisk.RateLimitError`、`briskapi.brisk.APIError` です。
 リクエストは1秒に1回までに制限しています。
 
 ライブフィードは、ご自身のセッションでダウンロードした BRiSK 自身のデコーダーを
@@ -245,7 +249,7 @@ Node 上で動かします。ブラウザは使いません。ベンダーのク
 ます。まだ実際の SBI セッションでは検証できていません。ストリームは Next のクライ
 アントと同じく素のバイナリ WebSocket と想定しています。サーバーが Socket.IO で始
 まる場合は、未検証のパラメーターで `/v2/user` 名前空間に参加します（パラメーター
-は `brisk.connect(profile={...})` で設定できます）。`trace_protocol=True`（トークン
+は `briskapi.connect(site="sbi", profile={...})` で設定できます）。`trace_protocol=True`（トークン
 はすべて伏せ字）でサーバーの応答を確認してください。想定外の応答は、推測で動かさ
 ず、明示的なエラーで止まります。
 結果をぜひお知らせください。実際のセッションでは現在、サインイン、データの取得、
@@ -264,8 +268,8 @@ e支店の BRiSK Next（[next.e-shiten.brisk.jp](https://next.e-shiten.brisk.jp)
 `brisk live --site e-shiten` の前に `brisk login` を実行します。
 
 ```python
-brisk.login(cookies={...}, site="e-shiten")  # または BRISK_ESHITEN_COOKIES。remember=True で SBI とは別に保存
-feed = brisk.connect(codes=["7203"])         # ライブ（試験的）
+briskapi.login("e-shiten", cookies={...})   # または BRISK_ESHITEN_COOKIES。remember=True で SBI とは別に保存
+feed = briskapi.connect(site="e-shiten", codes=["7203"])   # ライブ（試験的）
 ```
 
 上記の説明は日ごとの記録とアップロードも含めてそのまま当てはまります（終わった日ごとの市場データの
@@ -361,7 +365,7 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 
 | 呼び出し | 戻り値 |
 | --- | --- |
-| `briskapi.connect(...)` | ライブの `Feed`（既定のデータ源になる。`gateway=True` で `Live` にも配信） |
+| `briskapi.connect(web=True \| cache=DIR \| site=...)` | デモまたは証券会社の BRiSK のライブの `Feed`（既定のデータ源になる。`gateway=True` で `Live` にも配信） |
 | `briskapi.Live()` | このコンピューターのフィードから Databento 風のライブのレコード: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False)` のあと、イテレーション、または `add_callback(fn)` / `add_stream(path)` と `start()`、`block_for_close(timeout)`。`stop()`、`symbology_map`（[上記](#ライブのレコードdatabento-風)） |
 | `Ticker(code).info()` | 銘柄名、売買単位、呼値の種別、基準値、値幅制限 |
 | `Ticker(code).quote(at=None)` | 買い・売り気配とその数量・件数、板の各側の上位10本（`bids`、`asks`）と引け条件付き注文の上位10本（`closing_bids`、`closing_asks`）、板全体の注文合計、予想約定価格・数量、成行・引け条件付きの数量、直近の約定、売買代金、銘柄の状態、`special_quote`（特別気配の側・価格・タイマーの終了時刻） |
@@ -388,7 +392,7 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | `Historical().metadata.get_record_count(...)` / `.get_cost(...)` | リクエストが返すレコード数、そのコスト（常に 0。無料で、上限あり） |
 | `Ticker(code).candles(interval)` / `.margin(days)` | 証券会社の BRiSK（SBI、e支店）自身のローソク足（`5m` は当日のみ、`1d`/`1w`/`1mo` がどこまでさかのぼるかは BRiSK 次第）、信用残と貸株料 |
 | `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | 証券会社の BRiSK の市場データ |
-| `briskapi.brisk.login(site=...)` / `.connect()` | SBI（既定）または e支店の BRiSK のセッションとライブフィード |
+| `briskapi.login(site=..., cookies=None)` / `briskapi.logout()` | SBI（既定）または e支店の BRiSK のセッション。上の証券会社のデータと `connect(site=...)` が使う |
 | `briskapi.passkey.enroll()` / `.login()` / `.forget()` | 証券会社の BRiSK へのパスキーでのサインイン |
 
 価格は円単位の浮動小数点数で、ベンダーの「値なし」（0）は `None` になります。
@@ -430,7 +434,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 | コマンド | Python |
 | --- | --- |
 | `brisk live --web`（または `--cache DIR`） | `briskapi.connect(web=True, gateway=True)`（`--no-gateway` なら `gateway` なし） |
-| `brisk live --sbi`、`--site e-shiten` | `brisk.login()` のあと `brisk.connect(gateway=True)` |
+| `brisk live --sbi`、`--site e-shiten` | `briskapi.connect(site="sbi", gateway=True)` |
 | `brisk record` | `briskapi.record()` |
 | `brisk query` | `briskapi.Historical().timeseries.get_range()` |
 | `brisk list`（`--deleted`、`--timing`） | `briskapi.recordings()`（`Archive().deleted()`、`.timing()`） |

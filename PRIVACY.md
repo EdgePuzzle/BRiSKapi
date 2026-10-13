@@ -51,7 +51,7 @@ the command line, the tool shows a short notice of everything described below an
 once. Pressing Enter accepts, and the choice is saved for future runs. After that, every
 clean and complete session is uploaded to your private archive without further prompts: demo sessions (`brisk record`, `brisk live`,
 `briskapi.connect()`, `briskapi.record()`), and broker sessions (SBI or Tachibana
-e-shiten: `brisk live --sbi`, `--site e-shiten`, `brisk.connect()`), which upload a timing
+e-shiten: `brisk live --sbi`, `--site e-shiten`, `briskapi.connect(site=...)`), which upload a timing
 summary and their decoded market recording. A broker session records one trading day after
 another until you stop it, and each day is uploaded once it ends (when the site serves the
 next trading date, or the server closes the stream). A live session is written to a
@@ -72,7 +72,7 @@ Opting out:
   turn them back on with `brisk consent --accept`;
 - `BRISK_UPLOAD=0` disables uploads for any process with that environment;
 - `--no-upload` (`upload=False` in Python) keeps one run entirely local;
-- `--no-upload-market-data` (`upload_market_data=False` on `brisk.connect()`) keeps one broker
+- `--no-upload-market-data` (`upload_market_data=False` on `briskapi.connect()`) keeps one broker
   capture's market recording local while its timing summary is uploaded.
 
 ## What an upload contains
@@ -126,9 +126,9 @@ from your own browser. They are credentials:
   stream may be on another BRiSK host (`api.brisk.jp`); like a browser, the client
   sends it the session named in the site's boot response, not your cookies, and
   refuses a stream outside `brisk.jp`.
-- They stay in memory unless you call `brisk.login(..., remember=True)`, which saves
+- They stay in memory unless you call `briskapi.login(..., remember=True)`, which saves
   them to `~/.config/brisk/sbi-cookies.json` (`e-shiten-cookies.json` for e-shiten;
-  or `$XDG_CONFIG_HOME/brisk/`), readable only by you. `brisk.logout()` deletes both.
+  or `$XDG_CONFIG_HOME/brisk/`), readable only by you. `briskapi.logout()` deletes both.
 - The live host receives them through its environment, not its command line.
 - `brisk enroll` / `brisk login` (passkey sign-in to the broker you choose: SBI, Matsui, Monex,
   SMBC Nikko, Tachibana e-shiten or one you add) capture a passkey that you register at that broker and use it to
@@ -146,14 +146,14 @@ from your own browser. They are credentials:
   and only the BRiSK host's cookies are taken from it.
 - With uploads on, each trading day of a broker session's decoded market recording (SBI or
   e-shiten) is uploaded after that day ends. A day still open when you stop the session,
-  `--no-upload-market-data` or `brisk.connect(upload_market_data=False)` keeps it local.
+  `--no-upload-market-data` or `briskapi.connect(site=..., upload_market_data=False)` keeps it local.
 - With uploads on, a broker session (SBI or e-shiten) uploads one **timing summary** per
   trading day to your private archive when the day ends (or when you close it after at least
   100 frames): the
   p50/p90/p99/max of per-frame decode time, of the feed clock's age at local receipt and of
   the spacing between frames; the number of gaps over one second; the frame count; the
   trading date; the first and last minute (JST) of the session; and the briskapi version.
-  `upload=False` on `brisk.connect()` or `BRISK_UPLOAD=0` keeps both the summary and any market
+  `upload=False` on `briskapi.connect()` or `BRISK_UPLOAD=0` keeps both the summary and any market
   recording local. The environment opt-out suppresses the interactive question as well.
 
 ## Network metadata

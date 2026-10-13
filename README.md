@@ -67,7 +67,7 @@ Recording isn't a third API. The live calls record as they run, and `brisk live`
 
 | Command line | Python | Records | Kept on disk | Uploaded |
 | --- | --- | --- | --- | --- |
-| `brisk live --sbi` or `--site e-shiten` | `brisk.connect()` | Your broker's live feed, one recording per trading day, until you stop it | Each finished day, with `--output DIR` (`output=`) | Each finished day, unless you opt out |
+| `brisk live --sbi` or `--site e-shiten` | `briskapi.connect(site="sbi")` | Your broker's live feed, one recording per trading day, until you stop it | Each finished day, with `--output DIR` (`output=`) | Each finished day, unless you opt out |
 | `brisk live --web` | `briskapi.connect(web=True)` | The demo replay, printed as JSON lines | With `--output DIR` | If the replay completes |
 | `brisk record --web --output DIR` | `briskapi.record(DIR, web=True)` | The demo replay | Always, in `DIR` | If the replay completes |
 
@@ -110,9 +110,16 @@ briskapi.Market().imbalances(top=10).to_pandas()
 feed.wait()           # or feed.close(); `with briskapi.connect(...) as feed:` also works
 ```
 
-Options: `web=True` (fetch from the demo site) or `cache=DIR` (a local copy of
-the demo assets), `codes`, `speed` (`1` real time, `0` as fast as possible) and
-`history=True` (keep updates for `Ticker.history()`). Callbacks and iterators
+`briskapi.connect()` takes one source, as `brisk live` does:
+- `web=True`: the public BRiSK Next demo. It isn't a live connection: the demo site serves a
+  recording of 27 September 2021 as files (BRiSK's decoder, the master, a snapshot and the
+  stream), which are downloaded, checked against pinned hashes and replayed at their recorded
+  pace (`speed`: `1` real time, `0` as fast as possible; `limit_frames` stops early).
+- `cache=DIR`: the same demo from a copy of those files downloaded before.
+- `site="sbi"` or `site="e-shiten"`: your broker's live BRiSK ([below](#your-brokers-brisk)).
+
+Other options: `codes`, `history=True` (keep updates for `Ticker.history()`), `upload`,
+`output`, `on_day` and `gateway`. Callbacks and iterators
 first receive each security's current quote, then every update in order. A slow
 consumer slows the feed instead of losing updates.
 
@@ -155,7 +162,7 @@ for record in live:             # or live.add_callback(fn); live.start(); live.b
   which `Live()` reads. Nothing it serves leaves your computer. A session that falls more than
   1 GB behind is dropped rather than slowing the feed or its recording.
 - **Serving:** `brisk live` serves unless you pass `--no-gateway`; one feed per dataset at a
-  time. In Python, pass `gateway=True` to `briskapi.connect()` or `briskapi.brisk.connect()`.
+  time. In Python, pass `gateway=True` to `briskapi.connect()`.
 
 ## Recordings and your archive
 
@@ -200,9 +207,7 @@ pass its session cookies: copy them from DevTools, or use `pycookiecheat`'s
 ([below](#signing-in-with-a-passkey-experimental)).
 
 ```python
-from briskapi import brisk
-
-brisk.login(cookies={"session_bfaf77a2": "v2.local..."})   # remember=True saves them (owner-only file)
+briskapi.login(cookies={"session_bfaf77a2": "v2.local..."})   # remember=True saves them (owner-only file)
 toyota = briskapi.Ticker("7203")
 toyota.candles("5m").to_pandas()   # price bars: 5m (today), 1d, 1w or 1mo
 toyota.margin(days=30)             # margin balances and stock-lending fees
@@ -213,7 +218,7 @@ market.events()       # basket orders, limit up/down, volume surges
 market.schedule()     # trading date, status and session times
 market.watchlist()    # your saved codes
 
-feed = brisk.connect(codes=["7203"])        # live (experimental); each finished day uploaded unless you opt out
+feed = briskapi.connect(site="sbi", codes=["7203"])   # live (experimental); each finished day uploaded unless you opt out
 toyota.quote()                              # same calls as any feed
 # upload_market_data=False uploads no market recordings, upload=False nothing; output="days" keeps each day
 ```
@@ -222,16 +227,16 @@ A broker feed records continuously, one recording per trading day, and keeps run
 days. When the site starts serving the next trading date (checked every 10 minutes), or the
 server closes the stream after the market, the day ends: it is packaged and uploaded (its
 market recording and timing summary, unless you opt out) while the next day records from a
-fresh snapshot. `output=DIR` (`brisk.connect(output=...)`, `briskapi.connect(output=...)`,
-`brisk live --output DIR`) also keeps each finished day in DIR, in a folder named
+fresh snapshot. `output=DIR` (`briskapi.connect(output=...)`, `brisk live --output DIR`)
+also keeps each finished day in DIR, in a folder named
 `SOURCE_YYYYMMDD_FROM-TO` (the day's first and last source clock, JST HHMMSS), such as
 `sbi_live_20261013_085800-153512`. `feed.recordings` lists the finished days (`trading_date`,
 `name`, `path`, `uploaded`, `timing_uploaded`), and `on_day=callback` is called for each.
 Without `output`, a finished day is kept only in your archive, and with uploads off, nowhere. A
 day still open when you stop the feed is not uploaded, only its timing summary.
 
-Results use the conventions below. Errors are `brisk.SessionExpiredError` (log in
-again), `briskapi.NotFoundError`, `brisk.RateLimitError` and `brisk.APIError`.
+Results use the conventions below. Errors are `briskapi.brisk.SessionExpiredError` (log in
+again), `briskapi.NotFoundError`, `briskapi.brisk.RateLimitError` and `briskapi.brisk.APIError`.
 Requests are limited to one per second.
 
 The live feed runs BRiSK's own decoder under Node, downloaded with your session;
@@ -241,7 +246,7 @@ the server's pings through the decoder and watches the server heartbeat. It hasn
 yet been validated against a live SBI session. The stream is expected to be a plain
 binary WebSocket, as in the Next client. Should the server open with Socket.IO
 instead, the host joins its `/v2/user` namespace with unverified parameters that
-`brisk.connect(profile={...})` can set. See what the server answers with
+`briskapi.connect(site="sbi", profile={...})` can set. See what the server answers with
 `trace_protocol=True` (every token redacted); anything unexpected stops with an
 explicit error rather than a guess. Please report what you see. Live sessions now
 get through sign-in, the data endpoints, the decoder download, the stock master and
@@ -260,8 +265,8 @@ cookies with `site="e-shiten"`, or let `briskapi` sign in with your e-shiten pas
 then `brisk login` before `brisk live --site e-shiten`.
 
 ```python
-brisk.login(cookies={...}, site="e-shiten")  # or BRISK_ESHITEN_COOKIES; remember=True keeps them apart from SBI's
-feed = brisk.connect(codes=["7203"])         # live (experimental)
+briskapi.login("e-shiten", cookies={...})   # or BRISK_ESHITEN_COOKIES; remember=True keeps them apart from SBI's
+feed = briskapi.connect(site="e-shiten", codes=["7203"])   # live (experimental)
 ```
 
 Everything above applies, daily recordings and uploads included (each finished day's market
@@ -355,7 +360,7 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 
 | Call | Returns |
 | --- | --- |
-| `briskapi.connect(...)` | Live `Feed`; becomes the default source (`gateway=True` also serves it to `Live`) |
+| `briskapi.connect(web=True \| cache=DIR \| site=...)` | Live `Feed` of the demo or your broker's BRiSK; becomes the default source (`gateway=True` also serves it to `Live`) |
 | `briskapi.Live()` | Databento-style live records from the feed on this computer: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False)`, then iteration or `add_callback(fn)` / `add_stream(path)` with `start()` and `block_for_close(timeout)`; `stop()`, `symbology_map` ([above](#live-records-databento-style)) |
 | `Ticker(code).info()` | Name, lot size, tick type, base price and daily limits |
 | `Ticker(code).quote(at=None)` | Bid/ask with their quantities and orders, the ten best book levels per side (`bids`, `asks`) and of the closing-condition orders (`closing_bids`, `closing_asks`), the board's order totals, indicative price/volume, market-order and closing quantities, last trade, turnover, issue status and `special_quote` (side, price, when its timer ends) |
@@ -382,7 +387,7 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | `Historical().metadata.get_record_count(...)` / `.get_cost(...)` | How many records a request returns; its cost, always 0 (free, with quotas) |
 | `Ticker(code).candles(interval)` / `.margin(days)` | BRiSK's own price bars from your broker (SBI, e-shiten): `5m` today only, how far back `1d`/`1w`/`1mo` go is up to BRiSK; margin balances and lending fees |
 | `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | Broker BRiSK market data |
-| `briskapi.brisk.login(site=...)` / `.connect()` | SBI (default) or e-shiten BRiSK session and live feed |
+| `briskapi.login(site=..., cookies=None)` / `briskapi.logout()` | Your SBI (default) or e-shiten BRiSK session, for the broker data above and `connect(site=...)` |
 | `briskapi.passkey.enroll()` / `.login()` / `.forget()` | Passkey sign-in to your broker's BRiSK |
 
 Prices are yen floats, with `None` for the vendor's zero "unavailable" value.
@@ -424,7 +429,7 @@ Each command is the command-line form of a Python call:
 | Command | Python |
 | --- | --- |
 | `brisk live --web` (or `--cache DIR`) | `briskapi.connect(web=True, gateway=True)` (`--no-gateway`: without `gateway`) |
-| `brisk live --sbi`, `--site e-shiten` | `brisk.login()`, then `brisk.connect(gateway=True)` |
+| `brisk live --sbi`, `--site e-shiten` | `briskapi.connect(site="sbi", gateway=True)` |
 | `brisk record` | `briskapi.record()` |
 | `brisk query` | `briskapi.Historical().timeseries.get_range()` |
 | `brisk list` (`--deleted`, `--timing`) | `briskapi.recordings()` (`Archive().deleted()`, `.timing()`) |

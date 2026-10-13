@@ -53,7 +53,7 @@ ID は、システムの資格情報ストア（macOS のキーチェーンま�
 その答えは保存されて以降の実行に使われます。それ以降は、最後まで正常に終わったセッションはすべて、
 確認なしで自分専用のアーカイブにアップロードされます。対象は、デモのセッション（`brisk record`、`brisk live`、
 `briskapi.connect()`、`briskapi.record()`）と、証券会社のセッション（SBI または立花証券 e支店。
-`brisk live --sbi`、`--site e-shiten`、`brisk.connect()`）で、後者はタイミングの要約と、
+`brisk live --sbi`、`--site e-shiten`、`briskapi.connect(site=...)`）で、後者はタイミングの要約と、
 デコードした市場データの記録をアップロードします。証券会社のセッションは、止めるまで取引日を次々に記録し、
 各日はその日が終わると（サイトが次の取引日を配信し始めたとき、またはサーバーがストリームを閉じたとき）
 アップロードされます。ライブセッションは、動作中は日ごとの一時ファイルに書き込まれ、
@@ -74,7 +74,7 @@ ID がなければ作ります。`brisk consent --accept` または `--revoke`�
   再びオンにするまでアップロードをオフにする。
 - `BRISK_UPLOAD=0` を設定した環境のすべてのプロセスで、アップロードを無効にする。
 - `--no-upload`（Python では `upload=False`）で、1回の実行を完全にローカルに残す。
-- `--no-upload-market-data`（`brisk.connect()` では `upload_market_data=False`）で、証券会社のセッション1回分の
+- `--no-upload-market-data`（`briskapi.connect()` では `upload_market_data=False`）で、証券会社のセッション1回分の
   市場データの記録をローカルに残し、タイミングの要約だけをアップロードする。
 
 ## アップロードの内容
@@ -123,9 +123,9 @@ Cookie は認証情報です。
   ほかの場所へ転送されることはありません。ライブストリームは別の BRiSK ホスト（`api.brisk.jp`）にある
   場合があります。ブラウザーと同様に、クライアントがそこへ送るのはサイトの起動時の応答に示された
   セッションで、Cookie ではありません。また、`brisk.jp` の外にあるストリームは拒否します。
-- `brisk.login(..., remember=True)` を呼ばない限り、Cookie はメモリー上にだけあります。呼ぶと
+- `briskapi.login(..., remember=True)` を呼ばない限り、Cookie はメモリー上にだけあります。呼ぶと
   `~/.config/brisk/sbi-cookies.json`（e支店は `e-shiten-cookies.json`。または `$XDG_CONFIG_HOME/brisk/`）に
-  保存され、本人だけが読めます。`brisk.logout()` は両方を削除します。
+  保存され、本人だけが読めます。`briskapi.logout()` は両方を削除します。
 - ライブホストは、Cookie をコマンドラインではなく環境変数で受け取ります。
 - `brisk enroll` / `brisk login`（選んだ証券会社へのパスキーでのサインイン。SBI証券、松井証券、
   マネックス証券、SMBC日興証券、立花証券 e支店、または自分で追加した証券会社）は、その証券会社で登録した
@@ -144,13 +144,13 @@ Cookie は認証情報です。
   BRiSK ホストの Cookie だけです。
 - アップロードがオンのとき、証券会社のセッション（SBI または e支店）のデコードした市場データの記録は、
   取引日ごとに、その日が終わってからアップロードされます。セッションを止めた時点でまだ終わっていない日、
-  `--no-upload-market-data`、`brisk.connect(upload_market_data=False)` のいずれの場合も、ローカルに残ります。
+  `--no-upload-market-data`、`briskapi.connect(site=..., upload_market_data=False)` のいずれの場合も、ローカルに残ります。
 - アップロードがオンのとき、証券会社のセッション（SBI または e支店）は、取引日ごとに1件の**タイミングの要約**を、
   その日が終わった時点（または、100フレーム以上を受信してから閉じた時点）で自分専用のアーカイブに
   アップロードします。内容は、フレームごとのデコード時間、ローカルで受信した時点でのフィード時刻の遅れ、
   フレーム間隔のそれぞれの p50/p90/p99/最大値、1秒を超える停滞の回数、フレーム数、取引日、
   セッションの最初と最後の分（日本時間）、briskapi のバージョンです。
-  `brisk.connect()` の `upload=False` または `BRISK_UPLOAD=0` は、要約も市場データの記録もローカルに残します。
+  `briskapi.connect()` の `upload=False` または `BRISK_UPLOAD=0` は、要約も市場データの記録もローカルに残します。
   環境変数によるオプトアウトは、対話形式の確認も出さなくします。
 
 ## ネットワークのメタデータ

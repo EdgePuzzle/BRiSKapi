@@ -61,9 +61,9 @@ def test_every_entry_point_checks_node_first(tmp_path):
         briskapi.connect(cache=tmp_path, node=missing)
     with pytest.raises(briskapi.BriskError, match='not found'):
         cli.record_events(tmp_path / 'events.jsonl', cache=tmp_path, node=missing)
-    brisk.login({'session_bfaf77a2': 'v'})
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
     with pytest.raises(briskapi.BriskError, match='not found'):
-        brisk.connect(node=missing)
+        briskapi.connect(site='sbi', node=missing)
     assert briskapi._current is None
 
 

@@ -9,7 +9,7 @@ itself. For usage, see the [README](README.md).
 | --- | --- | --- |
 | Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `brisk.cjs` drives a broker's BRiSK decoder (SBI's, or e-shiten BRiSK Next's) from an authenticated session, one trading day after another. Both emit one JSON batch per frame. |
 | Python API | `briskapi/` | `Recording` (files), `Feed` (live, background thread, with a worker thread that packages and uploads each finished day), `Ticker`/`Market` views and `Archive`. |
-| BRiSK site client | `briskapi/brisk.py` | Cookie login (SBI by default, or e-shiten with `site="e-shiten"`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `brisk.connect()` starts the live host. |
+| BRiSK site client | `briskapi/brisk.py` | Cookie login (SBI by default, or e-shiten with `site="e-shiten"`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `briskapi.connect(site=...)` starts the live host through it (`_connect`). |
 | Archive client | `briskapi/cli.py`, `briskapi/schema.py`, `briskapi/_parquet.py`, `briskapi/identity.py` | The `brisk` CLI, upload consent, your identity, Parquet packaging, upload, verified download, deletion, restore and export. |
 | Auction state | `rust/brisk_quote_ingest` | Optional Rust tools: `brisk_quote_ingest` validates batches, keeps per-security state and publishes latest-state files; `brisk_recording` reconstructs a saved recording. |
 | Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL serves each owner's uploads, listings, downloads, deletions and restores; S3-triggered ingest validates and stores and keeps each owner's OHLCV bars in step; DynamoDB holds quotas. |
@@ -242,7 +242,7 @@ The endpoint sequence was learned from pybrisk: session cookies authenticate
 `/api/frontend/boot`, which returns a bearer token; `/api/app/boot` then gives
 the trading date, series, schedule, WebSocket URL and master/snapshot hashes.
 Requests are rate limited and never follow redirects, because a redirect means
-an expired session and following it would forward credentials. `brisk.connect()`
+an expired session and following it would forward credentials. `briskapi.connect(site=...)`
 asks `/api/frontend/boot` before it starts the live host, so an expired session
 is one `SessionExpiredError` line and Node never starts. Cookies given as JSON
 (the `BRISK_*_COOKIES` variables or a saved cookie file) that don't parse are
@@ -522,7 +522,7 @@ upgrade to `api.brisk.jp` was then answered with HTTP 502 (400 without the `sess
 parameter, 404 on the site host, and no HTTP/2 extended CONNECT) with every header
 variant tried, all without the `flex` subprotocol, which the host now asks for; whether
 that is all the server wants is not known yet. The Socket.IO fallback's parameters live in a
-profile (`BRISK_PROFILE`, or `brisk.connect(profile=...)`) and are unverified. The
+profile (`BRISK_PROFILE`, or `briskapi.connect(site=..., profile=...)`) and are unverified. The
 profile can also name another catch-up format (`catchUp`).
 `--trace-protocol` prints the connection with every token redacted, so a first
 attempt shows what the server answers. Anything wrong ends in an explicit error (a
@@ -654,7 +654,7 @@ the login URL, button text, cookie host and any user ID box and user ID come in 
    cookies are returned, never those of the broker's main site, whose session is destroyed with
    the profile.
 6. **Delivery.** SBI and e-shiten have a data client (`briskapi.brisk`, with `site="e-shiten"` for the
-   latter), so their cookies go to `brisk.login()` and are saved as that site's cookies; the
+   latter), so their cookies go to `briskapi.login()` and are saved as that site's cookies; the
    others are saved to `~/.config/brisk/cookies/<site>.json` (owner-only) for the person's own use.
    A data client sends its cookies to one host, so a site bound to a client whose cookie host is not
    that client's host is refused before Chrome starts (a `sites.json` entry can never claim a client).

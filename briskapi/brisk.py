@@ -2,18 +2,15 @@
 
 Each broker runs BRiSK on its own address. SBI Securities' (sbi.brisk.jp, the default
 site) and Tachibana e-shiten's BRiSK Next (next.e-shiten.brisk.jp) are the same app, so one
-client serves both: brisk.login(cookies={...}, site="e-shiten"), or `brisk login` after
-`brisk enroll --site e-shiten`.
-
-The data is used through briskapi's own Ticker and Market:
+client serves both: briskapi.login(site="e-shiten", cookies={...}), or `brisk login` after
+`brisk enroll --site e-shiten`. This module is its implementation; the calls are briskapi's:
 
     import briskapi
-    from briskapi import brisk
 
-    brisk.login(cookies={"session_bfaf77a2": "v2.local..."})   # SBI's, from your logged-in browser
+    briskapi.login(cookies={"session_bfaf77a2": "v2.local..."})   # SBI's, from your logged-in browser
     briskapi.Ticker("7203").candles("5m").to_pandas()
     briskapi.Market().events()
-    feed = brisk.connect(codes=["7203"])                      # live, via Node (experimental)
+    feed = briskapi.connect(site="sbi", codes=["7203"])           # live, via Node (experimental)
 
 The endpoint sequence (cookie login, token boot, data endpoints) was learned from
 pybrisk (https://github.com/obichan117/pybrisk), Copyright (c) 2026 obichan117,
@@ -109,7 +106,8 @@ class Session:
         self.origin, self.name = where.origin, where.name
         if not cookies or not isinstance(cookies, dict) or not any(cookies.values()):
             how = ('' if site == 'sbi' else f" with site='{site}'") + ', or run `brisk login` (passkey)'
-            raise SessionExpiredError(f'No {self.name} cookies: copy them from your logged-in browser and call brisk.login(){how}')
+            raise SessionExpiredError(f'No {self.name} cookies: copy them from your logged-in browser and call '
+                                      f'briskapi.login(cookies={{...}}){how}')
         self.site = site
         self.cookies = dict(cookies)
         self.rate_limit, self.timeout = rate_limit, timeout
@@ -243,12 +241,11 @@ def _at(date, clock):
 _client: Client | None = None
 
 
-def login(cookies=None, remember=False, site='sbi') -> Client:
-    """Use BRiSK session cookies (from DevTools or pycookiecheat) for `site`: 'sbi' or 'e-shiten'.
-
-    Without cookies, uses the site's variable (BRISK_SBI_COOKIES, BRISK_ESHITEN_COOKIES; JSON)
-    or the cookies saved for that site with remember=True.
-    """
+def _login(site='sbi', cookies=None, remember=False) -> Client:
+    """briskapi.login: BRiSK session cookies for `site`, given, from the site's variable (BRISK_SBI_COOKIES,
+    BRISK_ESHITEN_COOKIES; JSON) or saved for that site with remember=True or by `brisk login`."""
+    if isinstance(site, dict):
+        raise TypeError('Pass the cookies by name: briskapi.login(cookies={...})')
     global _client
     path, env = cookies_path(site), _site(site).cookies_env
     if cookies is None and os.environ.get(env):
@@ -273,8 +270,8 @@ def _cookies_json(text, where) -> dict:
                                   'it should look like {"cookie_name": "value", ...}') from None
 
 
-def logout():
-    """Forget the session, including the cookies saved for every site."""
+def _logout():
+    """briskapi.logout: forget the session, including the cookies saved for every site."""
     global _client
     _client = None
     for site in SITES:
@@ -283,7 +280,7 @@ def logout():
 
 def _default() -> Client:
     if _client is None:
-        raise SessionExpiredError('BRiSK site data needs a session: call briskapi.brisk.login(cookies={...}) first')
+        raise SessionExpiredError('BRiSK site data needs a session: call briskapi.login(cookies={...}) first')
     return _client
 
 
@@ -292,11 +289,12 @@ def _check_session(session: Session) -> None:
     session.get('/api/frontend/boot')
 
 
-def connect(codes=None, history=False, node='node', timeout=120, upload=None, trace_protocol=False, profile=None,
-            upload_market_data=None, output=None, on_day=None, gateway=False):
-    """Experimental live feed from the logged-in site: its own WASM decoder under Node, never Chrome.
+def _connect(site, codes=None, history=False, node='node', timeout=120, upload=None, trace_protocol=False, profile=None,
+             upload_market_data=None, output=None, on_day=None, gateway=False):
+    """briskapi.connect(site=...): the experimental live feed of your broker's BRiSK, through the site's own WASM
+    decoder under Node, never Chrome. It uses the session briskapi.login made for `site`, or signs in as
+    login(site) does.
 
-    Returns a briskapi.Feed (the default source for briskapi.Ticker and Market).
     The host follows the vendor client's connect sequence: it feeds the WASM from the
     first frame, catches the snapshot up to the stream, answers the server's pings through
     the WASM and watches the server heartbeat. The stream is expected to be a plain binary
@@ -312,8 +310,8 @@ def connect(codes=None, history=False, node='node', timeout=120, upload=None, tr
     end against a live session; failures are explicit.
     By default (or as you chose with briskapi.consent), a timing summary is uploaded to
     your private archive when the session ends, and the decoded market recording after a
-    clean end. upload_market_data=False keeps the recording local; upload=False or BRISK_UPLOAD=0
-    keeps both. Cookies, tokens and connection diagnostics are never uploaded.
+    clean end. upload_market_data=False uploads no market recording, and upload=False or BRISK_UPLOAD=0
+    nothing (`output` keeps the recordings on disk). Cookies, tokens and connection diagnostics are never uploaded.
 
     The feed records one trading day after another until closed: when the site serves a new trading
     date (or the server closes the stream after the market), the day is finished and the next one
@@ -322,9 +320,9 @@ def connect(codes=None, history=False, node='node', timeout=120, upload=None, tr
     if given, and uploaded as chosen; `on_day(result)` is then called and `feed.recordings` lists it.
     gateway=True also serves the feed to briskapi.Live on this computer, as dataset XTKS.BRISK.
     """
-    from briskapi import cli, load
+    from briskapi import cli
     from briskapi._live import Feed
-    session = _default().session
+    session = (_client if _client is not None and _client.site == site else _login(site=site)).session
     cli.check_node(node)      # local checks first: a missing Node is reported without contacting the site
     _check_session(session)
     command = [node, str(DECODER)]
@@ -339,7 +337,7 @@ def connect(codes=None, history=False, node='node', timeout=120, upload=None, tr
     feed = Feed(command=command, env=env, history=history, upload=upload, timing=SITES[session.site].source,
                 upload_market_data=upload_market_data, output=output, on_day=on_day, gateway=gateway)
     try:
-        return load(feed.ready(timeout))
+        return feed.ready(timeout)
     except BaseException:
         feed.close()
         raise

@@ -219,25 +219,36 @@ CLOUD = [
 
 PYTHON = [
     Method('python/connect', 'briskapi.connect', 'connect',
-           'Start a live feed and make it the default source for `Ticker` and `Market`. With `web=True` it replays the public '
-           'BRiSK Next demo at its recorded pace; for your broker\'s live BRiSK, see [`brisk.connect`](/reference/python/brisk_connect.md). A '
-           'complete session is uploaded to your private archive unless you opt out; `output` also keeps it on disk. '
-           'On the command line: `brisk live --web` (see [Recording](/guides/recording.md)).',
-           'briskapi.connect(\n    web: bool = False,\n    cache: str | Path | None = None,\n    codes: list[str] | None = None,\n'
-           '    speed: float = 1,\n    limit_frames: int | None = None,\n    upload: bool | None = None,\n    history: bool = False,\n'
-           '    node: str = "node",\n    timeout: float = 60,\n    output: str | Path | None = None,\n    on_day: Callable | None = None,\n'
-           '    gateway: bool = False,\n) -> Feed',
-           [P('web', 'bool', 'Download the demo\'s assets from BRiSK\'s website.'),
-            P('cache', 'str | Path | None', 'Use demo assets already downloaded here instead.'),
+           'Start a live feed and make it the default source for `Ticker` and `Market`, from one of three sources, as '
+           '`brisk live` does. `web=True` is the public BRiSK Next demo: not a live connection but a recording of 27 September '
+           '2021 that the demo site serves as files, downloaded, checked against pinned hashes and replayed at its recorded '
+           'pace. `cache=DIR` replays the same files from a copy downloaded before. `site="sbi"` or `"e-shiten"` is your '
+           'broker\'s live BRiSK ([below](/reference/python/broker_connect.md)). A complete session is uploaded to your private '
+           'archive unless you opt out; `output` also keeps it on disk. On the command line: `brisk live` (see '
+           '[Recording](/guides/recording.md)).',
+           'briskapi.connect(\n    *,\n    web: bool = False,\n    cache: str | Path | None = None,\n    site: str | None = None,\n'
+           '    codes: list[str] | None = None,\n    history: bool = False,\n    upload: bool | None = None,\n'
+           '    output: str | Path | None = None,\n    on_day: Callable | None = None,\n    gateway: bool = False,\n'
+           '    timeout: float | None = None,\n    node: str = "node",\n    speed: float = 1,                       # the demo\n'
+           '    limit_frames: int | None = None,        # the demo\n    trace_protocol: bool = False,           # a broker\n'
+           '    profile: dict | None = None,            # a broker\n    upload_market_data: bool | None = None,  # a broker\n) -> Feed',
+           [P('web', 'bool', 'The demo, downloaded from BRiSK\'s demo site. Give exactly one of `web`, `cache` and `site`.'),
+            P('cache', 'str | Path | None', 'The demo, from a copy of its files downloaded before.'),
+            P('site', 'str | None', '`"sbi"` or `"e-shiten"`: your broker\'s live BRiSK, signing in as '
+              '[`login`](/reference/python/broker_login.md) does unless it already has.'),
             P('codes', 'list[str] | None', 'Securities to decode (default: the whole market).'),
-            P('speed', 'float', 'Replay speed: 1 is the recorded pace, 0 as fast as possible.'),
-            P('limit_frames', 'int | None', 'Stop after this many frames (a partial replay is never uploaded).'),
-            P('upload', 'bool | None', '`False` keeps the session local; `None` follows your choice (on by default).'),
             P('history', 'bool', 'Keep every update and trade, for `Ticker.history()` and `.trades()`.'),
-            P('timeout', 'float', 'Seconds to wait for the initial state.'),
-            P('output', 'str | Path | None', 'Also keep the finished recording here.'),
+            P('upload', 'bool | None', '`False` uploads nothing; `None` follows your choice (on by default).'),
+            P('output', 'str | Path | None', 'Also keep each finished day here, as `SOURCE_YYYYMMDD_FROM-TO`.'),
             P('on_day', 'Callable | None', 'Called with each finished day\'s result (kept, uploaded).'),
-            P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).')],
+            P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).'),
+            P('timeout', 'float | None', 'Seconds to wait for the initial state (default 60, or 120 for a broker).'),
+            P('speed', 'float', 'The demo\'s replay speed: 1 is the recorded pace, 0 as fast as possible.'),
+            P('limit_frames', 'int | None', 'Stop the demo after this many frames (a partial replay is never uploaded).'),
+            P('trace_protocol', 'bool', 'A broker\'s connection steps on stderr, tokens redacted.'),
+            P('profile', 'dict | None', 'A broker connection\'s unverified Socket.IO parameters.'),
+            P('upload_market_data', 'bool | None', '`False` uploads a broker session\'s timing summary but not its market '
+              'recording.')],
            'A [`Feed`](/reference/python/feed_quotes.md), already holding every selected security\'s state.',
            {'Python': 'import briskapi\n\nfeed = briskapi.connect(web=True, codes=["7203"], upload=False)\n'
             'print(feed)\nprint(briskapi.Ticker("7203").quote()["indicative_price"])\nfeed.close()',
@@ -333,12 +344,12 @@ TICKER = [
            'The security\'s master entry: name, lot size, tick type, base price and daily limits (yen).',
            'briskapi.Ticker(code).info() -> dict', [], 'A dict.', {'Python': DEMO + 'print(briskapi.Ticker("7203").info())'}),
     Method('python/ticker_candles', 'Ticker.candles', 'Ticker.candles',
-           'BRiSK\'s own price bars, from your broker\'s BRiSK servers (needs [`brisk.login`](/reference/python/brisk_login.md)). `5m` covers '
+           'BRiSK\'s own price bars, from your broker\'s BRiSK servers (needs [`briskapi.login`](/reference/python/broker_login.md)). `5m` covers '
            'today only; how far back `1d`, `1w` and `1mo` go is up to BRiSK and not yet known. For bars from your own '
            'recordings, use [`Historical`](/reference/historical/timeseries/get_range_bars.md).',
            'briskapi.Ticker(code).candles(\n    interval: str = "1d",\n) -> Table',
            [P('interval', 'str', '`5m`, `1d`, `1w` or `1mo`.')], 'A `Table` of `{date (or year/week/month), open, high, low, close, turnover}`.',
-           {'Python': 'import briskapi\nfrom briskapi import brisk\n\nbrisk.login()   # cookies saved by `brisk login`\n'
+           {'Python': 'import briskapi\n\nbriskapi.login()   # cookies saved by `brisk login`\n'
             'print(briskapi.Ticker("7203").candles("1d").to_pandas().tail(2))'},
            {'Python': '         date    open    high     low   close      turnover\n'
             '58  2026-10-09  2880.0  2905.0  2861.5  2899.0  4.12e+10\n59  2026-10-13  2902.0  2930.0  2895.0  2921.5  3.87e+10'},
@@ -349,7 +360,7 @@ TICKER = [
            'A `Table`, one row per day: `date`, `long_balance`, `short_balance`, `preliminary_long`, `preliminary_short`, '
            '`standardized_long`, `standardized_short` (shares) and the lending fee: `lending_fee`, `lending_fee_pct`, '
            '`lending_fee_days`, `lending_fee_max`.',
-           {'Python': 'import briskapi\nfrom briskapi import brisk\n\nbrisk.login()\nprint(briskapi.Ticker("7203").margin(days=5).to_pandas())'},
+           {'Python': 'import briskapi\n\nbriskapi.login()\nprint(briskapi.Ticker("7203").margin(days=5).to_pandas())'},
            {'Python': '         date  long_balance  short_balance  preliminary_long  preliminary_short  …  lending_fee  lending_fee_pct  …\n'
             '0  2026-10-13       1203400         512800           1198700             508300  …         0.05            0.002  …'},
            illustrative=True),
@@ -392,7 +403,7 @@ MARKET = [
             'print(frames[["seq", "type", "time", "quote_count", "trade_count"]].head())'}),
 ]
 
-BROKER_DATA = 'import briskapi\nfrom briskapi import brisk\n\nbrisk.login()   # cookies saved by `brisk login`\n'
+BROKER_DATA = 'import briskapi\n\nbriskapi.login()   # cookies saved by `brisk login`\n'
 
 MARKET_BROKER = [
     Method('python/market_turnover', 'Market.turnover', 'Market.turnover',
@@ -494,31 +505,38 @@ ARCHIVE = [
 ]
 
 BROKER = [
-    Method('python/brisk_login', 'brisk.login', 'brisk.login',
-           'Use your broker\'s BRiSK session: the cookies from your logged-in browser, the site\'s variable '
-           '(`BRISK_SBI_COOKIES`, `BRISK_ESHITEN_COOKIES`) or the cookies `brisk login` saved after a passkey sign-in.',
-           'briskapi.brisk.login(\n    cookies: dict | None = None,\n    remember: bool = False,\n    site: str = "sbi",\n) -> Client',
-           [P('cookies', 'dict | None', 'The site\'s session cookies.'), P('remember', 'bool', 'Save them (an owner-only file).'),
-            P('site', 'str', '`sbi` or `e-shiten`.')], 'The session client (also the default for `Ticker` and `Market`).',
-           {'Python': 'from briskapi import brisk\n\nbrisk.login(site="e-shiten")   # BRISK_ESHITEN_COOKIES, or saved cookies'},
+    Method('python/broker_login', 'briskapi.login', 'login',
+           'Sign in to your broker\'s BRiSK with its session cookies: given (copied from your logged-in browser), from the '
+           'site\'s variable (`BRISK_SBI_COOKIES`, `BRISK_ESHITEN_COOKIES`; JSON) or saved by `remember=True` or by '
+           '`brisk login` (passkey). `Ticker` and `Market`\'s broker data (candles, margin, turnover, lists, events, schedule, '
+           'watchlist) then come from it, and `connect(site=...)` uses it. `briskapi.logout()` forgets it and the saved cookies.',
+           'briskapi.login(\n    site: str = "sbi",\n    *,\n    cookies: dict | None = None,\n    remember: bool = False,\n) -> Client',
+           [P('site', 'str', '`"sbi"` or `"e-shiten"`.'), P('cookies', 'dict | None', 'The site\'s session cookies.'),
+            P('remember', 'bool', 'Save them (an owner-only file).')], 'The session client.',
+           {'Python': 'import briskapi\n\nbriskapi.login("e-shiten")   # BRISK_ESHITEN_COOKIES, or cookies saved by `brisk login`'},
            {'Python': '<briskapi.brisk.Client object>'}, illustrative=True),
-    Method('python/brisk_connect', 'brisk.connect', 'brisk.connect',
+    Method('python/broker_connect', 'briskapi.connect (your broker)', 'connect: broker',
            'Your broker\'s live BRiSK feed (experimental), decoded by BRiSK\'s own decoder under Node. It records one trading '
            'day after another until closed, keeping (`output`) and uploading each finished day. Without `output`, a '
            'finished day is kept only in your archive, and with uploads off, nowhere. On the command line: '
            '`brisk live --sbi` or `--site e-shiten` (see [Recording](/guides/recording.md)).',
-           'briskapi.brisk.connect(\n    codes: list[str] | None = None,\n    history: bool = False,\n    upload: bool | None = None,\n'
-           '    upload_market_data: bool | None = None,\n    output: str | Path | None = None,\n    on_day: Callable | None = None,\n'
-           '    trace_protocol: bool = False,\n    timeout: float = 120,\n    gateway: bool = False,\n) -> Feed',
-           [P('codes', 'list[str] | None', 'Securities to decode.'), P('history', 'bool', 'Keep every update and trade.'),
-            P('upload', 'bool | None', '`False` keeps everything local.'),
-            P('upload_market_data', 'bool | None', '`False` keeps the market recording local (the timing summary still uploads).'),
+           'briskapi.connect(\n    *,\n    site: str,\n    codes: list[str] | None = None,\n    history: bool = False,\n'
+           '    upload: bool | None = None,\n    upload_market_data: bool | None = None,\n    output: str | Path | None = None,\n'
+           '    on_day: Callable | None = None,\n    gateway: bool = False,\n    trace_protocol: bool = False,\n'
+           '    profile: dict | None = None,\n    timeout: float | None = None,\n) -> Feed',
+           [P('site', 'str', '`"sbi"` or `"e-shiten"`. Uses the session [`login`](/reference/python/broker_login.md) made, '
+              'or signs in as it does.', required=True),
+            P('codes', 'list[str] | None', 'Securities to decode.'), P('history', 'bool', 'Keep every update and trade.'),
+            P('upload', 'bool | None', '`False` uploads nothing.'),
+            P('upload_market_data', 'bool | None', '`False` uploads the timing summary but not the market recording.'),
             P('output', 'str | Path | None', 'Keep each finished day here as `SOURCE_YYYYMMDD_FROM-TO`.'),
             P('on_day', 'Callable | None', 'Called with each finished day.'),
+            P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).'),
             P('trace_protocol', 'bool', 'Print the connection steps, tokens redacted.'),
-            P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).')],
+            P('profile', 'dict | None', 'Unverified Socket.IO parameters, should the server open with Socket.IO.'),
+            P('timeout', 'float | None', 'Seconds to wait for the initial state (default 120).')],
            'A [`Feed`](/reference/python/feed_quotes.md).',
-           {'Python': 'from briskapi import brisk\n\nbrisk.login()\nfeed = brisk.connect(codes=["7203"], output="days")\n'
+           {'Python': 'import briskapi\n\nfeed = briskapi.connect(site="sbi", codes=["7203"], output="days")\n'
             'for quote in feed.quotes("7203"):\n    print(quote["time"], quote["last_price"])',
             'CLI': 'brisk live --sbi --codes 7203 --output days'},
            {'Python': '2026-10-13 09:00:00.012000+09:00 2902.0\n2026-10-13 09:00:00.481000+09:00 2903.5'}, illustrative=True),

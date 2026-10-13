@@ -400,21 +400,17 @@ def record_events(events, web=False, cache=None, codes=None, limit_frames=None, 
 def live(args):
     """Print each quote update as one JSON line (unless --quiet), and serve the feed to briskapi.Live on this
     computer (unless --no-gateway); a complete session is uploaded per consent."""
-    from briskapi import brisk, connect  # The API package builds on this module.
+    from briskapi import connect, login  # The API package builds on this module.
     codes = args.codes.split(',') if args.codes else None
     if args.site:
-        brisk.login(site=args.site)  # Missing cookies fail before the notice, questions or decoder startup.
+        login(args.site)  # Missing cookies fail before the notice, questions or decoder startup.
     consented(args.upload)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         report = lambda day: print(json.dumps({'day': day}), file=sys.stderr, flush=True)  # noqa: E731
-        if args.site:
-            feed = brisk.connect(codes=codes, trace_protocol=args.trace_protocol, upload=args.upload,
-                                 upload_market_data=args.upload_market_data, output=args.output, on_day=report,
-                                 gateway=args.gateway)
-        else:
-            feed = connect(web=args.web, cache=args.cache, codes=codes, speed=args.speed, limit_frames=args.limit_frames,
-                           upload=args.upload, output=args.output, on_day=report, gateway=args.gateway)
+        source = (dict(site=args.site, trace_protocol=args.trace_protocol, upload_market_data=args.upload_market_data)
+                  if args.site else dict(web=args.web, cache=args.cache, speed=args.speed, limit_frames=args.limit_frames))
+        feed = connect(codes=codes, upload=args.upload, output=args.output, on_day=report, gateway=args.gateway, **source)
     for warning in caught:
         print(warning.message, file=sys.stderr)
     if feed.gateway:
@@ -497,10 +493,10 @@ def _main(argv):
     p.add_argument('--output', type=Path, metavar='DIR',
                    help='Keep each finished day here as SOURCE_YYYYMMDD_FROM-TO (its first and last clock, JST HHMMSS)')
     group.add_argument('--sbi', action='store_const', dest='site', const='sbi',
-                       help='Live SBI BRiSK (experimental); cookies from BRISK_SBI_COOKIES, saved with brisk.login(remember=True) or by `brisk login`')
+                       help='Live SBI BRiSK (experimental); cookies from BRISK_SBI_COOKIES, saved with briskapi.login(remember=True) or by `brisk login`')
     group.add_argument('--site', choices=('sbi', 'e-shiten'),
                        help='Live BRiSK of this broker (experimental); --site e-shiten for Tachibana e-shiten BRiSK Next, '
-                            "cookies from BRISK_ESHITEN_COOKIES, saved with brisk.login(site='e-shiten', remember=True) or by `brisk login`")
+                            "cookies from BRISK_ESHITEN_COOKIES, saved with briskapi.login('e-shiten', remember=True) or by `brisk login`")
     p.add_argument('--trace-protocol', action='store_true',
                    help='With --sbi or --site: print the connection steps to stderr, every token redacted (wire details in BRISK_PROFILE)')
     p.add_argument('--upload', action=argparse.BooleanOptionalAction, default=None,

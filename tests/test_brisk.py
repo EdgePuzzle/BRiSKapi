@@ -154,18 +154,18 @@ def test_login_sources(monkeypatch, tmp_path):
     with pytest.raises(brisk.SessionExpiredError, match='needs a session'):
         briskapi.Ticker('7203').candles()
     with pytest.raises(brisk.SessionExpiredError):
-        brisk.login()
+        briskapi.login()
     monkeypatch.setenv('BRISK_SBI_COOKIES', '{"from": "env"}')
-    assert brisk.login().session.cookies == {'from': 'env'}
+    assert briskapi.login().session.cookies == {'from': 'env'}
     monkeypatch.delenv('BRISK_SBI_COOKIES')
-    brisk.login({'saved': 'yes'}, remember=True)
+    briskapi.login(cookies={'saved': 'yes'}, remember=True)
     path = brisk.cookies_path()
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600 and json.loads(path.read_text()) == {'saved': 'yes'}
-    assert brisk.login().session.cookies == {'saved': 'yes'}
+    assert briskapi.login().session.cookies == {'saved': 'yes'}
     brisk._client.session._opener = Opener({'/api/frontend/boot': BOOT, '/api/app/boot': APP_BOOT})
     brisk._client.session.rate_limit = 0
     assert briskapi.Market().schedule()['date'] == '2026-03-11'  # default session used
-    brisk.logout()
+    briskapi.logout()
     assert not path.exists() and brisk._client is None
 
 
@@ -206,8 +206,8 @@ def fake_host(tmp_path, monkeypatch):
 
 
 def test_live_feed_via_node(fake_host, capfd):
-    brisk.login({'session_bfaf77a2': 'v'})
-    feed = brisk.connect(codes=['7203'], history=True, upload=False)
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    feed = briskapi.connect(site='sbi', codes=['7203'], history=True, upload=False)
     assert briskapi.current() is feed and feed.source == 'sbi_live'
     feed.wait()
     assert briskapi.Ticker('7203').quote()['last_price'] == 10160.0 and feed.uploaded is None
@@ -216,27 +216,46 @@ def test_live_feed_via_node(fake_host, capfd):
     assert capfd.readouterr().err.strip() == '["--codes","7203"]'
 
 
+def test_connect_signs_in_from_the_sites_variable_when_login_has_not(fake_host, monkeypatch):
+    briskapi.logout()
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
+    feed = briskapi.connect(site='sbi', upload=False).wait()
+    assert feed.source == 'sbi_live' and brisk._default().site == 'sbi'
+
+
+def test_connect_takes_one_source_and_only_its_options(tmp_path):
+    for sources in ({}, {'web': True, 'site': 'sbi'}, {'cache': tmp_path, 'web': True}):
+        with pytest.raises(ValueError, match='Choose one source'):
+            briskapi.connect(**sources)
+    with pytest.raises(ValueError, match='speed: only for the demo'):
+        briskapi.connect(site='sbi', speed=0)
+    with pytest.raises(ValueError, match='trace_protocol, upload_market_data: only for a broker site'):
+        briskapi.connect(cache=tmp_path, trace_protocol=True, upload_market_data=False)
+    with pytest.raises(TypeError, match='cookies by name'):
+        briskapi.login({'session_bfaf77a2': 'v'})
+
+
 def test_protocol_options_reach_the_host_without_putting_the_profile_in_argv(tmp_path, monkeypatch, capfd):
     script = tmp_path / 'sbi_options.cjs'
     script.write_text(
         "console.error(JSON.stringify({argv: process.argv.slice(2), profile: process.env.BRISK_PROFILE || null}));\n"
         f"for (const b of {json.dumps(sbi_session())}) console.log(JSON.stringify(b));\n")
     monkeypatch.setattr(brisk, 'DECODER', script)
-    brisk.login({'session_bfaf77a2': 'v'})
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
     profile = {'connectQuery': {'_v': 'build-9'}, 'catchUp': 'issue-lists'}
-    brisk.connect(codes=['7203'], trace_protocol=True, profile=profile, upload=False).wait()
+    briskapi.connect(site='sbi', codes=['7203'], trace_protocol=True, profile=profile, upload=False).wait()
     seen = json.loads(capfd.readouterr().err.strip())
     assert seen['argv'] == ['--codes', '7203', '--trace-protocol']
     assert json.loads(seen['profile']) == profile
     assert 'build-9' not in ' '.join(seen['argv'])
-    brisk.connect(codes=['7203'], upload=False).wait()
+    briskapi.connect(site='sbi', codes=['7203'], upload=False).wait()
     assert json.loads(capfd.readouterr().err.strip()) == {'argv': ['--codes', '7203'], 'profile': None}
 
 
 def test_live_feed_failure_closes(fake_host, tmp_path, monkeypatch):
-    brisk.login({'session_bfaf77a2': 'wrong'})
+    briskapi.login(cookies={'session_bfaf77a2': 'wrong'})
     with pytest.raises(briskapi.BriskError, match='before bootstrap'):
-        brisk.connect()
+        briskapi.connect(site='sbi')
 
 
 def test_cli_live_sbi(fake_host, monkeypatch, capsys):
@@ -265,19 +284,19 @@ def test_sbi_feed_uploads_timing(fake_host, monkeypatch):
     sent = []
     monkeypatch.setattr(cli, 'upload_timing', lambda report, url: sent.append((report, url)) or {'status': 'stored'})
     monkeypatch.setattr(cli, 'upload', lambda *args, **kwargs: {'status': 'stored'})
-    brisk.login({'session_bfaf77a2': 'v'})
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
     with pytest.warns(UserWarning, match='by default'):
-        feed = brisk.connect(upload_market_data=False).wait()
+        feed = briskapi.connect(site='sbi', upload_market_data=False).wait()
     assert feed.timing_uploaded == {'status': 'stored'} and feed.uploaded is None
     report, url = sent[0]
     assert url == cli.settings()['api_url'] and 'contributor' not in report
     assert report['frames'] == 150 and report['stalls'] == 1 and report['trading_date'] == '20260311'
     assert report['first_minute'] == '09:00' and report['source_age_ms']['p50'] == 20
     assert report['interarrival_ms']['max'] == 1500 and report['decode_ms']['p50'] > 0.25
-    assert brisk.connect(upload=False).wait().timing_uploaded is None and len(sent) == 1
+    assert briskapi.connect(site='sbi', upload=False).wait().timing_uploaded is None and len(sent) == 1
     monkeypatch.setattr(cli, 'upload_timing', lambda *a: 1 / 0)
     with pytest.warns(UserWarning, match='Timing upload failed'):
-        assert brisk.connect().wait().timing_uploaded['status'] == 'failed'
+        assert briskapi.connect(site='sbi').wait().timing_uploaded['status'] == 'failed'
 
 
 def test_cli_without_cookies_stops_before_prompt_or_decoder(monkeypatch, capsys):
@@ -294,9 +313,9 @@ def test_an_expired_session_fails_in_one_line_before_the_decoder_starts(monkeypa
     monkeypatch.setattr(briskapi._live, 'Feed', lambda *a, **k: pytest.fail('decoder must not start'))
     opener = Opener({'/api/frontend/boot': 401})
     monkeypatch.setattr(brisk.urllib.request, 'build_opener', lambda *handlers: opener)
-    brisk.login({'session_bfaf77a2': 'expired'})
+    briskapi.login(cookies={'session_bfaf77a2': 'expired'})
     with pytest.raises(brisk.SessionExpiredError, match='^SBI BRiSK session expired or invalid; log in again$'):
-        brisk.connect(codes=['7203'])
+        briskapi.connect(site='sbi', codes=['7203'])
     assert [r.full_url for r in opener.requests] == [brisk.ORIGIN + '/api/frontend/boot']
     monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "expired"}')
     with pytest.raises(SystemExit) as stop:
@@ -308,7 +327,7 @@ def test_an_expired_session_fails_in_one_line_before_the_decoder_starts(monkeypa
 def test_cookies_that_are_not_json_fail_in_one_line_without_their_value(monkeypatch):
     monkeypatch.setenv('BRISK_ESHITEN_COOKIES', '{session_bfaf77a2: secret-value}')
     with pytest.raises(brisk.SessionExpiredError, match='^BRISK_ESHITEN_COOKIES is not valid JSON') as error:
-        brisk.login(site='e-shiten')
+        briskapi.login(site='e-shiten')
     assert 'secret-value' not in str(error.value) and 'line 1 column 2' in str(error.value)
     with pytest.raises(SystemExit) as stop:
         cli.main(['live', '--site', 'e-shiten'])
@@ -317,25 +336,25 @@ def test_cookies_that_are_not_json_fail_in_one_line_without_their_value(monkeypa
     brisk.cookies_path().parent.mkdir(parents=True, exist_ok=True)
     brisk.cookies_path().write_text('session_bfaf77a2=secret-value')
     with pytest.raises(brisk.SessionExpiredError, match='is not valid JSON') as error:
-        brisk.login()
+        briskapi.login()
     assert str(brisk.cookies_path()) in str(error.value) and 'secret-value' not in str(error.value)
 
 
 def test_sbi_market_upload_needs_uploads_on(fake_host, monkeypatch):
-    brisk.login({'session_bfaf77a2': 'v'})
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
     briskapi.consent(revoke=True)
     with pytest.raises(briskapi.BriskError, match='uploads on'):
-        brisk.connect(upload_market_data=True)
+        briskapi.connect(site='sbi', upload_market_data=True)
     # A choice made under an earlier policy no longer applies: the default does, and says so.
     cli.consent_path().write_text(json.dumps({'policy_version': 2, 'enabled': False}))
     monkeypatch.setattr(cli, 'upload', lambda *args, **kwargs: {'status': 'stored'})
     monkeypatch.setattr(cli, 'upload_timing', lambda *args: {'status': 'stored'})
     with pytest.warns(UserWarning, match='by default'):
-        assert brisk.connect(upload_market_data=True).wait().uploaded == {'status': 'stored'}
+        assert briskapi.connect(site='sbi', upload_market_data=True).wait().uploaded == {'status': 'stored'}
 
 
 def test_sbi_market_upload_follows_consent_and_opt_outs(fake_host, monkeypatch):
-    brisk.login({'session_bfaf77a2': 'v'})
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
     briskapi.consent(accept=True)
     sent, timing = [], []
     def publish(directory, url, **options):
@@ -346,24 +365,24 @@ def test_sbi_market_upload_follows_consent_and_opt_outs(fake_host, monkeypatch):
     monkeypatch.setattr(cli, 'upload', publish)
     monkeypatch.setattr(cli, 'upload_timing', lambda *args: timing.append(args) or {'status': 'stored'})
     # Once agreed, a clean session uploads its market recording too, without asking.
-    feed = brisk.connect().wait()
+    feed = briskapi.connect(site='sbi').wait()
     assert feed.uploaded == {'status': 'stored'} and len(sent) == 1 and len(timing) == 1
     assert sent[0]['summary']['source'] == 'sbi_live' and set(sent[0]) == {'schema', 'sha256', 'bytes', 'summary'}
     assert not Path(feed._tmp.name).exists()
-    assert brisk.connect(upload_market_data=True).wait().uploaded == {'status': 'stored'} and len(sent) == 2
+    assert briskapi.connect(site='sbi', upload_market_data=True).wait().uploaded == {'status': 'stored'} and len(sent) == 2
     # The opt-outs: the market recording alone, the whole session, or the whole process.
-    feed = brisk.connect(upload_market_data=False).wait()
+    feed = briskapi.connect(site='sbi', upload_market_data=False).wait()
     assert feed.uploaded is None and feed.timing_uploaded == {'status': 'stored'} and len(sent) == 2
-    feed = brisk.connect(upload=False).wait()
+    feed = briskapi.connect(site='sbi', upload=False).wait()
     assert feed.uploaded is None and feed.timing_uploaded is None and len(timing) == 3
     with pytest.raises(briskapi.BriskError, match='upload=False keeps the whole session local'):
-        brisk.connect(upload_market_data=True, upload=False)
+        briskapi.connect(site='sbi', upload_market_data=True, upload=False)
     monkeypatch.setenv('BRISK_UPLOAD', '0')
-    feed = brisk.connect().wait()
+    feed = briskapi.connect(site='sbi').wait()
     assert feed.uploaded is None and feed.timing_uploaded is None and len(sent) == 2 and len(timing) == 3
     briskapi.consent(revoke=True)
     monkeypatch.delenv('BRISK_UPLOAD')
-    assert brisk.connect().wait().uploaded is None and len(sent) == 2 and len(timing) == 3
+    assert briskapi.connect(site='sbi').wait().uploaded is None and len(sent) == 2 and len(timing) == 3
 
 
 @pytest.mark.parametrize('answer,uploaded', [('\n', True), ('y\n', True), ('n\n', False), ('', False)])
@@ -402,9 +421,9 @@ def test_sbi_capture_closed_early_is_not_uploaded(tmp_path, monkeypatch):
     script.write_text(f'console.log({json.dumps(json.dumps(sbi_session()[0]))});\nsetInterval(() => {{}}, 1000);\n')
     monkeypatch.setattr(brisk, 'DECODER', script)
     monkeypatch.setattr(cli, 'upload', lambda *args, **kwargs: pytest.fail('incomplete capture must stay local'))
-    brisk.login({'session_bfaf77a2': 'v'})
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
     briskapi.consent(accept=True)
-    feed = brisk.connect(upload_market_data=True)
+    feed = briskapi.connect(site='sbi', upload_market_data=True)
     feed.close()
     assert feed.status == 'closed' and feed.uploaded is None
     assert not Path(feed._tmp.name).exists()
@@ -431,9 +450,9 @@ def test_a_feed_keeps_and_uploads_each_trading_day_as_it_ends(tmp_path, monkeypa
         return {'status': 'stored'}
     monkeypatch.setattr(cli, 'upload', publish)
     monkeypatch.setattr(cli, 'upload_timing', lambda report, url: timing.append(report['trading_date']) or {'status': 'stored'})
-    brisk.login({'session_bfaf77a2': 'v'})
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
     briskapi.consent(accept=True)
-    feed = brisk.connect(codes=['7203'], output=tmp_path / 'days', on_day=days.append).wait()
+    feed = briskapi.connect(site='sbi', codes=['7203'], output=tmp_path / 'days', on_day=days.append).wait()
     # One recording per day, named for its first and last source clock, kept and uploaded.
     assert sent == timing == ['20260311', '20260312'] and days == feed.recordings
     names = [day['name'] for day in feed.recordings]
@@ -445,21 +464,21 @@ def test_a_feed_keeps_and_uploads_each_trading_day_as_it_ends(tmp_path, monkeypa
     assert feed.trading_date == '20260312' and briskapi.Ticker('7203').quote()['last_price'] == 10200.0
     # Without uploads, days can still be kept; a new day must follow an end.
     briskapi.consent(revoke=True)
-    feed = brisk.connect(output=tmp_path / 'kept').wait()
+    feed = briskapi.connect(site='sbi', output=tmp_path / 'kept').wait()
     assert [day['uploaded'] for day in feed.recordings] == [None, None] and len(list((tmp_path / 'kept').iterdir())) == 2
     two_days(tmp_path, monkeypatch, second=sbi_session()[:3] + sbi_session())
     with pytest.raises(briskapi.BriskError, match='sequence error'):
-        brisk.connect(upload=False).wait()
+        briskapi.connect(site='sbi', upload=False).wait()
 
 
 def test_e_shiten_has_its_own_address_cookies_and_variable(monkeypatch):
     with pytest.raises(brisk.SessionExpiredError, match="No e-shiten BRiSK Next cookies.*site='e-shiten'"):
-        brisk.login(site='e-shiten')
+        briskapi.login(site='e-shiten')
     monkeypatch.setenv('BRISK_SBI_COOKIES', '{"for": "sbi"}')
     with pytest.raises(brisk.SessionExpiredError):  # SBI's cookies never go to another site
-        brisk.login(site='e-shiten')
+        briskapi.login(site='e-shiten')
     monkeypatch.setenv('BRISK_ESHITEN_COOKIES', '{"from": "env"}')
-    c = brisk.login(site='e-shiten')
+    c = briskapi.login(site='e-shiten')
     assert c.site == 'e-shiten' and c.session.cookies == {'from': 'env'}
     opener = Opener({})
     c.session._opener, c.session.rate_limit = opener, 0
@@ -467,14 +486,14 @@ def test_e_shiten_has_its_own_address_cookies_and_variable(monkeypatch):
         c.session.get('/api/frontend/boot')
     assert opener.requests[0].full_url == 'https://next.e-shiten.brisk.jp/api/frontend/boot'
     monkeypatch.delenv('BRISK_ESHITEN_COOKIES')
-    brisk.login({'saved': 'e'}, remember=True, site='e-shiten')
-    brisk.login({'saved': 's'}, remember=True)
+    briskapi.login(cookies={'saved': 'e'}, remember=True, site='e-shiten')
+    briskapi.login(cookies={'saved': 's'}, remember=True)
     assert json.loads(brisk.cookies_path('e-shiten').read_text()) == {'saved': 'e'}
     assert json.loads(brisk.cookies_path().read_text()) == {'saved': 's'}
-    brisk.logout()
+    briskapi.logout()
     assert not brisk.cookies_path('e-shiten').exists() and not brisk.cookies_path().exists()
     with pytest.raises(ValueError, match='Unknown BRiSK site'):
-        brisk.login({'a': 'b'}, site='matsui')
+        briskapi.login(cookies={'a': 'b'}, site='matsui')
 
 
 @pytest.fixture
@@ -502,18 +521,18 @@ def eshiten_host(tmp_path, monkeypatch):
 
 
 def test_e_shiten_uploads_like_sbi_and_honors_opt_out(eshiten_host, monkeypatch, capfd):
-    brisk.login({'s': 'v'}, site='e-shiten')
+    briskapi.login(cookies={'s': 'v'}, site='e-shiten')
     with pytest.warns(UserWarning, match='by default'):
-        feed = brisk.connect(codes=['7203']).wait()
+        feed = briskapi.connect(site='e-shiten', codes=['7203']).wait()
     assert feed.source == 'eshiten_live' and briskapi.Ticker('7203').quote()['last_price'] == 10160.0
     assert feed.timing_uploaded == {'status': 'stored'} and feed.uploaded == {'status': 'stored'}
     assert eshiten_host['timing'][0]['source'] == 'eshiten_live'
     assert eshiten_host['market'][0]['summary']['source'] == 'eshiten_live'
     assert 'e-shiten' in capfd.readouterr().err
-    assert brisk.connect(upload_market_data=False).wait().uploaded is None
-    assert brisk.connect(upload=False).wait().timing_uploaded is None
+    assert briskapi.connect(site='e-shiten', upload_market_data=False).wait().uploaded is None
+    assert briskapi.connect(site='e-shiten', upload=False).wait().timing_uploaded is None
     monkeypatch.setenv('BRISK_UPLOAD', '0')
-    feed = brisk.connect().wait()
+    feed = briskapi.connect(site='e-shiten').wait()
     assert feed.uploaded is None and feed.timing_uploaded is None
     assert len(eshiten_host['market']) == 1 and len(eshiten_host['timing']) == 2
 
@@ -536,11 +555,3 @@ def test_cli_asks_once_for_e_shiten_like_sbi(eshiten_host, monkeypatch, capsys, 
     with pytest.raises(SystemExit):
         cli.main(['live', '--web', '--upload-market-data'])
     assert '--upload-market-data requires --sbi or --site' in capsys.readouterr().err
-
-
-def test_the_old_module_name_still_works(monkeypatch):
-    monkeypatch.delitem(sys.modules, 'briskapi.sbi', raising=False)
-    monkeypatch.delattr(briskapi, 'sbi', raising=False)
-    with pytest.warns(DeprecationWarning, match='briskapi.brisk'):
-        from briskapi import sbi
-    assert sbi is brisk and sbi.login is brisk.login

@@ -64,7 +64,7 @@ GROUPS = {   # reference groups: slug prefix, title, Japanese title
     'historical/client': ('Client', 'クライアント'), 'historical/timeseries/': ('Timeseries', 'Timeseries'),
     'historical/metadata/': ('Metadata', 'Metadata'), 'historical/store/': ('DataStore', 'DataStore'),
     'python/ticker_': ('Ticker', 'Ticker'), 'python/market_': ('Market', 'Market'), 'python/feed_': ('Feed', 'Feed'),
-    'python/archive_': ('Archive', 'Archive'), 'python/brisk_': ('Your broker', '証券会社'), 'python/': ('Functions', '関数'),
+    'python/archive_': ('Archive', 'Archive'), 'python/broker_': ('Your broker', '証券会社'), 'python/': ('Functions', '関数'),
 }
 LANGUAGES = {'Python': 'python', 'HTTP': 'bash', 'CLI': 'bash'}
 LANGUAGE_LINE = re.compile(r'^\[English\]\([^)]*\) \| \[日本語\]\([^)]*\).*$', re.M)
