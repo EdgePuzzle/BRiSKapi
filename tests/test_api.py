@@ -474,7 +474,7 @@ def test_feed_uploads_complete_sessions(gated_decoder, tmp_path, monkeypatch):
     gate.touch()
     packaged = []
 
-    def package_parts(equity, parts, output):
+    def package_parts(equity, parts, output, repair=False):
         packaged.append([b['seq'] for b in _parquet.load_parts(equity, parts).iter_batches()])
 
     monkeypatch.setattr(cli, 'package_parts', package_parts)
@@ -490,14 +490,14 @@ def test_feed_uploads_complete_sessions(gated_decoder, tmp_path, monkeypatch):
         brisk.Feed(cache=tmp_path, upload=True)
     assert brisk.connect(site='demo', cache=tmp_path).wait().uploaded is None and len(packaged) == 1
     brisk.consent(accept=True)
-    monkeypatch.setattr(cli, 'package_parts', lambda *a: 1 / 0)
+    monkeypatch.setattr(cli, 'package_parts', lambda *a, **k: 1 / 0)
     with pytest.warns(UserWarning, match='upload failed'):
         assert brisk.connect(site='demo', cache=tmp_path).wait().uploaded['status'] == 'failed'
 
 
 def test_cli_live(gated_decoder, tmp_path, monkeypatch, capsys):
     gated_decoder().touch()
-    monkeypatch.setattr(cli, 'package_parts', lambda *a: None)
+    monkeypatch.setattr(cli, 'package_parts', lambda *a, **k: None)
     monkeypatch.setattr(cli, 'upload', lambda *a, **k: {'status': 'stored'})
     cli.main(['live', '--site', 'demo', '--cache', str(tmp_path), '--codes', '7203'])
     out = capsys.readouterr()

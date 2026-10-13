@@ -119,7 +119,7 @@ class Feed:
         if self._output and limit_frames is not None:
             raise BriskError('A partial replay (limit_frames) is not a recording to keep; drop output')
         self._stats, self._on_day = None, on_day
-        self.recordings: list[dict] = []  # one per finished day: trading_date, name, path, uploaded, timing_uploaded
+        self.recordings: list[dict] = []  # one per finished day: trading_date, name, path, uploaded, timing_uploaded, repaired
         self.timing_uploaded = None
         self._history = {} if history else None
         self._trade_history = []
@@ -329,7 +329,7 @@ class Feed:
                     raise BriskError(f'Stream sequence error at {batch.get("seq")}')
                 if first:
                     days += 1
-                    spool = _spool.Spool() if self._spooling else None
+                    spool = _spool.Spool(intent=self._intent()) if self._spooling else None
                     self._stats = TimingStats(self._timing) if self._timing else None
                 if spool:
                     spool.add(batch, line)
@@ -399,42 +399,67 @@ class Feed:
         if self.gateway:
             self.gateway.close(self.status, self.error)
 
+    def _intent(self):
+        """This session's choices for its days, kept with each spool for whoever finishes it."""
+        return {'upload': bool(self._package), 'output': str(self._output) if self._output else None}
+
     def _recover(self):
-        for kept in _spool.recover(self._output):
-            warnings.warn(f'A feed that stopped unexpectedly left a recording behind: kept in {kept} (not uploaded)')
+        """Finish the segments that processes which stopped unexpectedly left in the spool, as their sessions would
+        have: each repaired with the end it never got, kept in its session's output and uploaded if that session
+        uploaded and uploads are still on here."""
+        for spool in _spool.leftovers():
+            intent = spool.intent
+            if intent is None:   # a spool from before sessions recorded their choices: keep it, upload nothing
+                intent = {'upload': False, 'output': str(_spool.kept_dir())}
+            upload = bool(intent.get('upload')) and _consent(None, None)[1]
+            output = Path(intent['output']) if intent.get('output') else None
+            if not (upload or output):   # its session kept nothing (a gateway's spool only)
+                spool.remove()
+                continue
+            result = self._finish_segment(spool, None, upload=upload, output=output, repair=True)
+            where = ('uploaded' if result['uploaded'] and result['uploaded'].get('status') == 'stored' else 'not uploaded') + \
+                (f', kept in {result["path"]}' if result['path'] else '')
+            warnings.warn(f'A feed that stopped unexpectedly left {result["name"] or spool.path} behind: repaired with its '
+                          f'end and {where}')
 
     def _keep(self, spool):
-        """Keep a broker segment cut short (the feed stopped, or failed, before its end) on this computer: in
-        `output`, else in briskapi._spool.kept_dir(). It has no clean end, so it is never uploaded; a demo's is
-        dropped (it is the same for everyone)."""
-        try:
-            if self._broker and (self._package or self._output):
-                kept = spool.keep(self._output or _spool.kept_dir())
-                if kept:
-                    warnings.warn(f'The feed stopped before the day ended: what it recorded is kept in {kept} (not uploaded)')
-        except Exception as error:  # noqa: BLE001 - the feed has ended; report, do not fail
-            warnings.warn(f'Could not keep the recording in {spool.path}: {error}')
+        """Finish a broker segment cut short (its host did not end it: a crash, a kill, a host that did not stop in
+        time) like a day, with the end its host never wrote. A demo's is dropped: a partial replay is never uploaded."""
+        if not (self._broker and (self._package or self._output)):
+            spool.remove()
             return
-        spool.remove()
+        result = self._finish_segment(spool, None, upload=self._package, output=self._output, repair=True)
+        self._report(result)
+        warnings.warn(f'The day ended early without its end: {result["name"] or spool.path} was repaired with one'
+                      + (' and uploaded' if result['uploaded'] and result['uploaded'].get('status') == 'stored' else ''))
 
     def _finish_day(self, spool, stats):
         """Package a finished day, keep it in `output` and upload it and its timing summary, as chosen."""
-        result = {'trading_date': self.trading_date, 'name': None, 'path': None, 'uploaded': None, 'timing_uploaded': None}
+        self._report(self._finish_segment(spool, stats, upload=self._package, output=self._output))
+
+    def _finish_segment(self, spool, stats, *, upload, output, repair=False):
+        """Package a segment (repairing its end if asked), keep it in `output`, upload it and `stats`' timing summary;
+        the spool is removed after. Returns the result (trading_date, name, path, uploaded, timing_uploaded,
+        repaired)."""
+        result = {'trading_date': self._bootstrap and self._bootstrap['trading_date'], 'name': None, 'path': None,
+                  'uploaded': None, 'timing_uploaded': None, 'repaired': False}
         try:
-            if spool and (self._package or self._output):
+            if spool and (upload or output):
                 package = spool.path / 'package'
                 try:
-                    m = spool.package(package)
+                    m = spool.package(package, repair=repair)
                     result['name'] = m and schema.local_name(m['summary'])
-                    if self._output:
-                        target = self._output / result['name']
+                    result['trading_date'] = m['summary']['trading_date'] if m else result['trading_date']
+                    result['repaired'] = repair and not spool.ended
+                    if output:
+                        target = output / result['name']
                         if target.exists():
                             warnings.warn(f'{target} already exists; this day was not kept')
                         else:
-                            self._output.mkdir(parents=True, exist_ok=True)
+                            output.mkdir(parents=True, exist_ok=True)
                             shutil.copytree(package, target)
                             result['path'] = str(target)
-                    if self._package:
+                    if upload:
                         result['uploaded'] = cli.upload(package, cli.settings()['api_url'], verify=False, out=sys.stderr)
                 except Exception as error:  # noqa: BLE001 - market data was delivered; report, do not fail
                     result['uploaded'] = {'status': 'failed', 'error': str(error)}
@@ -449,6 +474,9 @@ class Feed:
         finally:
             if spool:
                 spool.remove()
+        return result
+
+    def _report(self, result):
         self.uploaded, self.timing_uploaded = result['uploaded'], result['timing_uploaded']
         self.recordings.append(result)
         if self._on_day:

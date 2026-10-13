@@ -451,20 +451,51 @@ setInterval(() => {{}}, 1000);
     assert not any(_spool.kept_dir().glob('*')) and not any(_spool.spool_root().glob('segment-*'))
 
 
-def test_a_capture_whose_host_cannot_end_its_day_is_kept_but_not_uploaded(tmp_path, monkeypatch):
-    script = tmp_path / 'held.cjs'
+def test_a_day_whose_host_cannot_end_it_is_repaired_with_its_end_and_uploaded(tmp_path, monkeypatch):
+    script = tmp_path / 'held.cjs'   # prints the bootstrap, then neither ends its day nor stops but by force
     script.write_text(f'console.log({json.dumps(json.dumps(sbi_session()[0]))});\nsetInterval(() => {{}}, 1000);\n')
     monkeypatch.setattr(brisk, 'DECODER', script)
-    monkeypatch.setattr(cli, 'upload', lambda *args, **kwargs: pytest.fail('incomplete capture must stay local'))
+    sent = []
+    def publish(directory, url, **options):
+        m = json.loads((directory / 'manifest.json').read_text())
+        _parquet.inspect_package(directory, m)
+        sent.append(m['summary'])
+        return {'status': 'stored'}
+    monkeypatch.setattr(cli, 'upload', publish)
     briskapi.login(cookies={'session_bfaf77a2': 'v'})
     briskapi.consent(accept=True)
     feed = briskapi.connect(site='sbi', upload_market_data=True)
-    with pytest.warns(UserWarning, match='stopped before the day ended'):
-        feed.close()
-    assert feed.status == 'closed' and feed.uploaded is None
-    kept, = _spool.kept_dir().iterdir()
-    assert kept.name.startswith('sbi_live_20260311_') and not (kept / 'manifest.json').exists()
-    assert briskapi.Market(briskapi.Recording(kept)).summary()['trading_date'] == '20260311'
+    with pytest.warns(UserWarning, match='repaired with one and uploaded'):
+        feed.close(timeout=0.5)
+    assert feed.status == 'closed' and feed.uploaded == {'status': 'stored'}
+    assert [s['batches'] for s in sent] == [2], 'the bootstrap and its repaired end'
+    assert feed.recordings[-1]['repaired'] and feed.recordings[-1]['name'].startswith('sbi_live_20260311_')
+    assert not any(_spool.kept_dir().glob('*')) and not any(_spool.spool_root().glob('segment-*'))
+
+
+def test_the_next_feed_repairs_and_uploads_a_crashed_sessions_day_as_that_session_would_have(fake_host, tmp_path, monkeypatch):
+    import subprocess as sp
+    dead = int(sp.run([sys.executable, '-c', 'import os; print(os.getpid())'], capture_output=True, text=True).stdout)
+    def crashed(batches, intent):
+        spool = _spool.Spool(intent=intent)
+        for b in batches:
+            spool.add(b, json.dumps(b).encode() + b'\n')
+        spool.close_part(wait=True)
+        spool._writer.shutdown()
+        owner = spool.path / 'owner.json'
+        owner.write_text(json.dumps({**json.loads(owner.read_text()), 'pid': dead}))
+    crashed(sbi_session()[:30], {'upload': True, 'output': str(tmp_path / 'days')})
+    crashed(sbi_session()[:20], {'upload': False, 'output': None})   # a gateway's only: its session kept nothing
+    sent = []
+    monkeypatch.setattr(cli, 'upload', lambda directory, url, **o: sent.append(
+        json.loads((directory / 'manifest.json').read_text())['summary']['batches']) or {'status': 'stored'})
+    monkeypatch.setattr(cli, 'upload_timing', lambda report, url: {'status': 'stored'})
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    briskapi.consent(accept=True)
+    with pytest.warns(UserWarning, match='stopped unexpectedly left sbi_live_20260311_090000-090002 behind: repaired'):
+        briskapi.connect(site='sbi', codes=['7203']).wait()
+    assert sorted(sent) == [31, 152], 'the crashed session\'s day, repaired, and this one\'s'
+    assert [p.name for p in (tmp_path / 'days').iterdir()] == ['sbi_live_20260311_090000-090002']
     assert not any(_spool.spool_root().glob('segment-*'))
 
 

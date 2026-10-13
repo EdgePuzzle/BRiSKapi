@@ -43,7 +43,7 @@ The cloud API (`brisk query`) builds OHLC bars from your own broker recordings o
 the securities and times they cover: no one else's uploads enter your results, and yours
 enter no one else's.
 Every clean, complete session uploads automatically (the default; you can decline), and
-so does the part of a broker day recorded before a lost connection or before you stop it:
+so does the part of a broker day recorded before a lost connection, a stop or a crash:
   - demo sessions: the decoded market data and local timing measurements (decode
     durations, replay lateness, asset download time and your computer's receipt clock,
     which shows when you recorded);
@@ -173,9 +173,15 @@ def package(events, output):
     """Encode decoder JSONL as a package: the recording's tables plus a manifest of their zip."""
     return _package(output, lambda: save_recording(events, output))
 
-def package_parts(equity, parts, output):
-    """A spooled segment (briskapi._spool) as a package: the same tables and manifest as package() of its batches."""
-    return _package(output, lambda: _parquet.load_parts(equity, parts).write(output))
+def package_parts(equity, parts, output, repair=False):
+    """A spooled segment (briskapi._spool) as a package: the same tables and manifest as package() of its batches.
+    With `repair`, a segment cut short first gets the end its host never wrote (_parquet.repair_end)."""
+    def write():
+        columns = _parquet.load_parts(equity, parts)
+        if repair:
+            _parquet.repair_end(columns)
+        columns.write(output)
+    return _package(output, write)
 
 def _package(output, write):
     output.mkdir(parents=True, exist_ok=True)

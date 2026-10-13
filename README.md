@@ -102,12 +102,12 @@ most its last half-minute. When the day ends they become its recording.
   it is, as the close would: the day so far is a complete recording (`..._085800-121500`), kept
   and uploaded like any day. Start again later and the rest of the day is another recording;
   the cloud API merges them.
-- **A crash or a forced kill** can't end the day: what reached the disk (all but its last
-  half-minute) is kept on your computer, in `--output DIR` or else
-  `~/.local/share/brisk/recordings`, as a recording without a manifest. You can load it, but it
-  isn't uploaded (a broker session still uploads its timing summary unless you opt out). A
-  crash's leftovers are kept there the next time a feed starts. So is a day whose host doesn't
-  end it within 30 seconds of being asked to stop.
+- **A crash or a forced kill** can't end the day, so it is repaired: the day so far (all but
+  its last half-minute, still in the spool) gets the end marker its host never wrote, and is then
+  kept and uploaded as that session's settings said. After a crash this happens when you next
+  start a feed; for a host that doesn't end within 30 seconds of being asked to stop, right away.
+  The repaired end counts the day's quote updates exactly; its frame count and duration, which
+  died with the host, are rebuilt from the recording.
 
 ## Live feed
 
@@ -531,7 +531,8 @@ Python), until you decide with `brisk consent --accept` or `--revoke`
   longer be restored and is removed.
 - Partial replays (`--limit-frames`) are never uploaded. A broker feed you stop mid-day ends that
   day there and uploads it, and the part of a day before a lost connection is uploaded once the
-  feed reconnects; only a day a crash or forced kill cuts short stays on your computer instead.
+  feed reconnects. A day a crash or forced kill cuts short is repaired with its end and uploaded
+  too (the next time a feed starts, after a crash).
 
 ## Querying your archive in the cloud
 

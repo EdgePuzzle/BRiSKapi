@@ -690,6 +690,24 @@ def load_parts(equity, parts):
                    t_code[t_order], order=np.lexsort((q['seq'], q['issue_id'])))
 
 
+def repair_end(columns) -> bool:
+    """Give a segment cut short (a crash, a forced kill) the end its host never wrote, so it is a recording like
+    any other; True if it needed one. The end counts the segment's quote updates exactly, as the host would; the
+    host's frame count and wall time are gone with it, so `frames` is the least a recording allows (one per batch
+    after the bootstrap) and `replay_wall_ms` the span of the batches' local receipt times."""
+    last = columns.batches[-1]
+    if last['type'] == 'end':
+        return False
+    kinds = {b['seq']: b['type'] for b in columns.batches}
+    per_batch = np.bincount(columns.q['seq'], minlength=last['seq'] + 1) if len(columns.q['seq']) else np.zeros(last['seq'] + 1, int)
+    updates = int(sum(int(n) for seq, n in enumerate(per_batch) if kinds.get(seq) == 'quotes'))
+    received = [b['received_unix_ms'] for b in columns.batches if b['type'] == 'quotes' and b.get('received_unix_ms') is not None]
+    columns.batches = [*columns.batches, {'type': 'end', 'seq': last['seq'] + 1, 'source_time_us': last['source_time_us'],
+                                          'frames': last['seq'], 'quote_updates': updates,
+                                          'replay_wall_ms': float(received[-1] - received[0]) if received else 0.0}]
+    return True
+
+
 def part_batches(part, header, master):
     """A spool part's decoder batches, in order (quotes by issue within a batch, as the canonical stream has them)."""
     return _part_columns(Path(part), midnight_ns(header['trading_date']), master).iter_batches()

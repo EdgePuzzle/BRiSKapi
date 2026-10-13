@@ -11,7 +11,8 @@ A part closes every PART_SECONDS, or sooner after PART_BYTES of decoder output, 
 the feed stops, so a crash loses at most the part still open. A segment takes about the disk of its finished
 recording (its decoded JSON would take some twenty times more). Once it ends, package() turns the parts into
 the canonical recording: the same bytes as from the segment's batches at once. A feed that crashed leaves its
-folder behind; the next feed keeps what it holds as a recording on this computer (recover()).
+folder behind, with its session's choices (upload, output) in owner.json; the next feed packages it as that
+session would have, repairing the end it never got (leftovers(), _parquet.repair_end).
 """
 from __future__ import annotations
 
@@ -59,11 +60,13 @@ def _fsync(path):
 class Spool:
     """One segment's spool. The feed calls add() with each batch and its line, in order, from one thread."""
 
-    def __init__(self, root=None):
+    def __init__(self, root=None, intent=None):
         root = Path(root or spool_root())
         root.mkdir(parents=True, exist_ok=True)
         self.path = Path(tempfile.mkdtemp(prefix='segment-', dir=root))
-        (self.path / 'owner.json').write_text(json.dumps({'pid': os.getpid(), 'started': time.time()}))
+        # What the session wanted for its days, for whoever finishes this spool if the session cannot.
+        self.intent = intent
+        (self.path / 'owner.json').write_text(json.dumps({'pid': os.getpid(), 'started': time.time(), 'intent': intent}))
         self.header = None        # the bootstrap without quotes and trades
         self.master = None
         self.ended = False
@@ -76,6 +79,18 @@ class Spool:
         self._writer = ThreadPoolExecutor(1, thread_name_prefix='brisk-spool')
         self._error = None
         self._readers, self._removed = 0, False
+
+    @classmethod
+    def reopen(cls, folder, intent=None):
+        """A spool a stopped process left: its closed parts, to package or keep."""
+        spool = cls.__new__(cls)
+        spool.path, spool.intent, spool.header, spool.master, spool.ended, spool.count = Path(folder), intent, None, None, False, 0
+        spool._lock, spool._lines, spool._size, spool._pending, spool._carry = threading.Lock(), [], 0, [], {}
+        parts = sorted(p for p in (spool.path / 'parts').glob('[0-9]*') if p.is_dir()) if (spool.path / 'parts').is_dir() else []
+        spool._parts = [(part, 0, 0) for part in parts]
+        spool._writer, spool._error, spool._readers, spool._removed = ThreadPoolExecutor(1), None, 0, False
+        spool._opened = time.monotonic()
+        return spool
 
     def __repr__(self):
         return f'Spool({str(self.path)!r}, lines={self.count})'
@@ -153,11 +168,12 @@ class Spool:
     def parts(self):
         return [folder for folder, _, _ in self._parts]
 
-    def package(self, output):
-        """The segment, which ended cleanly, as a package in `output` (see briskapi.cli.package_parts)."""
+    def package(self, output, repair=False):
+        """The segment as a package in `output` (see briskapi.cli.package_parts); with `repair`, one cut short gets
+        the end its host never wrote."""
         from briskapi import cli
         self.close_part(wait=True)
-        return cli.package_parts(self.path / _parquet.EQUITY, self.parts(), Path(output))
+        return cli.package_parts(self.path / _parquet.EQUITY, self.parts(), Path(output), repair=repair)
 
     def keep(self, root):
         """The segment so far, which did not end cleanly, as a recording (tables, no manifest) in a folder of `root`
@@ -213,10 +229,11 @@ def _alive(pid) -> bool:
     return True
 
 
-def recover(output=None, root=None):
-    """Keep what feeds that crashed left in the spool: each broker segment as a recording in `output` (else in
-    kept_dir()), never uploaded; a demo's is the same for everyone and is dropped. Returns the folders kept."""
-    root, kept = Path(root or spool_root()), []
+def leftovers(root=None):
+    """The broker segments that processes which stopped unexpectedly left in the spool, reopened (Spool.reopen)
+    with their session's choices as `intent` (None from a spool that never recorded them). A demo's is the same for
+    everyone and is deleted; a damaged spool is reported and left for a look."""
+    root, found = Path(root or spool_root()), []
     for folder in sorted(root.glob('segment-*')) if root.is_dir() else ():
         try:
             owner = json.loads((folder / 'owner.json').read_text())
@@ -224,18 +241,20 @@ def recover(output=None, root=None):
             owner = {}
         if isinstance(owner.get('pid'), int) and owner['pid'] != os.getpid() and _alive(owner['pid']):
             continue
-        parts = sorted(p for p in (folder / 'parts').glob('[0-9]*') if p.is_dir()) if (folder / 'parts').is_dir() else []
+        spool = Spool.reopen(folder, owner.get('intent'))
         try:
+            parts = spool.parts()
             source = parts and _parquet.pq.read_table(parts[0] / _parquet.BATCHES, columns=['source']).column(0)[0].as_py()
-            if source and source not in DEMO_SOURCES:
-                target = keep_parts(folder / _parquet.EQUITY, parts, output or kept_dir())
-                if target:
-                    kept.append(target)
+            if parts and not (folder / _parquet.EQUITY).exists():
+                raise ValueError('its equity table is missing')
         except Exception as error:  # noqa: BLE001 - a damaged spool must not stop the next feed
             warnings.warn(f'Could not recover the recording in {folder}: {error}')
             continue
-        shutil.rmtree(folder, ignore_errors=True)
-    return kept
+        if source and source not in DEMO_SOURCES:
+            found.append(spool)
+        else:
+            spool.remove()
+    return found
 
 
 def keep_parts(equity, parts, root):

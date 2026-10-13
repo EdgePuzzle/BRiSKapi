@@ -68,11 +68,12 @@ Python API calls never prompt. Where nothing can ask, in the Python API or a com
 without a terminal, and you have not decided yet, sessions are uploaded by default: the tool
 says so once per process (a Python warning, or on stderr), naming your owner ID and the
 opt-outs, and makes your identity if there is none. Deciding with `brisk consent --accept`
-or `--revoke` (`briskapi.consent(accept=True)` or `revoke=True`) replaces the default. Partial replays (`--limit-frames`) are never uploaded. Neither is a broker session that
-couldn't end its day, because a crash or a forced kill stopped it, or it didn't end within 30
-seconds of being asked to stop (it still uploads its timing summary if it ran for at least 100
-frames): with uploads on or `--output DIR`, what it recorded is kept on your computer, in
-`--output DIR` or else `~/.local/share/brisk/recordings`, for you to keep or delete.
+or `--revoke` (`briskapi.consent(accept=True)` or `revoke=True`) replaces the default. Partial replays (`--limit-frames`) are never uploaded. A broker session that couldn't end its
+day, because a crash or a forced kill stopped it or it didn't end within 30 seconds of being
+asked to stop, is finished for it: the day so far (all but at most its last half-minute) gets the
+end marker the session never wrote and is kept and uploaded as that session's settings said
+(right away, or by the next feed you start after a crash). A session that kept nothing, with
+uploads off and no `--output`, keeps nothing then either.
 
 Opting out:
 
@@ -155,8 +156,8 @@ from your own browser. They are credentials:
   and only the BRiSK host's cookies are taken from it.
 - With uploads on, each trading day of a broker session's decoded market recording (SBI or
   e-shiten) is uploaded after that day ends, the part of a day before a lost connection once the
-  session reconnects, and the day so far when you stop the session. A day still open when the
-  session crashes or is killed, `--no-upload-market-data` or
+  session reconnects, and the day so far when you stop the session, or when it crashes or is
+  killed (repaired, as above). `--no-upload-market-data` or
   `briskapi.connect(site=..., upload_market_data=False)` keeps it local.
 - With uploads on, a broker session (SBI or e-shiten) uploads one **timing summary** per
   trading day (per part of a day, when a lost connection or a stop splits it) to your private

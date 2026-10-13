@@ -116,32 +116,57 @@ def test_a_replay_keeps_the_spool_until_it_is_read(tmp_path):
     assert not unread.path.exists()
 
 
-def test_a_crashed_feeds_spool_is_kept_as_a_recording_and_a_demos_dropped(tmp_path):
-    root, out = tmp_path / 'spool', tmp_path / 'kept'
+def dead_pid():
+    return int(subprocess.run([sys.executable, '-c', 'import os; print(os.getpid())'], capture_output=True, text=True).stdout)
+
+
+def test_leftovers_are_crashed_broker_spools_with_their_sessions_choices_and_a_demos_dropped(tmp_path):
+    root, intent = tmp_path / 'spool', {'upload': True, 'output': str(tmp_path / 'days')}
     for source in ('sbi_live', 'historical_mock'):
-        spool = spooled(tmp_path, session(source=source)[:25])
+        _spool.PART_BYTES, spool = 1500, _spool.Spool(root=root, intent=intent)
+        for b, line in zip(session(source=source)[:25], lines(session(source=source)[:25])):
+            spool.add(b, line)
         spool.close_part(wait=True)
         spool._writer.shutdown()
-    dead = subprocess.run([sys.executable, '-c', 'import os; print(os.getpid())'], capture_output=True, text=True)
     for owner in root.glob('segment-*/owner.json'):
-        owner.write_text(json.dumps({'pid': int(dead.stdout), 'started': 0}))
-    live = _spool.Spool(root=root)   # this process's own: left alone
+        owner.write_text(json.dumps({**json.loads(owner.read_text()), 'pid': dead_pid()}))
+    live = _spool.Spool(root=root)   # a running process's own: left alone
     live.add(session()[0], lines(session())[0])
     (live.path / 'owner.json').write_text(json.dumps({'pid': os.getppid(), 'started': 0}))
-    kept = _spool.recover(out, root=root)
-    assert [k.name for k in kept] == ['sbi_live_20260311_090000-090002'] and not (kept[0] / 'manifest.json').exists()
-    recording = briskapi.Recording(kept[0])
+    found, = _spool.leftovers(root)
+    assert found.intent == intent and len(found.parts()) > 3 and repr(found).startswith('Spool(')
+    assert sorted(p.name for p in root.iterdir()) == sorted([found.path.name, live.path.name]), 'the demo\'s is gone'
+    m = found.package(tmp_path / 'package', repair=True)
+    assert m['summary']['batches'] == 26 and m['summary']['source'] == 'sbi_live'
+    recording = briskapi.Recording(tmp_path / 'package')
     assert len(briskapi.Market(recording).trades()) == 1 + 4 * 8   # the history's, and batches 3, 6, ... 24
-    assert sorted(p.name for p in root.iterdir()) == [live.path.name]
 
 
-def test_recover_keeps_in_kept_dir_without_output_and_skips_damage(tmp_path):
+@pytest.mark.parametrize('cut', [1, 2, 10, 25, 41])
+def test_a_repaired_end_is_one_the_archive_accepts(tmp_path, cut):
+    batches = session()[:cut]
+    spool = spooled(tmp_path, batches)
+    m = spool.package(tmp_path / 'package', repair=True)
+    _parquet.inspect_package(tmp_path / 'package', m)
+    end = _parquet._decode_batches(_parquet.pq.read_table(tmp_path / 'package' / _parquet.BATCHES))[-1]
+    quotes = [b for b in batches if b['type'] == 'quotes']
+    received = [b['received_unix_ms'] for b in quotes]
+    assert end == {'type': 'end', 'seq': cut, 'source_time_us': batches[-1]['source_time_us'], 'frames': cut - 1,
+                   'quote_updates': sum(len(b['quotes']) for b in quotes),
+                   'replay_wall_ms': float(received[-1] - received[0]) if received else 0.0}
+    # One that ended needs no repair: the same bytes as without it.
+    whole = spooled(tmp_path / 'whole', session())
+    columns = _parquet.load_parts(whole.path / _parquet.EQUITY, (whole.close_part(wait=True), whole.parts())[1])
+    assert not _parquet.repair_end(columns)
+
+
+def test_a_damaged_spool_is_left_for_a_look(tmp_path):
     spool = spooled(tmp_path, session()[:10])
     spool.close_part(wait=True)
     (spool.path / 'owner.json').write_text('not json')
     (spool.path / _parquet.EQUITY).unlink()
     with pytest.warns(UserWarning, match='Could not recover'):
-        assert _spool.recover(root=tmp_path / 'spool') == []
+        assert _spool.leftovers(tmp_path / 'spool') == []
     assert spool.path.exists(), 'kept for a look, not deleted'
     assert _spool.keep_parts(tmp_path / 'x', [], tmp_path) is None
 

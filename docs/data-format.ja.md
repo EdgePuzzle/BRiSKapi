@@ -240,7 +240,7 @@ OHLCV バー（`ohlcv-1s` 〜 `ohlcv-1d`）は、クラウド API から、ま�
 | `data/order_book_depths.parquet` | 気配更新 | `bids`, `asks`（最大10本、最良が先頭：`price`, `size`, `count`、および v2 の `order_id`（常に 0））, `flags`, `sequence`（フレーム）, `ts_event`, `ts_init`（同じ値）, `identifier`（`CODE.XTKS`）, `issue_id`, `seq`（バッチ）。続いて、上記の `brisk-quotes` と同じ気配の項目（価格は decimal） |
 | `data/trades.parquet` | 約定 | `price`, `size`, `aggressor_side`（`BUY`, `SELL`, `NO_AGGRESSOR`）, `trade_id`, `ts_event`, `ts_init`, `identifier`, `issue_id`, `seq`, `frame`, `side`（BRiSK の種別そのまま：1 は買い手が仕掛けた、2 は売り手が仕掛けた） |
 | `data/equity.parquet` | 銘柄 | v2 の `Equity`: `id`（`CODE.XTKS`）, `raw_symbol`（銘柄コード）, `currency`, `price_precision`, `price_increment`, `lot_size`, `max_price`/`min_price`（その日の値幅制限）, `ts_event`/`ts_init`（日本時間0時）。続いて `issue_id`, `tick_type`, `issue_type`, `name`, `base_price` |
-| `data/custom/BriskBatch.parquet` | デコードしたバッチ（フレーム） | `seq`, `kind`（`bootstrap`, `history`, `quotes`, `end`）, `received_unix_ms`（ローカルの受信時刻）, `decode_ns`, `replay_lateness_ms`, `skipped_issues`, `frames`, `quote_updates`, `replay_wall_ms`。`bootstrap` の行には `source`, `trading_date`, `input_transport`, `market_issue_count` |
+| `data/custom/BriskBatch.parquet` | デコードしたバッチ（フレーム） | `seq`, `kind`（`bootstrap`, `history`, `quotes`, `end`）, `received_unix_ms`（ローカルの受信時刻）, `decode_ns`, `replay_lateness_ms`, `skipped_issues`, `frames`, `quote_updates`, `replay_wall_ms`（クラッシュ後に修復した日では、`end` の `frames` と `replay_wall_ms` は記録から組み立て直したもの）。`bootstrap` の行には `source`, `trading_date`, `input_transport`, `market_issue_count` |
 
 受信時刻は `BriskBatch` にあります。行の `seq` をバッチの `received_unix_ms` に結合してください。
 `history` のバッチには、セッションのスナップショットがその日の早い時間から復元した約定が入っていて、

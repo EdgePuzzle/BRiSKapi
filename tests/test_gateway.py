@@ -204,7 +204,7 @@ def test_one_session_spans_trading_days(decoder):
 def test_the_demo_through_connect_and_the_cli(decoder, monkeypatch, capsys):
     script, release = decoder(market(), holds=[1])
     monkeypatch.setattr(_live, 'DECODER', script)
-    monkeypatch.setattr(cli, 'package_parts', lambda *a: 1 / 0)    # the gateway alone packages nothing
+    monkeypatch.setattr(cli, 'package_parts', lambda *a, **k: 1 / 0)    # the gateway alone packages nothing
     errors = []
     runner = threading.Thread(target=lambda: errors.append(cli.main(['live', '--site', 'demo', '--cache', '.', '--quiet', '--no-upload'])))
     runner.start()

@@ -180,13 +180,19 @@ reached its end, a day or the part of one before a lost connection or a stop (se
 its host to end the running day (SIGTERM, which `brisk live` also gets from Ctrl-C, `kill` or a
 shutdown) and waits up to 30 s for the host to exit, its end written and read, before killing it;
 a demo replay is killed at once (a partial replay is never uploaded). A broker segment that is
-still unfinished when the feed closes or fails, after a crash, a forced kill or a host that did
-not end in time, is never uploaded (the feed uploads only its timing summary); with uploads
-on or `output`, its parts are kept as a recording without a manifest in `output`, else in
-`~/.local/share/brisk/recordings` (`Spool.keep`), and a demo's are dropped, being the same for
-everyone. A spool a crash left behind (its owner process gone) is kept the same way when the
-next feed starts (`_spool.recover`). `wait()` and `close()` return after the days already
-finished are kept and uploaded.
+still unfinished when the feed closes or fails (a host that crashed, was killed or did not end in
+time) is repaired: `_parquet.repair_end` appends the `end` its host never wrote, and the feed
+finishes it like a day (`_finish_segment(repair=True)`), its result marked `repaired`. The repaired
+end's `quote_updates` counts the segment's quote updates exactly, as the host does; the host's
+frame count and wall time died with it, so `frames` is the least the archive's check allows (one per
+batch after the bootstrap) and `replay_wall_ms` the span of the batches' `received_unix_ms`. A demo's
+segment is dropped, being the same for everyone. Each spool records its session's choices
+(`intent`: upload, output) in `owner.json`; a spool a crash left behind (its owner process gone) is
+finished the same way by the next feed to start (`_spool.leftovers`, `Feed._recover`): uploaded if
+its session uploaded and uploads are still on, kept in its session's `output`, and dropped if that
+session kept nothing (a gateway's spool only). A segment that fails even so is kept in
+`~/.local/share/brisk/recordings`. `wait()` and `close()` return after the days already finished
+are kept and uploaded.
 
 ## Live gateway
 
