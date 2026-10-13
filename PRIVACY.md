@@ -57,7 +57,9 @@ another until you stop it, and each day is uploaded once it ends (when the site 
 next trading date, or the server closes the stream). If the connection to your broker's BRiSK
 drops during a day, the session reconnects by itself: what it recorded before the drop is a
 complete recording of its own, uploaded like a finished day, and the rest of the day is recorded
-from a fresh snapshot. While a live session runs, each day is written to your computer as it
+from a fresh snapshot. Stopping a broker session (Ctrl-C, `kill`, shutting the computer down,
+or `close()` in Python) ends its day there, as the day's end would, so the day so far is uploaded
+like any day. While a live session runs, each day is written to your computer as it
 arrives, as Parquet files in briskapi's spool folder (`~/.local/share/brisk/spool`, or under
 `$XDG_DATA_HOME`), so that a crash loses at most its last half-minute; they are deleted once
 that day is packaged.
@@ -66,11 +68,11 @@ Python API calls never prompt. Where nothing can ask, in the Python API or a com
 without a terminal, and you have not decided yet, sessions are uploaded by default: the tool
 says so once per process (a Python warning, or on stderr), naming your owner ID and the
 opt-outs, and makes your identity if there is none. Deciding with `brisk consent --accept`
-or `--revoke` (`briskapi.consent(accept=True)` or `revoke=True`) replaces the default. Partial replays (`--limit-frames`) are never uploaded. Neither is a broker session you
-close before the day ends, or one a crash stops (it still uploads its timing summary if it ran
-for at least 100 frames): with uploads on or `--output DIR`, what it recorded is kept on your
-computer, in `--output DIR` or else `~/.local/share/brisk/recordings`, for you to keep or
-delete.
+or `--revoke` (`briskapi.consent(accept=True)` or `revoke=True`) replaces the default. Partial replays (`--limit-frames`) are never uploaded. Neither is a broker session that
+couldn't end its day, because a crash or a forced kill stopped it, or it didn't end within 30
+seconds of being asked to stop (it still uploads its timing summary if it ran for at least 100
+frames): with uploads on or `--output DIR`, what it recorded is kept on your computer, in
+`--output DIR` or else `~/.local/share/brisk/recordings`, for you to keep or delete.
 
 Opting out:
 
@@ -152,12 +154,13 @@ from your own browser. They are credentials:
   temporary and deleted afterwards (one left by a force-killed run is removed at the next start),
   and only the BRiSK host's cookies are taken from it.
 - With uploads on, each trading day of a broker session's decoded market recording (SBI or
-  e-shiten) is uploaded after that day ends, and the part of a day before a lost connection once
-  the session reconnects. A day still open when you stop the session or it crashes,
-  `--no-upload-market-data` or `briskapi.connect(site=..., upload_market_data=False)` keeps it local.
+  e-shiten) is uploaded after that day ends, the part of a day before a lost connection once the
+  session reconnects, and the day so far when you stop the session. A day still open when the
+  session crashes or is killed, `--no-upload-market-data` or
+  `briskapi.connect(site=..., upload_market_data=False)` keeps it local.
 - With uploads on, a broker session (SBI or e-shiten) uploads one **timing summary** per
-  trading day (per part of a day, when a lost connection splits it) to your private archive when
-  the day ends (or when you close it after at least 100 frames): the
+  trading day (per part of a day, when a lost connection or a stop splits it) to your private
+  archive when the day ends, or is stopped (after at least 100 frames): the
   p50/p90/p99/max of per-frame decode time, of the feed clock's age at local receipt and of
   the spacing between frames; the number of gaps over one second; the frame count; the
   trading date; the first and last minute (JST) of the session; and the briskapi version.

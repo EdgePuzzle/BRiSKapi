@@ -98,11 +98,16 @@ most its last half-minute. When the day ends they become its recording.
   (`..._102000-153512`). Only the gap is missing; the cloud API merges the two. It stops for
   good when another connection can't help: an expired session, another BRiSK window open on
   your account, or a site that changed.
-- **Stopping partway** (Ctrl-C, or a crash) keeps what the day recorded so far on your
-  computer, in `--output DIR` or else `~/.local/share/brisk/recordings`, as a recording without
-  a manifest: you can load it, but it isn't uploaded (a broker session still uploads its
-  timing summary unless you opt out). A crash's leftovers are kept there the next time a feed
-  starts.
+- **Stopping** (Ctrl-C, `kill`, shutting the computer down, `feed.close()`) ends the day where
+  it is, as the close would: the day so far is a complete recording (`..._085800-121500`), kept
+  and uploaded like any day. Start again later and the rest of the day is another recording;
+  the cloud API merges them.
+- **A crash or a forced kill** can't end the day: what reached the disk (all but its last
+  half-minute) is kept on your computer, in `--output DIR` or else
+  `~/.local/share/brisk/recordings`, as a recording without a manifest. You can load it, but it
+  isn't uploaded (a broker session still uploads its timing summary unless you opt out). A
+  crash's leftovers are kept there the next time a feed starts. So is a day whose host doesn't
+  end it within 30 seconds of being asked to stop.
 
 ## Live feed
 
@@ -255,9 +260,9 @@ also keeps each finished day in DIR, in a folder named
 `SOURCE_YYYYMMDD_FROM-TO` (the day's first and last source clock, JST HHMMSS), such as
 `sbi_live_20261013_085800-153512`. `feed.recordings` lists the finished days (`trading_date`,
 `name`, `path`, `uploaded`, `timing_uploaded`), and `on_day=callback` is called for each.
-Without `output`, a finished day is kept only in your archive, and with uploads off, nowhere. A
-day still open when you stop the feed is not uploaded, only its timing summary; what it recorded
-is kept on your computer ([Recording](#recording)). A lost connection reconnects by itself.
+Without `output`, a finished day is kept only in your archive, and with uploads off, nowhere.
+Stopping the feed (`feed.close()`, Ctrl-C) ends the day there, so it is kept and uploaded like any
+day; a lost connection reconnects by itself ([Recording](#recording)).
 
 Results use the conventions below. Errors are `briskapi.brisk.SessionExpiredError` (log in
 again), `briskapi.NotFoundError`, `briskapi.brisk.RateLimitError` and `briskapi.brisk.APIError`.
@@ -524,10 +529,9 @@ Python), until you decide with `brisk consent --accept` or `--revoke`
   `brisk list --deleted` shows what you deleted (with `deleted_at` and `restore_until`) and
   `brisk restore PREFIX` (also a timing report's key) restores it. After 30 days it can no
   longer be restored and is removed.
-- Partial replays (`--limit-frames`) and recordings closed before their day ends are never
-  uploaded; a broker feed stopped mid-day uploads only its timing summary and keeps the rest on
-  your computer. The part of a day before a lost connection is a complete recording and is
-  uploaded once the feed reconnects.
+- Partial replays (`--limit-frames`) are never uploaded. A broker feed you stop mid-day ends that
+  day there and uploads it, and the part of a day before a lost connection is uploaded once the
+  feed reconnects; only a day a crash or forced kill cuts short stays on your computer instead.
 
 ## Querying your archive in the cloud
 

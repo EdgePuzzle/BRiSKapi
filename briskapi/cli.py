@@ -7,9 +7,11 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -41,7 +43,7 @@ The cloud API (`brisk query`) builds OHLC bars from your own broker recordings o
 the securities and times they cover: no one else's uploads enter your results, and yours
 enter no one else's.
 Every clean, complete session uploads automatically (the default; you can decline), and
-so does the part of a broker day recorded before a lost connection, once it reconnects:
+so does the part of a broker day recorded before a lost connection or before you stop it:
   - demo sessions: the decoded market data and local timing measurements (decode
     durations, replay lateness, asset download time and your computer's receipt clock,
     which shows when you recorded);
@@ -425,16 +427,25 @@ def live(args):
     if feed.gateway:
         print(f'Serving {feed.gateway.dataset} to briskapi.Live() on this computer only '
               f'(127.0.0.1:{feed.gateway.port}; --no-gateway turns this off)', file=sys.stderr, flush=True)
+    # `kill` and a shutdown stop it as Ctrl-C does: the running day ends where it is, and is kept and uploaded.
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, _interrupt)
     try:
         if not args.quiet:
             for quote in feed.quotes(raw=args.raw):
                 print(json.dumps(quote, ensure_ascii=False, default=lambda value: value.isoformat()), flush=True)
         feed.wait()
+    except KeyboardInterrupt:
+        print('Stopping: the running day ends here, then it is kept and uploaded as chosen '
+              '(Ctrl-C again quits at once)', file=sys.stderr, flush=True)
     finally:
         feed.close()
-    # A day closed before its end uploads only its timing summary.
+    # A day that could not end (a demo replay, or a host that did not stop in time) uploads only its timing summary.
     if feed.timing_uploaded and not (feed.recordings and feed.recordings[-1]['timing_uploaded'] is feed.timing_uploaded):
         print(json.dumps({'timing_uploaded': feed.timing_uploaded}), file=sys.stderr)
+
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt
 
 def passkey_command(args):
     """`brisk sites|enroll|login|forget`: sign in to your broker's BRiSK with a passkey held in a Chrome virtual authenticator."""

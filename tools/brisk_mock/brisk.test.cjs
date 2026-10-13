@@ -207,6 +207,33 @@ test('reconnecting stops at what another connection cannot mend, and never befor
   assert.deepEqual(waits, [RETRY_MS[0], RETRY_MS[1], RETRY_MS[2]]);
 });
 
+test('asked to stop, the host ends the running day there with its end, and neither reconnects nor waits for the next day',
+  { skip: !cache }, async () => {
+  const { files, chunks } = demo();
+  const { fetchImpl } = server(files);
+  const batches = [], waits = [];
+  let sockets = 0;
+  const WebSocketImpl = class { constructor(...a) { sockets++; return new (heldSocket(chunks))(...a); } };
+  const stop = { requested: false, end: null };
+  // As main's signal handler does once the day is under way (the held socket would otherwise stay open).
+  let asked = false;
+  const emit = async b => {
+    batches.push(b);
+    if (b.type === 'quotes' && !asked) {
+      asked = true;
+      setImmediate(() => { stop.requested = true; stop.end('stopped'); });
+    }
+  };
+  await record({ cookies: { s: 'v' }, codes: ['7203'], emit, fetchImpl, WebSocketImpl, protocolVersion: 16000, stop,
+    sleep: async ms => { waits.push(ms); }, log: () => {} });
+  assert.equal(sockets, 1);
+  assert.deepEqual(waits, []);
+  assert.equal(batches.at(-1).type, 'end');
+  assert.equal(batches.filter(b => b.type === 'end').length, 1);
+  assert.equal(batches.at(-1).quote_updates, batches.filter(b => b.type === 'quotes').reduce((n, b) => n + b.quotes.length, 0));
+  assert.equal(stop.end, null, 'no session left to end');
+});
+
 test('which failures another connection cannot mend', () => {
   for (const message of ['SBI BRiSK session expired or invalid; log in again', 'SBI BRiSK reports another WebSocket session for this user',
     'Refusing to stream from wss://x: not a BRiSK host', 'BRiSK decoder changed; missing x', 'Codes not in the SBI BRiSK master: 9999']) {

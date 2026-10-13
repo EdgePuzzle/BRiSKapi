@@ -276,9 +276,18 @@ class Feed:
         self._raise()
         return self
 
-    def close(self):
-        """Stop the decoder. A session closed before its end is never uploaded."""
+    def close(self, timeout=30):
+        """Stop the feed. A broker session first ends its day where it is, as the day's end would (its host writes
+        the day's end), so the day is kept and uploaded like any other; a host that has not ended within `timeout`
+        seconds is stopped where it is, and what it recorded is kept on this computer, not uploaded. A demo replay
+        stops at once (a partial replay is never uploaded). Returns once the days are kept and uploaded."""
         self._closing = True
+        if self._process.poll() is None and self._broker:
+            self._process.terminate()   # SIGTERM: brisk.cjs ends the running day
+            try:
+                self._process.wait(timeout)
+            except subprocess.TimeoutExpired:
+                pass
         if self._process.poll() is None:
             self._process.kill()
         self._thread.join()

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import time
 import urllib.error
 import zlib
 
@@ -416,7 +417,41 @@ def test_cli_sbi_upload_switches(fake_host, monkeypatch, flags, market, timing):
     assert (len(sent['market']), len(sent['timing'])) == (market, timing)
 
 
-def test_sbi_capture_closed_early_is_kept_but_not_uploaded(tmp_path, monkeypatch):
+def test_a_feed_stopped_mid_day_ends_the_day_there_and_uploads_it(tmp_path, monkeypatch):
+    # A host that, asked to stop (SIGTERM, as close() sends), ends its day with its end, as brisk.cjs does.
+    batches = sbi_session(frames=150)
+    first = batches[:41]
+    end = dict(batches[-1], seq=41, source_time_us=first[-1]['source_time_us'], frames=40, quote_updates=40)
+    script = tmp_path / 'stoppable.cjs'
+    script.write_text(f"""for (const b of {json.dumps(first)}) console.log(JSON.stringify(b));
+process.on('SIGTERM', () => {{ process.stdout.write(JSON.stringify({json.dumps(end)}) + '\\n', () => process.exit(0)); }});
+setInterval(() => {{}}, 1000);
+""")
+    monkeypatch.setattr(brisk, 'DECODER', script)
+    sent = []
+    def publish(directory, url, **options):
+        m = json.loads((directory / 'manifest.json').read_text())
+        _parquet.inspect_package(directory, m)
+        sent.append(m['summary'])
+        return {'status': 'stored'}
+    monkeypatch.setattr(cli, 'upload', publish)
+    monkeypatch.setattr(cli, 'upload_timing', lambda report, url: {'status': 'stored'})
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    briskapi.consent(accept=True)
+    feed = briskapi.connect(site='sbi', codes=['7203'], output=tmp_path / 'days')
+    deadline = time.monotonic() + 20
+    while feed.seq < 40:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    feed.close()
+    assert feed.status == 'closed' and feed.uploaded == {'status': 'stored'}
+    assert [s['batches'] for s in sent] == [42] and sent[0]['quote_updates'] == 41   # the bootstrap's, then 40
+    name, = [day['name'] for day in feed.recordings]
+    assert name == 'sbi_live_20260311_090000-090004' and (tmp_path / 'days' / name / 'manifest.json').exists()
+    assert not any(_spool.kept_dir().glob('*')) and not any(_spool.spool_root().glob('segment-*'))
+
+
+def test_a_capture_whose_host_cannot_end_its_day_is_kept_but_not_uploaded(tmp_path, monkeypatch):
     script = tmp_path / 'held.cjs'
     script.write_text(f'console.log({json.dumps(json.dumps(sbi_session()[0]))});\nsetInterval(() => {{}}, 1000);\n')
     monkeypatch.setattr(brisk, 'DECODER', script)

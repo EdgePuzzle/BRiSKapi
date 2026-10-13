@@ -211,7 +211,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   protocolVersion, profile: overrides = {}, trace = null, catchUp = null, heartbeatMs = HEARTBEAT_MS,
   staleSeconds = 90, connectTimeoutMs = 15000, catchUpBackoffMs, site: siteId = 'sbi', after = null,
   dayCheckMs = DAY_CHECK_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), onBoot = null,
-  resumable = false }) {
+  resumable = false, stop = null }) {
   const where = site(siteId);
   const profile = resolveProfile(overrides);
   const session = new Session(cookies, fetchImpl, where);
@@ -260,6 +260,8 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     link?.close();
     settle({ code: 1000, reason: why });
   };
+  // Asked to stop (see main), the session ends its day here, as the day's end would: a recording to keep and upload.
+  if (stop) stop.end = endDay;
   const stale = staleSeconds ? staleDataCheck({ date: app.date, thresholdUs: staleSeconds * 1e6, name: where.name }) : null;
   const decoder = await Decoder.create(assets, { protocolVersion, check: checkAbi,
     checkMaster: master => checkMaster(master, protocolVersion), schedule: app.schedule_info ?? null,
@@ -398,6 +400,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     clearInterval(dayTimer);
     monitor?.stop();
     link?.close();
+    if (stop) stop.end = null;
   }
 }
 
@@ -407,17 +410,20 @@ const RETRY_MS = [5000, 10000, 30000, 60000, 120000];
 // stopped). Each emits its own bootstrap ... end, which the Python feed keeps as that day's recording. A
 // connection lost once the recording has begun ends that segment cleanly (Interrupted), and a new connection
 // starts the next from a fresh snapshot, so only the gap is missing; failures before anything was recorded,
-// and those another connection cannot mend (fatal), stop it.
+// and those another connection cannot mend (fatal), stop it. `stop.requested` (see main) ends it after the
+// session's day, ended where it was.
 async function record({ days = Infinity, retryMs = RETRY_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
-  log = line => process.stderr.write(`${line}\n`), ...options }) {
+  log = line => process.stderr.write(`${line}\n`), stop = null, ...options }) {
   let after = null, recorded = false, failures = 0;
   for (let day = 0; day < days;) {
     let booted = null;
     try {
-      await live({ ...options, sleep, after, resumable: true, onBoot: date => { booted = date; } });
+      await live({ ...options, sleep, after, stop, resumable: true, onBoot: date => { booted = date; } });
       after = booted; day++; recorded = true; failures = 0;
+      if (stop?.requested) return;
       continue;
     } catch (error) {
+      if (stop?.requested) return;   // stopped before its stream had started: nothing to end
       if (error instanceof Interrupted) { recorded = true; failures = 0; }
       else if (!recorded || fatal(error)) throw error;
       const wait = retryMs[Math.min(failures++, retryMs.length - 1)];
@@ -448,7 +454,19 @@ async function main(argv, env = process.env) {
     try { profile = JSON.parse(env.BRISK_PROFILE); } catch { throw new Error('BRISK_PROFILE is not valid JSON'); }
   }
   const where = site(env.BRISK_SITE || 'sbi');
-  await record({ cookies: JSON.parse(env[where.cookies] || 'null'), codes, profile, site: where.id,
+  // Ctrl-C, `kill` or a shutdown (and the Python feed's close()) end the running day where it is, with its end,
+  // so it is kept and uploaded like any day; with no day running there is nothing to end. Ctrl-C reaches this
+  // process and the Python feed's, whose close() then signals too: a repeated signal changes nothing (close()
+  // kills the host if it has not ended in time).
+  const stop = { requested: false, end: null };
+  const onSignal = () => {
+    if (stop.requested) return;
+    stop.requested = true;
+    if (stop.end) stop.end('stopped'); else process.exit(0);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  await record({ cookies: JSON.parse(env[where.cookies] || 'null'), codes, profile, site: where.id, stop,
     trace: trace ? line => process.stderr.write(`[brisk protocol] ${line}\n`) : null,
     emit: async record => {
       if (!process.stdout.write(JSON.stringify(record) + '\n')) await once(process.stdout, 'drain');

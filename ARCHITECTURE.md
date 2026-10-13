@@ -175,9 +175,13 @@ session (Enter accepts), and a run that can't ask (the Python API, a CLI without
 terminal) uploads by default after a once-per-process notice, without saving a choice. `upload_market_data=False`
 (`--no-upload-market-data`) keeps a broker session's market recording local;
 `BRISK_UPLOAD=0` or `upload=False` (`--no-upload`) disables both uploads. Only a segment that
-reached its end, a day or the part of one before a lost connection (see
-[Trading days](#trading-days)), is packaged and uploaded. A broker segment that is unfinished when
-the feed closes or fails is never uploaded (the feed uploads only its timing summary); with uploads
+reached its end, a day or the part of one before a lost connection or a stop (see
+[Trading days](#trading-days)), is packaged and uploaded. `close()` stops a broker feed by asking
+its host to end the running day (SIGTERM, which `brisk live` also gets from Ctrl-C, `kill` or a
+shutdown) and waits up to 30 s for the host to exit, its end written and read, before killing it;
+a demo replay is killed at once (a partial replay is never uploaded). A broker segment that is
+still unfinished when the feed closes or fails, after a crash, a forced kill or a host that did
+not end in time, is never uploaded (the feed uploads only its timing summary); with uploads
 on or `output`, its parts are kept as a recording without a manifest in `output`, else in
 `~/.local/share/brisk/recordings` (`Spool.keep`), and a demo's are dropped, being the same for
 everyone. A spool a crash left behind (its owner process gone) is kept the same way when the
@@ -586,7 +590,10 @@ batch, when:
   would. A smaller step back is not a new day, and a recording with one fails the
   archive's market-clock check;
 - the server closes the stream, cleanly (code 1000) or, once the decoder has called
-  `marketFinished`, in any way.
+  `marketFinished`, in any way;
+- the host is asked to stop: `main()` handles SIGINT and SIGTERM by ending the running day
+  (`stop.end`, the day's `endDay`) and `record()` then returns instead of waiting for the next
+  day; with no day running the host simply exits, and a repeated signal changes nothing.
 
 Any other close, and any failure of the stream once it has started (stale data, missing
 heartbeats, a dropped WebSocket), ends the segment the same way under `record()`: `live()`
