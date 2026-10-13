@@ -8,10 +8,11 @@
 //
 // It follows the vendor client's connect sequence (public Next demo bundle) and
 // upstream's SBI research (pybrisk): feed the WASM from the first frame, wait for its
-// frame numbers, catch the snapshot up to them, forward the WASM's own pings, and watch
-// the server heartbeat. Three wire details are not public (the Socket.IO connect
-// parameters, the `startLive` payload and the catch-up request body); they live in the
-// profile (BRISK_SBI_PROFILE) and `--trace-protocol` shows what the server answers.
+// frame numbers, catch the snapshot up to them, answer the server's pings through the WASM,
+// and watch the server heartbeat. The stream is expected to be plain binary (see engineio.cjs
+// for the Socket.IO fallback and why it is unverified); the profile (BRISK_SBI_PROFILE) can
+// set that fallback's parameters and the catch-up format, and `--trace-protocol` shows what
+// the server answers.
 const crypto = require('node:crypto');
 const { once } = require('node:events');
 const { Decoder } = require('./decoder.cjs');
@@ -234,7 +235,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   const requestCatchUp = catchUp || (issues => fetchCatchUp(session, { app, issues, format: profile.catchUp ?? DEFAULT_CATCH_UP,
     backoffMs: catchUpBackoffMs, trace }));
   const wsSession = wsUrl.searchParams.get('session');
-  // Only a Socket.IO server needs these; a plain WebSocket never asks for the market token.
+  // Only the Socket.IO fallback needs these; a plain WebSocket never asks for the market token.
   const context = async () => {
     let marketToken;
     try { marketToken = (await session.get('/api/app/market-token')).token; } catch (error) {

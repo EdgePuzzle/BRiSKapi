@@ -1,16 +1,18 @@
 'use strict';
 // Link to a BRiSK market-data WebSocket.
 //
-// Two server dialects exist. The Next client talks plain binary frames over a native
-// WebSocket. Upstream's SBI capture (pybrisk, 2026-03-11) shows SBI's web app wrapping
-// the same frames in Engine.IO / Socket.IO: the server opens with an Engine.IO packet
-// (`0{"sid":...,"pingInterval":...}`), the client joins the `/v2/user` namespace with a
-// query and sends a `startLive` event, and only then do binary frames flow. The dialect
-// is detected from the first message, so a plain server keeps working untouched.
-//
-// What is NOT public, and is therefore kept in the profile below rather than hard-coded:
-// where each connect parameter comes from and what `startLive` carries. Run with
-// `--trace-protocol` (secrets redacted) to see the server's side of a first attempt.
+// The Next client talks plain binary frames over a native WebSocket, and SBI's market
+// stream (wss://sbi.brisk.jp/realtime/0) is expected to do the same. pybrisk's SBI capture
+// (2026-03-11) recorded that stream as plain binary: market data, 9-byte server pings the
+// client echoes back, and no Engine.IO framing. The same capture also holds a separate
+// Socket.IO connection (namespace `/v2/user`, a `startLive` user event) that upstream's
+// notes took for the stream's wrapper. Its frames are numbered apart from the binary
+// ones, its `url` parameter names pages of SBI's own website rather than sbi.brisk.jp, and
+// its keys don't have the shape of BRiSK's (a 32-character api_key, where BRiSK's market
+// token runs to about 490), so it most likely belongs to another service on SBI's site. The Engine.IO / Socket.IO path below is therefore only a
+// fallback, used if a server's first message is an Engine.IO open packet; its
+// parameters are unverified and live in the profile. Run with `--trace-protocol`
+// (secrets redacted) to see the server's side of a first attempt.
 
 const MAX_TRACE = 300;
 
@@ -34,14 +36,15 @@ function redact(text) {
 
 const SBI_PROFILE = Object.freeze({
   namespace: '/v2/user',
-  // UNVERIFIED: upstream names these parameters but not their sources. `api_key` is
-  // probably the market token; the rest are plausible, not confirmed.
+  // UNVERIFIED, and probably not BRiSK's (see above): the parameter names come from the
+  // capture's other Socket.IO connection; these sources are guesses.
   connectQuery: ctx => ({ api_key: ctx.marketToken, visitor_id: ctx.identity, session_id: ctx.wsSession,
     tabId: ctx.tabId, url: `${ctx.origin}/` }),
-  // UNKNOWN: upstream elides the payload as `{...}`.
+  // UNVERIFIED: that connection sent {"isRemoteInputExcluded": false}; an empty object
+  // is kept because it is unclear whether BRiSK uses this event at all.
   startLive: () => ({}),
-  // UNVERIFIED: Engine.IO 3 prefixes binary frames with a type byte; upstream decodes
-  // frames from byte 0, so the default is no prefix.
+  // UNVERIFIED: Engine.IO 3 prefixes binary frames with a type byte; the recorded SBI
+  // stream has none, so the default is no prefix.
   binaryPrefix: false,
 });
 

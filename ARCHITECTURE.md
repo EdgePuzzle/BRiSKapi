@@ -133,13 +133,21 @@ bundle) and in pybrisk's SBI research (`engineio.cjs` and `sbi.cjs`):
 
 1. The WASM is started with its six callbacks (`send`, `updateNumber`,
    `heartbeat`, `basePrice`, `authError`, `marketFinished`) using the vendor's
-   signatures. `send` bytes, which are the WASM's own pings, are written to the
-   socket as raw binary frames; the vendor client has no ping timer of its own.
-2. The link detects the server's dialect from its first message. A plain server
-   (Next) sends binary frames. SBI's, per pybrisk's capture, opens with an Engine.IO
-   packet; the host then joins the `/v2/user` namespace with a query, sends a
-   `startLive` event and answers Engine.IO keepalives (clients ping on version 3,
-   servers on version 4).
+   signatures (plus the session schedule on the 2026 builds, above). `send` bytes are
+   the WASM's replies to the server's pings, written to the socket as raw binary
+   frames: in pybrisk's recording of SBI's stream the server sends a 9-byte ping
+   every 5 seconds and the browser echoes each one back unchanged. The vendor
+   client has no ping timer of its own.
+2. The link detects the server's dialect from its first message. The Next client
+   uses a plain binary WebSocket, and SBI's stream (`wss://sbi.brisk.jp/realtime/0`) is
+   recorded as one too. If a server opens with an Engine.IO packet instead, the host
+   falls back to joining a Socket.IO namespace (`/v2/user`) with a query, sending a
+   `startLive` event and answering Engine.IO keepalives (clients ping on version 3,
+   servers on version 4). That fallback comes from a separate Socket.IO connection in
+   the same capture, which upstream's notes took for the stream's wrapper: its frames
+   are numbered apart from the binary ones, its `url` parameter names pages of SBI's
+   own website, and its keys don't have the shape of BRiSK's values. It most likely
+   belongs to another service on SBI's site, so its parameters are unverified.
 3. Frames go to the WASM immediately. When the first frame numbers arrive, the
    host compares them with the snapshot's. Issues whose snapshot is behind are
    caught up with `POST /api/stocks_update/{series}` (up to five retries, never for
@@ -233,12 +241,20 @@ October build did the same in a one-off check. The demo
 decoder is tested against the vendor client's own indices on real data, and its
 heartbeat, ping reply and callbacks through its function table; the ping loop and
 the whole flow run offline against fake servers (plain, Engine.IO 3 and 4) using it.
+Replayed through SBI's March decoder, the 30,505 messages of the archive's copy of
+pybrisk's SBI stream (2026-03-11, the `sample_data` wire capture) are all accepted
+without an error; the decoder reads the server heartbeat (12:12:40-12:13:15 JST that
+day) and its first eight ping replies are byte for byte the browser's. The recording
+starts partway into the connection, without the opening frame-number message, so the
+decoder applies no stock updates from it and answers only those first eight pings.
+(pybrisk's own `capture_summary.json` has wrong bytes in 2,478 of these messages; the
+archive's copy matches pybrisk's per-message files.)
 What is not verified against a live session: any of the above on SBI itself, the
 18000 master layout on today's build (found on SBI's of March 2026; each start checks it
-against the master file), loading a live snapshot, and two wire details that are not
-public: the Socket.IO connect parameters and the `startLive` payload. They live in a profile
-(`BRISK_SBI_PROFILE`, or `sbi.connect(profile=...)`); the defaults are labelled
-unverified. The profile can also name another catch-up format (`catchUp`).
+against the master file), loading a live snapshot, the stream's opening messages and
+whether it is plain binary as recorded. The Socket.IO fallback's parameters live in a
+profile (`BRISK_SBI_PROFILE`, or `sbi.connect(profile=...)`) and are unverified. The
+profile can also name another catch-up format (`catchUp`).
 `--trace-protocol` prints the connection with every token redacted, so a first
 attempt shows what the server answers. Anything wrong ends in an explicit error (a
 stream that never initializes, a refused namespace, a rejected catch-up, an

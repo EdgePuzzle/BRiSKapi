@@ -296,11 +296,12 @@ def connect(codes=None, history=False, node='node', timeout=120, contribute=None
 
     Returns a briskapi.Feed (the default source for briskapi.Ticker and Market).
     The host follows the vendor client's connect sequence: it feeds the WASM from the
-    first frame, catches the snapshot up to the stream, forwards the WASM's pings and
-    watches the server heartbeat. It also joins SBI's Socket.IO namespace when the
-    server speaks it. Two wire details are not public, so they can be set with
-    `profile` (a dict, sent through the environment because it may name tokens), as can
-    the catch-up request's format (by default the vendor client's, "issue-lists"):
+    first frame, catches the snapshot up to the stream, answers the server's pings through
+    the WASM and watches the server heartbeat. The stream is expected to be a plain binary
+    WebSocket. Should the server open with Socket.IO instead, the host joins its namespace
+    with unverified parameters; those, and the catch-up request's format (by default the
+    vendor client's, "issue-lists"), can be set with `profile` (a dict, sent through the
+    environment because it may name tokens):
 
         profile={"connectQuery": {"_v": "..."}, "startLive": {...}, "catchUp": "issue-lists"}
 

@@ -116,14 +116,14 @@ Requests are limited to one per second.
 
 The live feed runs SBI's own decoder under Node, downloaded with your session;
 no browser is involved. It follows the vendor client's connect sequence: it feeds
-the decoder from the first frame, catches the snapshot up to the stream, forwards
-the decoder's pings, watches the server heartbeat and joins SBI's Socket.IO
-namespace when the server uses it. It hasn't yet been validated against a live SBI
-session, and three wire details aren't public: the Socket.IO connect parameters,
-the `startLive` payload and the catch-up request body. Set them with
-`sbi.connect(profile={...})` and see what the server answers with
-`trace_protocol=True` (every token redacted); until they are right it stops with an
-explicit error rather than guessing. Please report what you see. Sessions on
+the decoder from the first frame, catches the snapshot up to the stream, answers
+the server's pings through the decoder and watches the server heartbeat. It hasn't
+yet been validated against a live SBI session. The stream is expected to be a plain
+binary WebSocket, as in the Next client. Should the server open with Socket.IO
+instead, the host joins its `/v2/user` namespace with unverified parameters that
+`sbi.connect(profile={...})` can set. See what the server answers with
+`trace_protocol=True` (every token redacted); anything unexpected stops with an
+explicit error rather than a guess. Please report what you see. Sessions on
 2026-10-08 got through sign-in, the data endpoints and the decoder download, then
 stopped at the stock master. The master is now read with the current build's record
 layout, found with SBI's decoder of March 2026 and checked against the master file at
