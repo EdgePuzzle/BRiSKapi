@@ -17,7 +17,7 @@ import pytest
 import briskapi
 import briskapi.cli as cli
 import briskapi.schema as schema
-from briskapi import _parquet, brisk
+from briskapi import _parquet, _spool, brisk
 from briskapi._recording import JST, NotFoundError
 
 CHECK_SESSION = brisk._check_session  # stubbed for every test below; the session tests put it back
@@ -368,7 +368,7 @@ def test_sbi_market_upload_follows_consent_and_opt_outs(fake_host, monkeypatch):
     feed = briskapi.connect(site='sbi').wait()
     assert feed.uploaded == {'status': 'stored'} and len(sent) == 1 and len(timing) == 1
     assert sent[0]['summary']['source'] == 'sbi_live' and set(sent[0]) == {'schema', 'sha256', 'bytes', 'summary'}
-    assert not Path(feed._tmp.name).exists()
+    assert not any(_spool.spool_root().glob('segment-*')), 'the day leaves no spool behind'
     assert briskapi.connect(site='sbi', upload_market_data=True).wait().uploaded == {'status': 'stored'} and len(sent) == 2
     # The opt-outs: the market recording alone, the whole session, or the whole process.
     feed = briskapi.connect(site='sbi', upload_market_data=False).wait()
@@ -416,7 +416,7 @@ def test_cli_sbi_upload_switches(fake_host, monkeypatch, flags, market, timing):
     assert (len(sent['market']), len(sent['timing'])) == (market, timing)
 
 
-def test_sbi_capture_closed_early_is_not_uploaded(tmp_path, monkeypatch):
+def test_sbi_capture_closed_early_is_kept_but_not_uploaded(tmp_path, monkeypatch):
     script = tmp_path / 'held.cjs'
     script.write_text(f'console.log({json.dumps(json.dumps(sbi_session()[0]))});\nsetInterval(() => {{}}, 1000);\n')
     monkeypatch.setattr(brisk, 'DECODER', script)
@@ -424,9 +424,13 @@ def test_sbi_capture_closed_early_is_not_uploaded(tmp_path, monkeypatch):
     briskapi.login(cookies={'session_bfaf77a2': 'v'})
     briskapi.consent(accept=True)
     feed = briskapi.connect(site='sbi', upload_market_data=True)
-    feed.close()
+    with pytest.warns(UserWarning, match='stopped before the day ended'):
+        feed.close()
     assert feed.status == 'closed' and feed.uploaded is None
-    assert not Path(feed._tmp.name).exists()
+    kept, = _spool.kept_dir().iterdir()
+    assert kept.name.startswith('sbi_live_20260311_') and not (kept / 'manifest.json').exists()
+    assert briskapi.Market(briskapi.Recording(kept)).summary()['trading_date'] == '20260311'
+    assert not any(_spool.spool_root().glob('segment-*'))
 
 
 def two_days(tmp_path, monkeypatch, second=None):
@@ -438,6 +442,37 @@ def two_days(tmp_path, monkeypatch, second=None):
     script = tmp_path / 'two_days.cjs'
     script.write_text(f'for (const b of {json.dumps(first + second)}) console.log(JSON.stringify(b));\n')
     monkeypatch.setattr(brisk, 'DECODER', script)
+
+
+def later(batches, us):
+    """The same session, `us` later on the clock (a reconnect's segment on the same trading day)."""
+    def shift(item):
+        item = dict(item)
+        for key in ('source_time_us', 'time_us'):
+            if key in item:
+                item[key] += us
+        if 'received_unix_ms' in item:
+            item['received_unix_ms'] += us // 1000
+        for key in ('quotes', 'trades'):
+            if key in item:
+                item[key] = [shift(x) for x in item[key]]
+        return item
+    return [shift(b) for b in batches]
+
+
+def test_a_reconnect_keeps_and_uploads_the_segment_before_it_as_its_own_recording(tmp_path, monkeypatch):
+    # The decoder closes a segment whose connection was lost with its own end, then records on from a new
+    # snapshot of the same day: two recordings of that day, each named for its clocks.
+    two_days(tmp_path, monkeypatch, second=later(sbi_session(frames=20), 3600 * 10**6))
+    sent = []
+    monkeypatch.setattr(cli, 'upload', lambda directory, url, **o: sent.append(directory.name) or {'status': 'stored'})
+    monkeypatch.setattr(cli, 'upload_timing', lambda report, url: {'status': 'stored'})
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    briskapi.consent(accept=True)
+    feed = briskapi.connect(site='sbi', codes=['7203'], output=tmp_path / 'days').wait()
+    assert [day['name'] for day in feed.recordings] == ['sbi_live_20260311_090000-090016', 'sbi_live_20260311_100000-100002']
+    assert len(sent) == 2 and all(day['uploaded'] == {'status': 'stored'} for day in feed.recordings)
+    assert not any(_spool.spool_root().glob('segment-*'))
 
 
 def test_a_feed_keeps_and_uploads_each_trading_day_as_it_ends(tmp_path, monkeypatch):

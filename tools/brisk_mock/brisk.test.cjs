@@ -5,7 +5,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { Session, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, fetchCatchUp } = require('../../briskapi/decoder/brisk.cjs');
+const { Session, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, fetchCatchUp, Interrupted, fatal,
+  RETRY_MS } = require('../../briskapi/decoder/brisk.cjs');
 const { frames, Decoder } = require('../../briskapi/decoder/decoder.cjs');
 const cache = process.env.BRISK_MOCK_CACHE;
 
@@ -149,6 +150,73 @@ test('the host records one day after another, each its own bootstrap ... end, ro
   assert.equal(batches[second].seq, 0);
   assert.equal(batches[second - 1].type, 'end');
   assert.equal(batches.at(-1).type, 'end');
+});
+
+test('a connection lost mid-session ends that segment cleanly, and a new connection records on from a fresh snapshot',
+  { skip: !cache }, async () => {
+  const { files, chunks } = demo();
+  const { fetchImpl } = server(files);
+  const batches = [], waits = [], logged = [];
+  // The first connection drops (1006); the second ends the day as the server closing the stream does.
+  let sockets = 0;
+  const WebSocketImpl = class { constructor(...a) { return new (socketFrom(chunks, sockets++ ? 1000 : 1006))(...a); } };
+  await record({ days: 1, cookies: { s: 'v' }, codes: ['7203'], emit: async b => batches.push(b), fetchImpl, WebSocketImpl,
+    protocolVersion: 16000, sleep: async ms => { waits.push(ms); }, log: line => logged.push(line) });
+  assert.equal(sockets, 2);
+  assert.deepEqual(batches.filter(b => ['bootstrap', 'end'].includes(b.type)).map(b => `${b.type}:${b.seq}`).slice(0, 1),
+    ['bootstrap:0']);
+  const ends = batches.map((b, i) => b.type === 'end' ? i : -1).filter(i => i >= 0);
+  assert.equal(ends.length, 2, 'each segment has its own end');
+  assert.equal(batches[ends[0] + 1].type, 'bootstrap', 'the next segment starts from a fresh snapshot');
+  assert.equal(batches[ends[0] + 1].seq, 0);
+  assert.equal(batches[ends[0] + 1].trading_date, batches[0].trading_date, 'the same trading day');
+  assert.equal(batches[ends[0]].quote_updates, batches.slice(0, ends[0]).filter(b => b.type === 'quotes')
+    .reduce((n, b) => n + b.quotes.length, 0));
+  assert.deepEqual(waits, [RETRY_MS[0]]);
+  assert.match(logged[0], /stream closed \(1006\); reconnecting in 5s/);
+});
+
+test('reconnecting stops at what another connection cannot mend, and never before anything was recorded',
+  { skip: !cache }, async () => {
+  const { files, chunks } = demo();
+  // Nothing recorded yet: the first failure stops the host, as before.
+  let { fetchImpl } = server(files);
+  await assert.rejects(record({ days: 1, cookies: { s: 'v' }, codes: ['7203'], emit: async () => {}, fetchImpl,
+    WebSocketImpl: socketFrom([], 1006), protocolVersion: 16000, sleep: async () => assert.fail('no retry'),
+    log: () => {} }), /stream closed \(1006\)/);
+  // Recorded, then the session expired: no reconnecting with cookies that no longer work.
+  let boots = 0;
+  ({ fetchImpl } = server(files, { '/api/frontend/boot': () => boots++ ? new Response('', { status: 401 })
+    : JSON.stringify({ api_token: 'token', identity: IDENTITY }) }));
+  const batches = [];
+  await assert.rejects(record({ days: 1, cookies: { s: 'v' }, codes: ['7203'], emit: async b => batches.push(b), fetchImpl,
+    WebSocketImpl: socketFrom(chunks, 1006), protocolVersion: 16000, sleep: async () => {}, log: () => {} }), /expired/);
+  assert.equal(batches.at(-1).type, 'end', 'the segment before was closed cleanly');
+  // A connection that fails before the stream starts is retried, with a longer wait each time.
+  let attempts = 0;
+  const waits = [];
+  ({ fetchImpl } = server(files, { '/api/app/boot': () => {
+    attempts++;
+    return attempts === 2 || attempts === 3 ? new Response('busy', { status: 503 })
+      : JSON.stringify({ date: '2021-09-27', series: 0, master: 'm1', snapshot: 's1', ws_url: '/realtime/0?session=abc' });
+  } }));
+  let sockets = 0;
+  await record({ days: 1, cookies: { s: 'v' }, codes: ['7203'], emit: async () => {}, fetchImpl, protocolVersion: 16000,
+    WebSocketImpl: class { constructor(...a) { return new (socketFrom(chunks, sockets++ ? 1000 : 1006))(...a); } },
+    sleep: async ms => { waits.push(ms); }, log: () => {} });
+  assert.deepEqual(waits, [RETRY_MS[0], RETRY_MS[1], RETRY_MS[2]]);
+});
+
+test('which failures another connection cannot mend', () => {
+  for (const message of ['SBI BRiSK session expired or invalid; log in again', 'SBI BRiSK reports another WebSocket session for this user',
+    'Refusing to stream from wss://x: not a BRiSK host', 'BRiSK decoder changed; missing x', 'Codes not in the SBI BRiSK master: 9999']) {
+    assert.ok(fatal(new Error(message)), message);
+  }
+  for (const message of ['SBI BRiSK stream closed (1006)', 'BRiSK connection check failure: no heartbeat for 31s',
+    'SBI BRiSK data is stale', 'SBI BRiSK /api/app/boot: HTTP 503', 'Catch-up failed: timeout']) {
+    assert.ok(!fatal(new Error(message)), message);
+  }
+  assert.equal(new Interrupted(new Error('gone')).message, 'gone');
 });
 
 test('e-shiten: its own address, a relative bundle, a templated decoder and the stream on the API host',

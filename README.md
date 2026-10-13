@@ -83,12 +83,26 @@ What you record is then read through the other two APIs:
 While it runs, `brisk live` also serves its feed to `briskapi.Live()` on this computer
 ([Live records](#live-records-databento-style)): the records as they arrive, not a recording.
 
-Without `--output`, `brisk live` keeps nothing on disk: each finished day goes to your
-[archive](#your-private-archive) and its local copy is removed. With uploads off as well
-(`--no-upload`, or `--no-upload-market-data` for a broker's market recording), that day isn't
-kept anywhere, so add `--output DIR` to keep it. A day is recorded once it ends: stopping
-partway keeps none of that day's market data (a broker session still uploads its timing
-summary unless you opt out).
+While a day runs, it is written to disk as it arrives: Parquet files in a spool folder
+(`~/.local/share/brisk/spool`), about as large as the finished recording, so a crash loses at
+most its last half-minute. When the day ends they become its recording.
+
+- **Without `--output`**, a finished day goes to your [archive](#your-private-archive) and
+  its local copy is removed. With uploads off as well (`--no-upload`, or
+  `--no-upload-market-data` for a broker's market recording), that day isn't kept anywhere,
+  so add `--output DIR` to keep it.
+- **A lost connection** doesn't lose the day. `brisk live --sbi` (or `--site e-shiten`)
+  reconnects by itself, after 5 s, then 10 s, 30 s, a minute and every 2 minutes. What it
+  recorded before the drop is a complete recording of its own (`..._085800-101500`), kept and
+  uploaded like a day, and the rest of the day is recorded from a fresh snapshot
+  (`..._102000-153512`). Only the gap is missing; the cloud API merges the two. It stops for
+  good when another connection can't help: an expired session, another BRiSK window open on
+  your account, or a site that changed.
+- **Stopping partway** (Ctrl-C, or a crash) keeps what the day recorded so far on your
+  computer, in `--output DIR` or else `~/.local/share/brisk/recordings`, as a recording without
+  a manifest: you can load it, but it isn't uploaded (a broker session still uploads its
+  timing summary unless you opt out). A crash's leftovers are kept there the next time a feed
+  starts.
 
 ## Live feed
 
@@ -242,7 +256,8 @@ also keeps each finished day in DIR, in a folder named
 `sbi_live_20261013_085800-153512`. `feed.recordings` lists the finished days (`trading_date`,
 `name`, `path`, `uploaded`, `timing_uploaded`), and `on_day=callback` is called for each.
 Without `output`, a finished day is kept only in your archive, and with uploads off, nowhere. A
-day still open when you stop the feed is not uploaded, only its timing summary.
+day still open when you stop the feed is not uploaded, only its timing summary; what it recorded
+is kept on your computer ([Recording](#recording)). A lost connection reconnects by itself.
 
 Results use the conventions below. Errors are `briskapi.brisk.SessionExpiredError` (log in
 again), `briskapi.NotFoundError`, `briskapi.brisk.RateLimitError` and `briskapi.brisk.APIError`.
@@ -510,7 +525,9 @@ Python), until you decide with `brisk consent --accept` or `--revoke`
   `brisk restore PREFIX` (also a timing report's key) restores it. After 30 days it can no
   longer be restored and is removed.
 - Partial replays (`--limit-frames`) and recordings closed before their day ends are never
-  uploaded; a broker feed stopped mid-day uploads only its timing summary.
+  uploaded; a broker feed stopped mid-day uploads only its timing summary and keeps the rest on
+  your computer. The part of a day before a lost connection is a complete recording and is
+  uploaded once the feed reconnects.
 
 ## Querying your archive in the cloud
 
@@ -565,7 +582,7 @@ recordings cover: the security, and the bar's whole span within the trading sess
 1-minute and 1-hour bars but not the day bar. So uploading is how you get bars. No one else's
 uploads enter yours, and yours enter no one else's. (`XTKS.BRISKDEMO`'s bars are built from
 the demo's own trades.) See [PRIVACY.md](https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md)
-(policy version 7).
+(policy version 8).
 `Ticker.candles()` is something else: BRiSK's own bars from your broker, which need a broker
 login.
 

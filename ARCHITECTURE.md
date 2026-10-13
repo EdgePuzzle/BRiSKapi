@@ -145,16 +145,28 @@ A demo replay is one day; a broker's live host (see [Trading days](#trading-days
 on to the next.
 
 When uploads are enabled, `output` is given or the feed has a gateway, the feed also writes
-each day to a temporary file as it arrives (a gateway replays from it; a day kept only for
-that is not packaged). At the day's end it hands the file to a worker thread (a
-`ThreadPoolExecutor` of one, so days finish in order) and reads on. The worker packages
+each day to a spool as it arrives (`briskapi/_spool.py`; a gateway replays from it, and a day
+kept only for that is not packaged). The spool is the recording's own Parquet tables, a part
+at a time, under `~/.local/share/brisk/spool/segment-ID/`: the equity table with the
+bootstrap, then `parts/NNNNNN/` with the depths, trades and batch tables of the batches since
+the last part. A part closes every `PART_SECONDS` (30), or after `PART_BYTES` (64 MiB) of decoder
+output, and at the segment's end; a writer thread of its own builds it (`write_part`, from the
+batches made canonical as `package()` makes them, so no connection diagnostic reaches the disk),
+fsyncs it and renames it into place, so a crash loses at most the part still open. A day's
+parts take about the disk of its recording; its decoded JSON, which the feed used to keep in a
+temporary file, takes some twenty times more. At the day's end the feed hands the spool to a
+worker thread (a `ThreadPoolExecutor` of one, so days finish in order) and reads on. The worker packages
 the day, keeps it in `output` as `SOURCE_YYYYMMDD_FROM-TO` (`schema.local_name`; FROM and
 TO are the day's first and last source clock, JST HHMMSS; a folder already there is left
 alone, with a warning), uploads it to the owner's private archive and uploads its
 timing summary, as chosen, then appends its result (`trading_date`, `name`, `path`,
 `uploaded`, `timing_uploaded`) to `feed.recordings`, calls `on_day(result)` and deletes
-the temporary file. A packaging or upload failure is a warning and a result that says so,
-never a failed feed, and neither is an `on_day` callback that raises. `brisk live --output
+the spool. Packaging reads the parts back (`load_parts`: each part's tables decoded, joined
+and put in the canonical order) and writes the same bytes as the day's batches at once would;
+`tests/test_spool.py` checks it. A packaging or upload failure is a warning and a result that
+says so, never a failed feed, and the day is then kept in `~/.local/share/brisk/recordings`
+(its package, for `brisk upload` to retry, or its tables); neither is an `on_day` callback that
+raises. `brisk live --output
 DIR` prints each result as `{"day": ...}` on stderr. Broker feeds (SBI, e-shiten) do the
 same with their market recording and also accumulate timing statistics
 (`briskapi/timing.py`). Uploads are on by default
@@ -162,11 +174,15 @@ same with their market recording and also accumulate timing statistics
 session (Enter accepts), and a run that can't ask (the Python API, a CLI without a
 terminal) uploads by default after a once-per-process notice, without saving a choice. `upload_market_data=False`
 (`--no-upload-market-data`) keeps a broker session's market recording local;
-`BRISK_UPLOAD=0` or `upload=False` (`--no-upload`) disables both uploads. Only a day that
-reached its end is packaged, kept or uploaded. A day that is unfinished when the feed
-closes or fails is discarded, its temporary file with it: its market data is never kept
-or uploaded, and a broker feed closed on purpose uploads only that day's timing summary. `wait()` and
-`close()` return after the days already finished are kept and uploaded.
+`BRISK_UPLOAD=0` or `upload=False` (`--no-upload`) disables both uploads. Only a segment that
+reached its end, a day or the part of one before a lost connection (see
+[Trading days](#trading-days)), is packaged and uploaded. A broker segment that is unfinished when
+the feed closes or fails is never uploaded (the feed uploads only its timing summary); with uploads
+on or `output`, its parts are kept as a recording without a manifest in `output`, else in
+`~/.local/share/brisk/recordings` (`Spool.keep`), and a demo's are dropped, being the same for
+everyone. A spool a crash left behind (its owner process gone) is kept the same way when the
+next feed starts (`_spool.recover`). `wait()` and `close()` return after the days already
+finished are kept and uploaded.
 
 ## Live gateway
 
@@ -192,16 +208,17 @@ to the broker; a session needs the gateway's key and nothing else.
   are the decoder's own lines: unchanged once a session asked for all symbols, otherwise
   rewritten with only the quotes and trades of the symbols subscribed so far (the master
   whole; a batch left empty is skipped).
-- **No batch missed or repeated.** `Feed._run` writes and flushes each line to the day's file,
-  applies it, then calls `Gateway.publish`, which updates the gateway's own bootstrap, latest
-  quotes and the file's length, and queues the batch for every session, all under one lock. A
-  subscription widens the session's symbols, takes the bootstrap, the latest quotes and the
-  file's length and opens the file under that lock, and queues its answer (written out, with
-  the replay sent by `sendfile`, on the session's thread). So its answer comes after every batch
-  the session got without its symbols and before every batch with them, and a replay meets
-  the live batches exactly; batches that arrive meanwhile wait behind it. At a day's end the
-  gateway stops offering replays: the worker packages and deletes the file, and a session
-  already replaying holds it open.
+- **No batch missed or repeated.** `Feed._run` adds each line to the day's spool, applies it,
+  then calls `Gateway.publish`, which updates the gateway's own bootstrap, latest quotes and the
+  count of lines published, and queues the batch for every session, all under one lock. A
+  subscription widens the session's symbols, takes the bootstrap, the latest quotes and a
+  replay of the spool's first that-many lines under that lock (`Spool.replay`: the closed parts,
+  read back and re-encoded, then the lines not yet written, as the decoder wrote them), and
+  queues its answer (written out, with the replay, on the session's thread). So its answer
+  comes after every batch the session got without its symbols and before every batch with
+  them, and a replay meets the live batches exactly; batches that arrive meanwhile wait behind
+  it. At a day's end the gateway stops offering replays: the worker packages and deletes the
+  spool, and a replay already under way keeps it until it is read.
 - **Slow sessions.** Each session has its own sending thread and queue. The feed never waits
   for one: a session more than `MAX_BEHIND` (1 GiB) behind has its queue dropped, is sent an
   error and is disconnected (after 10 seconds if it still reads nothing), so a stalled program
@@ -569,7 +586,18 @@ batch, when:
   would. A smaller step back is not a new day, and a recording with one fails the
   archive's market-clock check;
 - the server closes the stream, cleanly (code 1000) or, once the decoder has called
-  `marketFinished`, in any way. Any other close is an error, as above.
+  `marketFinished`, in any way.
+
+Any other close, and any failure of the stream once it has started (stale data, missing
+heartbeats, a dropped WebSocket), ends the segment the same way under `record()`: `live()`
+emits the segment's `end` and throws `Interrupted`, and `record()` connects again after
+`RETRY_MS` (5 s, 10 s, 30 s, 1 min, then every 2 min; the waits grow while connecting keeps
+failing). The new session boots afresh and starts from a new snapshot, numbered from 0, so the
+segment before the drop is a recording of its own and the Python feed packages and uploads it
+like a day; only the gap is missing, and the cloud API merges the day's recordings. What another
+connection cannot mend stops it with the error (`fatal`: an expired session, another WebSocket
+session for the user, a host or site layout that changed, unknown codes), and so does any
+failure before the first segment started.
 
 The next day begins by asking the boot, every ten minutes, until the site serves a
 later date than the one just recorded, then boots afresh: the frontend and app boots,
@@ -577,9 +605,10 @@ the decoder, master and snapshot, and the catch-up. Its batches are numbered fro
 so each day is its own `bootstrap ... end`, and the Python feed keeps it as its own
 recording. The wait is plain HTTP, so a session that expires meanwhile, or any other
 failed request, ends the recording with that error instead of waiting on; how long a
-broker's session cookie lasts is not known. The wait and the roll are tested offline
-against fake servers (a server that closes after the first day, and a site that serves
-the next date at a later check). The clock rule has no test, and none of it has run
+broker's session cookie lasts is not known. The wait, the roll and reconnecting are tested
+offline against fake servers (a server that closes after the first day, a site that serves
+the next date at a later check, a connection that drops mid-session, boots that fail and a
+session that expires before reconnecting). The clock rule has no test, and none of it has run
 against a live session.
 
 ### Tachibana e-shiten BRiSK Next

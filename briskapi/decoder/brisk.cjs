@@ -197,10 +197,21 @@ function checkAbi(wasm) {
   if (missing.length) throw new Error(`BRiSK decoder changed; missing ${missing.join(', ')}`);
 }
 
+// A session that lost its connection after it started; its segment so far was closed with an end, as a recording
+// of its own (see record()).
+class Interrupted extends Error {
+  constructor(cause) { super(cause.message); this.cause = cause; }
+}
+
+// Failures that another connection cannot mend: a session to sign in again, another BRiSK window, a changed site.
+const FATAL = /expired or invalid|log in again|another WebSocket session|not a BRiSK host|layout not recognised|decoder changed|decoder not found|Codes not in the|Unknown BRiSK site|session cookies|profile/i;
+const fatal = error => FATAL.test(error.message);
+
 async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImpl = WebSocket, startTimeoutMs = 60000,
   protocolVersion, profile: overrides = {}, trace = null, catchUp = null, heartbeatMs = HEARTBEAT_MS,
   staleSeconds = 90, connectTimeoutMs = 15000, catchUpBackoffMs, site: siteId = 'sbi', after = null,
-  dayCheckMs = DAY_CHECK_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), onBoot = null }) {
+  dayCheckMs = DAY_CHECK_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), onBoot = null,
+  resumable = false }) {
   const where = site(siteId);
   const profile = resolveProfile(overrides);
   const session = new Session(cookies, fetchImpl, where);
@@ -373,13 +384,14 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     const closed = await ended;
     // A catch-up that finishes extends the chain (it queues the bootstrap), so wait until it stops growing.
     for (let pending = null; pending !== work;) { pending = work; await pending; }
-    if (failure) throw failure;
-    if ((closed.code !== 1000 && !marketFinished && !dayOver) || !started) {
-      throw new Error(`${where.name} stream closed (${closed.code} ${closed.reason || ''})`.trim());
-    }
+    const lost = failure || ((closed.code !== 1000 && !marketFinished && !dayOver) || !started
+      ? new Error(`${where.name} stream closed (${[closed.code, closed.reason].filter(Boolean).join(' ')})`) : null);
+    if (lost && (!resumable || !started || fatal(lost))) throw lost;
+    // A lost connection ends the segment as cleanly as the day's end would: what came before it is a recording.
     const summary = { type: 'end', seq, source_time_us: decoder.time(), frames, quote_updates: updates,
       replay_wall_ms: performance.now() - start };
     await emit(summary);
+    if (lost) throw new Interrupted(lost);
     return summary;
   } finally {
     clearTimeout(timer);
@@ -389,12 +401,29 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   }
 }
 
+const RETRY_MS = [5000, 10000, 30000, 60000, 120000];
+
 // One session per trading day, back to back, until `days` have been recorded (the command line: until
-// stopped). Each emits its own bootstrap ... end, which the Python feed keeps as that day's recording.
-async function record({ days = Infinity, ...options }) {
-  let after = null;
-  for (let day = 0; day < days; day++) {
-    await live({ ...options, after, onBoot: date => { after = date; } });
+// stopped). Each emits its own bootstrap ... end, which the Python feed keeps as that day's recording. A
+// connection lost once the recording has begun ends that segment cleanly (Interrupted), and a new connection
+// starts the next from a fresh snapshot, so only the gap is missing; failures before anything was recorded,
+// and those another connection cannot mend (fatal), stop it.
+async function record({ days = Infinity, retryMs = RETRY_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  log = line => process.stderr.write(`${line}\n`), ...options }) {
+  let after = null, recorded = false, failures = 0;
+  for (let day = 0; day < days;) {
+    let booted = null;
+    try {
+      await live({ ...options, sleep, after, resumable: true, onBoot: date => { booted = date; } });
+      after = booted; day++; recorded = true; failures = 0;
+      continue;
+    } catch (error) {
+      if (error instanceof Interrupted) { recorded = true; failures = 0; }
+      else if (!recorded || fatal(error)) throw error;
+      const wait = retryMs[Math.min(failures++, retryMs.length - 1)];
+      log(`[brisk] ${error.message}; reconnecting in ${wait / 1000}s (the recording so far is kept)`);
+      await sleep(wait);
+    }
   }
 }
 
@@ -427,6 +456,7 @@ async function main(argv, env = process.env) {
 }
 
 module.exports = { Session, SITES, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, fetchCatchUp, CATCH_UP_FORMATS, DEFAULT_CATCH_UP,
+  Interrupted, fatal, RETRY_MS,
   HEARTBEAT_MS,
   PROTOCOL_VERSION, REQUIRED };
 if (require.main === module) main(process.argv.slice(2)).catch(error => {

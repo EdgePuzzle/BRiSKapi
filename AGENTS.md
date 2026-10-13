@@ -15,7 +15,9 @@ are on by default: the CLI asks once on a terminal (Enter accepts) and saves the
 API and runs without a terminal upload by default after a once-per-process notice. Every
 clean session uploads, broker market recordings and timing reports included, with explicit
 opt-outs (`--no-upload`, `--no-upload-market-data`, `BRISK_UPLOAD=0`, `brisk consent --revoke`).
-Never archive cookies, tokens or connection diagnostics. New uploads must be decoded;
+Never archive cookies, tokens or connection diagnostics; the live spool (`briskapi/_spool.py`)
+writes only canonical batches, and its parts package to the same bytes as the day's batches at once
+(`tests/test_spool.py`). New uploads must be decoded;
 the existing legacy wire capture is labeled sample_data and is not an ingest format.
 
 Run focused archive, query and API coverage (minimum 85%, `--cov=archive_service

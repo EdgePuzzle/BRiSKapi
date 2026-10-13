@@ -27,7 +27,7 @@ PACKAGE = Path(__file__).resolve().parent
 DECODER = PACKAGE / 'decoder' / 'decoder.cjs'
 MIN_NODE = 22
 # Bump with any PRIVACY.md change to what is collected; saved choices then lapse.
-POLICY_VERSION = 7
+POLICY_VERSION = 8
 NOTICE = '''\
 briskapi uploads your sessions to your private BRiSK archive: a free, off-computer copy
 of every complete session, reachable from any computer with your identity and checked on
@@ -40,7 +40,8 @@ stores. What you delete can be restored for 30 days and is then removed.
 The cloud API (`brisk query`) builds OHLC bars from your own broker recordings only, for
 the securities and times they cover: no one else's uploads enter your results, and yours
 enter no one else's.
-Every clean, complete session uploads automatically (the default; you can decline):
+Every clean, complete session uploads automatically (the default; you can decline), and
+so does the part of a broker day recorded before a lost connection, once it reconnects:
   - demo sessions: the decoded market data and local timing measurements (decode
     durations, replay lateness, asset download time and your computer's receipt clock,
     which shows when you recorded);
@@ -168,10 +169,17 @@ def save_recording(events, output):
 
 def package(events, output):
     """Encode decoder JSONL as a package: the recording's tables plus a manifest of their zip."""
+    return _package(output, lambda: save_recording(events, output))
+
+def package_parts(equity, parts, output):
+    """A spooled segment (briskapi._spool) as a package: the same tables and manifest as package() of its batches."""
+    return _package(output, lambda: _parquet.load_parts(equity, parts).write(output))
+
+def _package(output, write):
     output.mkdir(parents=True, exist_ok=True)
     require(not any((output / name).exists() for name in (*_parquet.FILES, 'manifest.json')), 'Package output already exists')
     try:
-        save_recording(events, output)
+        write()
         summary = _parquet.summarize(output)
         blob = _parquet.pack(output)
         require(len(blob) <= MAX_COMPRESSED, f'The package is {len(blob) / 2**20:.0f} MiB; '

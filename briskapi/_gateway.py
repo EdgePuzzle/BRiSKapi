@@ -105,7 +105,7 @@ class Gateway:
         self._clients: list[_Client] = []
         self._bootstrap = None   # the trading day's bootstrap batch, without quotes and trades
         self._quotes = {}        # issue_id -> its latest quote
-        self._day = None         # [the feed's file of the day's batches, its length so far] while the day runs
+        self._day = None         # [the feed's spool of the day's batches, how many it has published] while the day runs
         self._closed = None      # the last line, once the feed has ended
         self.path = gateway_path(dataset)
         current = _read_file(self.path)
@@ -123,20 +123,20 @@ class Gateway:
     def __repr__(self):
         return f'Gateway({self.dataset!r}, {HOST}:{self.port})'
 
-    def publish(self, batch, line, day_file=None):
-        """Pass on a batch and its line as the decoder wrote it, which `day_file` (if any) now ends with."""
+    def publish(self, batch, line, spool=None):
+        """Pass on a batch and its line as the decoder wrote it, the last that `spool` (if any) holds."""
         with self._lock:
             if self._closed:
                 return
             if batch['type'] == 'bootstrap':
                 self._bootstrap = {k: v for k, v in batch.items() if k not in ('quotes', 'trades')}
-                self._quotes, self._day = {}, [day_file, 0] if day_file else None
+                self._quotes, self._day = {}, [spool, 0] if spool else None
             if self._day:
-                self._day[1] += len(line)
+                self._day[1] += 1
             for quote in batch.get('quotes', ()):
                 self._quotes[quote['issue_id']] = quote
             if batch['type'] == 'end':
-                self._day = None   # the feed packages and removes the day's file
+                self._day = None   # the feed packages and removes the day's spool
             for client in self._clients:
                 client.send(batch, line)
                 if batch['type'] == 'bootstrap':
@@ -227,7 +227,7 @@ class Gateway:
                     bootstrap = self._bootstrap if client.known is not self._bootstrap else None
                     client.known = self._bootstrap
                     quotes = list(self._quotes.values()) if message.get('snapshot') and self._bootstrap else None
-                    replay = (open(self._day[0], 'rb'), self._day[1]) if message.get('replay') and self._day else None
+                    replay = (self._day[0].replay(self._day[1])) if message.get('replay') and self._day else None
                     client.put(_Subscribed(ids, codes, bootstrap, quotes, replay))
         except (OSError, ValueError):
             client.end()
@@ -258,14 +258,20 @@ class _Subscribed:
                             'replay': self.replay is not None}))
         if self.replay:
             try:
-                sock.sendfile(self.replay[0], 0, self.replay[1])
+                chunk = []
+                for line in self.replay:
+                    chunk.append(line)
+                    if len(chunk) >= 256:
+                        sock.sendall(b''.join(chunk))
+                        chunk = []
+                sock.sendall(b''.join(chunk))
             finally:
                 self.close()
             sock.sendall(_line({'gateway': 'live', 'id': self.ids}))
 
     def close(self):
         if self.replay:
-            self.replay[0].close()
+            self.replay.close()
 
 
 class _Client:

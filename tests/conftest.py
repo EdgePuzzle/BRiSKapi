@@ -13,6 +13,12 @@ def identity_in_a_file(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def data_in_a_temporary_folder(monkeypatch, tmp_path_factory):
+    """Spools and kept recordings (briskapi._spool) never reach the real ~/.local/share/brisk."""
+    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path_factory.mktemp('data')))
+
+
+@pytest.fixture(autouse=True)
 def offline(monkeypatch):
     """No test reaches the archive (or any other remote host); local test servers stay reachable."""
     reach = urllib.request.urlopen

@@ -474,15 +474,15 @@ def test_feed_uploads_complete_sessions(gated_decoder, tmp_path, monkeypatch):
     gate.touch()
     packaged = []
 
-    def package(events, output):
-        packaged.append(events.read_text().splitlines())
+    def package_parts(equity, parts, output):
+        packaged.append([b['seq'] for b in _parquet.load_parts(equity, parts).iter_batches()])
 
-    monkeypatch.setattr(cli, 'package', package)
+    monkeypatch.setattr(cli, 'package_parts', package_parts)
     monkeypatch.setattr(cli, 'upload', lambda directory, url, verify, out: {'status': 'stored', 'verify': verify})
     with pytest.warns(UserWarning, match='by default'):
         feed = brisk.connect(site='demo', cache=tmp_path).wait()
     assert feed.uploaded == {'status': 'stored', 'verify': False}
-    assert packaged == [[json.dumps(b) for b in market()]]
+    assert packaged == [[b['seq'] for b in market()]]
     assert brisk.connect(site='demo', cache=tmp_path, limit_frames=2).wait().uploaded is None
     assert brisk.connect(site='demo', cache=tmp_path, upload=False).wait().uploaded is None and len(packaged) == 1
     brisk.consent(revoke=True)
@@ -490,14 +490,14 @@ def test_feed_uploads_complete_sessions(gated_decoder, tmp_path, monkeypatch):
         brisk.Feed(cache=tmp_path, upload=True)
     assert brisk.connect(site='demo', cache=tmp_path).wait().uploaded is None and len(packaged) == 1
     brisk.consent(accept=True)
-    monkeypatch.setattr(cli, 'package', lambda *a: 1 / 0)
+    monkeypatch.setattr(cli, 'package_parts', lambda *a: 1 / 0)
     with pytest.warns(UserWarning, match='upload failed'):
         assert brisk.connect(site='demo', cache=tmp_path).wait().uploaded['status'] == 'failed'
 
 
 def test_cli_live(gated_decoder, tmp_path, monkeypatch, capsys):
     gated_decoder().touch()
-    monkeypatch.setattr(cli, 'package', lambda *a: None)
+    monkeypatch.setattr(cli, 'package_parts', lambda *a: None)
     monkeypatch.setattr(cli, 'upload', lambda *a, **k: {'status': 'stored'})
     cli.main(['live', '--site', 'demo', '--cache', str(tmp_path), '--codes', '7203'])
     out = capsys.readouterr()

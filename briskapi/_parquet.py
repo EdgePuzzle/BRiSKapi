@@ -490,10 +490,12 @@ class Columns:
         return self.quotes(rows[keep])
 
 
-def _decode_batches(table):
+def _decode_batches(table, midnight=None):
+    """The batch rows (master, quotes and trades aside); a recording's start with its bootstrap, or a spool
+    part's (whose day starts at `midnight`) anywhere."""
     rows = table.to_pylist()
-    require(rows and rows[0]['kind'] == 'bootstrap', 'Recording has no bootstrap')
-    times = _numbers(table.column('ts_event')) - midnight_ns(rows[0]['trading_date'])
+    require(rows and (midnight is not None or rows[0]['kind'] == 'bootstrap'), 'Recording has no bootstrap')
+    times = _numbers(table.column('ts_event')) - (midnight_ns(rows[0]['trading_date']) if midnight is None else midnight)
     require(times.min() >= 0 and not (times % 1000).any(), 'Invalid batch clock')
     out = []
     for row, us in zip(rows, (times // 1000).tolist()):
@@ -628,6 +630,69 @@ def stream_tables(batches, carry=None, depths=True, trades=True):
         columns.trade_ids(carry)
     return (columns._depths(midnight) if depths else None,
             columns._trades(midnight, slice(None)) if trades else None)
+
+
+def write_part(batches, header, directory, carry=None):
+    """A spool part (see briskapi._spool): the depths, trades and batch tables of consecutive decoder batches.
+
+    `header` is the segment's bootstrap without quotes and trades; it stands in for the master when the part
+    starts later. `carry` continues trade IDs from the parts before. Equity is written once, by the spool.
+    """
+    first = batches[0]['type'] == 'bootstrap'
+    columns = Columns.from_batches(batches if first else [header, *batches])
+    if not first:
+        columns.batches = columns.batches[1:]
+    midnight = midnight_ns(header['trading_date'])
+    columns.trade_ids(carry)
+    directory = Path(directory)
+    (directory / BATCHES).parent.mkdir(parents=True, exist_ok=True)
+    try:
+        pq.write_table(columns._batches(midnight), directory / BATCHES, row_group_size=ROW_GROUP, **WRITE)
+        pq.write_table(columns.sorted()._depths(midnight), directory / DEPTHS, row_group_size=ROW_GROUP, **WRITE)
+        pq.write_table(columns._trades(midnight, slice(None)), directory / TRADES, row_group_size=ROW_GROUP, **WRITE)
+    except (TypeError, OverflowError) as error:
+        raise ValueError(f'Invalid recording value: {error}') from None
+
+
+def _part_columns(part, midnight, master):
+    """A spool part's rows as Columns, in the part's order."""
+    batches = _decode_batches(pq.read_table(part / BATCHES), midnight)
+    q = _decode_depths(pq.read_table(part / DEPTHS), midnight)
+    books = {side: (np.concatenate([[0], np.cumsum(q.pop(f'{side}.counts'))]), q.pop(f'{side}.levels')) for side in BOOKS}
+    t, t_code = _decode_trades(pq.read_table(part / TRADES), midnight)
+    return Columns({k: q[k] for k in INTS}, q['code'], books, master, batches, t, t_code)
+
+
+def load_parts(equity, parts):
+    """The canonical Columns of a spooled segment: its equity table and its parts, in order. Written, they are
+    the same bytes as the segment's batches written at once (Columns.from_batches(...).write)."""
+    master = _decode_equity(pq.read_table(equity))
+    midnight = None
+    pieces = []
+    for part in parts:
+        if midnight is None:
+            first = _decode_batches(pq.read_table(Path(part) / BATCHES))[0]
+            midnight = midnight_ns(first['trading_date'])
+        pieces.append(_part_columns(Path(part), midnight, master))
+    require(pieces, 'Recording has no bootstrap')
+    q = {k: np.concatenate([c.q[k] for c in pieces]) for k in INTS}
+    code = np.concatenate([c.code for c in pieces])
+    books = {}
+    for side in BOOKS:
+        counts = np.concatenate([np.diff(c.books[side][0]) for c in pieces])
+        books[side] = (np.concatenate([[0], np.cumsum(counts)]), np.concatenate([c.books[side][1] for c in pieces]))
+    t = {k: np.concatenate([c.t[k] for c in pieces]) for k in TRADE_INTS}
+    t_code = np.concatenate([c.t_code for c in pieces])
+    # The canonical order: quotes by issue then batch; trades by issue, batch, then the decoder's order (as
+    # each part kept it).
+    t_order = np.lexsort((np.arange(len(t_code)), t['seq'], t['issue_id']))
+    return Columns(q, code, books, master, [b for c in pieces for b in c.batches], {k: v[t_order] for k, v in t.items()},
+                   t_code[t_order], order=np.lexsort((q['seq'], q['issue_id'])))
+
+
+def part_batches(part, header, master):
+    """A spool part's decoder batches, in order (quotes by issue within a batch, as the canonical stream has them)."""
+    return _part_columns(Path(part), midnight_ns(header['trading_date']), master).iter_batches()
 
 
 def equity_table(bootstrap):

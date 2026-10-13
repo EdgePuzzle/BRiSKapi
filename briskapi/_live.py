@@ -14,7 +14,7 @@ import threading
 from typing import Callable, Iterator
 import warnings
 
-from briskapi import _gateway, _parquet, cli, schema
+from briskapi import _gateway, _parquet, _spool, cli, schema
 from briskapi._recording import BriskError, NotFoundError, Recording, Table, micros, quote_view
 from briskapi.timing import TimingStats
 
@@ -130,9 +130,12 @@ class Feed:
         self._changed = threading.Condition()
         self._closing = False
         self.status, self.error, self.seq, self.uploaded = 'starting', None, -1, None
-        # The day's batches are kept in a file while it runs: to package it, and for a gateway's replays.
-        self._tmp = tempfile.TemporaryDirectory() if self._package or self._output or gateway else None
+        # Each segment's batches go to disk as they arrive (briskapi._spool): to package it, to keep what a stop
+        # or a crash cuts short, and for a gateway's replays.
+        self._spooling, self._broker = bool(self._package or self._output or gateway), command is not None
         self._worker = ThreadPoolExecutor(1, thread_name_prefix='brisk-day')
+        if self._spooling:
+            self._worker.submit(self._recover)
         self._process = (subprocess.Popen(command, stdout=subprocess.PIPE, env=env) if command
                          else _decoder(cache, codes, speed, limit_frames, node))
         if gateway:
@@ -307,7 +310,7 @@ class Feed:
         return current, remove
 
     def _run(self):
-        day, days, ended = None, 0, False
+        spool, days, ended = None, 0, False
         try:
             for line in self._process.stdout:
                 batch = json.loads(line)
@@ -317,26 +320,19 @@ class Feed:
                     raise BriskError(f'Stream sequence error at {batch.get("seq")}')
                 if first:
                     days += 1
-                    if self._tmp:
-                        day = Path(self._tmp.name) / f'day-{days}'
-                        day.mkdir()
-                        day = (day, open(day / 'events.jsonl', 'wb'))
+                    spool = _spool.Spool() if self._spooling else None
                     self._stats = TimingStats(self._timing) if self._timing else None
-                if day:
-                    day[1].write(line)
-                    if self.gateway:
-                        day[1].flush()   # a replay reads the file up to this batch
+                if spool:
+                    spool.add(batch, line)
                 ended = batch['type'] == 'end'
                 if self._stats:
                     self._stats.add(batch)
                 self._apply(batch, new_day=first and days > 1)
                 if self.gateway:
-                    self.gateway.publish(batch, line, day and day[0] / 'events.jsonl')
+                    self.gateway.publish(batch, line, spool)
                 if ended:
-                    if day:
-                        day[1].close()
-                    self._worker.submit(self._finish_day, day and day[0], self._stats)
-                    day, self._stats = None, None
+                    self._worker.submit(self._finish_day, spool, self._stats)
+                    spool, self._stats = None, None
             if self._closing:
                 raise BriskError('closed')
             if self._process.wait():
@@ -354,13 +350,11 @@ class Feed:
             self._finish()
         finally:
             _stop(self._process)
-            if day:
-                day[1].close()  # an unfinished day's market data is never kept or uploaded
+            if spool:
+                self._worker.submit(self._keep, spool)   # never uploaded
             if self._stats and self.status in {'completed', 'closed'}:
                 self.timing_uploaded = self._upload_timing(self._stats)
             self._worker.shutdown(wait=True)  # finished days are still kept and uploaded
-            if self._tmp:
-                self._tmp.cleanup()
 
     def _apply(self, batch, new_day=False):
         quotes = batch.get('quotes', ())
@@ -396,14 +390,32 @@ class Feed:
         if self.gateway:
             self.gateway.close(self.status, self.error)
 
-    def _finish_day(self, directory, stats):
+    def _recover(self):
+        for kept in _spool.recover(self._output):
+            warnings.warn(f'A feed that stopped unexpectedly left a recording behind: kept in {kept} (not uploaded)')
+
+    def _keep(self, spool):
+        """Keep a broker segment cut short (the feed stopped, or failed, before its end) on this computer: in
+        `output`, else in briskapi._spool.kept_dir(). It has no clean end, so it is never uploaded; a demo's is
+        dropped (it is the same for everyone)."""
+        try:
+            if self._broker and (self._package or self._output):
+                kept = spool.keep(self._output or _spool.kept_dir())
+                if kept:
+                    warnings.warn(f'The feed stopped before the day ended: what it recorded is kept in {kept} (not uploaded)')
+        except Exception as error:  # noqa: BLE001 - the feed has ended; report, do not fail
+            warnings.warn(f'Could not keep the recording in {spool.path}: {error}')
+            return
+        spool.remove()
+
+    def _finish_day(self, spool, stats):
         """Package a finished day, keep it in `output` and upload it and its timing summary, as chosen."""
         result = {'trading_date': self.trading_date, 'name': None, 'path': None, 'uploaded': None, 'timing_uploaded': None}
         try:
-            if directory and (self._package or self._output):
-                package = directory / 'package'
+            if spool and (self._package or self._output):
+                package = spool.path / 'package'
                 try:
-                    m = cli.package(directory / 'events.jsonl', package)
+                    m = spool.package(package)
                     result['name'] = m and schema.local_name(m['summary'])
                     if self._output:
                         target = self._output / result['name']
@@ -417,12 +429,17 @@ class Feed:
                         result['uploaded'] = cli.upload(package, cli.settings()['api_url'], verify=False, out=sys.stderr)
                 except Exception as error:  # noqa: BLE001 - market data was delivered; report, do not fail
                     result['uploaded'] = {'status': 'failed', 'error': str(error)}
-                    warnings.warn(f'Automatic upload failed: {error}')
+                    kept = None if result['path'] else self._rescue(spool, package, result['name'])
+                    result['path'] = result['path'] or (kept and str(kept))
+                    warnings.warn(f'Automatic upload failed: {error}' +
+                                  (f'; the day is kept in {kept}' + (f' (`brisk upload {kept}` retries)' if
+                                                                     (kept / 'manifest.json').exists() else '')
+                                   if kept else ''))
             if stats:
                 result['timing_uploaded'] = self._upload_timing(stats)
         finally:
-            if directory:
-                shutil.rmtree(directory, ignore_errors=True)
+            if spool:
+                spool.remove()
         self.uploaded, self.timing_uploaded = result['uploaded'], result['timing_uploaded']
         self.recordings.append(result)
         if self._on_day:
@@ -430,6 +447,20 @@ class Feed:
                 self._on_day(result)
             except Exception as error:  # noqa: BLE001 - a reporting callback must not stop the recording
                 warnings.warn(f'on_day callback failed: {error}')
+
+    def _rescue(self, spool, package, name):
+        """Keep a finished day whose packaging or upload failed in briskapi._spool.kept_dir(): its package if it
+        has one (an upload can be retried), else the tables so far; None if even that fails."""
+        try:
+            if name and (package / 'manifest.json').exists():
+                target = _spool.kept_dir() / name
+                if not target.exists():
+                    shutil.copytree(package, target)
+                    return target
+            return spool.keep(_spool.kept_dir())
+        except Exception as error:  # noqa: BLE001 - reported with the upload's failure
+            warnings.warn(f'Could not keep the day in {_spool.kept_dir()}: {error}')
+            return None
 
     def _upload_timing(self, stats):
         try:
