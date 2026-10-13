@@ -250,9 +250,9 @@ def login(cookies=None, remember=False, site='sbi') -> Client:
     global _client
     path, env = cookies_path(site), _site(site).cookies_env
     if cookies is None and os.environ.get(env):
-        cookies = json.loads(os.environ[env])
+        cookies = _cookies_json(os.environ[env], env)
     if cookies is None and path.exists():
-        cookies = json.loads(path.read_text())
+        cookies = _cookies_json(path.read_text(), str(path))
     _client = Client(cookies, site=site)
     if remember:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,6 +260,15 @@ def login(cookies=None, remember=False, site='sbi') -> Client:
         with os.fdopen(fd, 'w') as f:
             json.dump(_client.session.cookies, f)
     return _client
+
+
+def _cookies_json(text, where) -> dict:
+    """Cookies pasted as JSON; a typo is one line naming where it is, never the value."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        raise SessionExpiredError(f'{where} is not valid JSON ({error.msg} at line {error.lineno} column {error.colno}); '
+                                  'it should look like {"cookie_name": "value", ...}') from None
 
 
 def logout():
@@ -274,6 +283,11 @@ def _default() -> Client:
     if _client is None:
         raise SessionExpiredError('BRiSK site data needs a session: call briskapi.sbi.login(cookies={...}) first')
     return _client
+
+
+def _check_session(session: Session) -> None:
+    """Ask the site whether it still accepts the cookies, so an expired session fails in one line before Node starts."""
+    session.get('/api/frontend/boot')
 
 
 def connect(codes=None, history=False, node='node', timeout=120, contribute=None, trace_protocol=False, profile=None,
@@ -298,9 +312,11 @@ def connect(codes=None, history=False, node='node', timeout=120, contribute=None
     declaration. It requires current consent; contribute=False or BRISK_CONTRIBUTE=0
     keeps both local. Cookies, tokens and connection diagnostics are never published.
     """
-    from briskapi import load
+    from briskapi import cli, load
     from briskapi._live import Feed
     session = _default().session
+    cli.check_node(node)      # local checks first: a missing Node is reported without contacting the site
+    _check_session(session)
     command = [node, str(DECODER)]
     if codes:
         command += ['--codes', codes if isinstance(codes, str) else ','.join(map(str, codes))]

@@ -104,7 +104,11 @@ The endpoint sequence was learned from pybrisk: session cookies authenticate
 `/api/frontend/boot`, which returns a bearer token; `/api/app/boot` then gives
 the trading date, series, schedule, WebSocket URL and master/snapshot hashes.
 Requests are rate limited and never follow redirects, because a redirect means
-an expired session and following it would forward credentials.
+an expired session and following it would forward credentials. `sbi.connect()`
+asks `/api/frontend/boot` before it starts the live host, so an expired session
+is one `SessionExpiredError` line and Node never starts. Cookies given as JSON
+(the `BRISK_*_COOKIES` variables or a saved cookie file) that don't parse are
+the same error, naming the variable or file but never the value.
 
 The live host (`briskapi/decoder/sbi.cjs`) uses the same session to fetch the
 master and snapshot, finds SBI's decoder through the app's own bundles (it is

@@ -20,6 +20,8 @@ import briskapi.schema as schema
 from briskapi import sbi
 from briskapi._recording import JST, NotFoundError
 
+CHECK_SESSION = sbi._check_session  # stubbed for every test below; the session tests put it back
+
 BOOT = {'result': True, 'user_id': 'test-uuid', 'api_token': 'v2.local.testtoken', 'api_endpoint': 'https://api.brisk.jp'}
 APP_BOOT = {'result': True, 'series': 0, 'date': '2026-03-11', 'session_status': 'running',
             'ws_url': '/realtime/0?session=abc', 'master': 'masterhash', 'snapshot': 'snaphash',
@@ -73,6 +75,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.delenv('BRISK_CONTRIBUTE', raising=False)
     monkeypatch.setattr(sbi, '_client', None)
     monkeypatch.setattr(briskapi, '_current', None)
+    monkeypatch.setattr(sbi, '_check_session', lambda session: None)  # fake hosts below have no HTTP site behind them
 
 
 def test_boot_and_headers():
@@ -283,6 +286,39 @@ def test_cli_without_cookies_stops_before_prompt_or_decoder(monkeypatch, capsys)
     with pytest.raises(SystemExit, match='No SBI BRiSK cookies'):
         cli.main(['live', '--sbi'])
     assert 'Decoder exited' not in capsys.readouterr().err
+
+
+def test_an_expired_session_fails_in_one_line_before_the_decoder_starts(monkeypatch, capsys):
+    import briskapi._live
+    monkeypatch.setattr(sbi, '_check_session', CHECK_SESSION)
+    monkeypatch.setattr(briskapi._live, 'Feed', lambda *a, **k: pytest.fail('decoder must not start'))
+    opener = Opener({'/api/frontend/boot': 401})
+    monkeypatch.setattr(sbi.urllib.request, 'build_opener', lambda *handlers: opener)
+    sbi.login({'session_bfaf77a2': 'expired'})
+    with pytest.raises(sbi.SessionExpiredError, match='^SBI BRiSK session expired or invalid; log in again$'):
+        sbi.connect(codes=['7203'])
+    assert [r.full_url for r in opener.requests] == [sbi.ORIGIN + '/api/frontend/boot']
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "expired"}')
+    with pytest.raises(SystemExit) as stop:
+        cli.main(['live', '--sbi', '--codes', '7203'])
+    assert stop.value.code == 'brisk: error: SBI BRiSK session expired or invalid; log in again'
+    assert 'Decoder exited' not in capsys.readouterr().err
+
+
+def test_cookies_that_are_not_json_fail_in_one_line_without_their_value(monkeypatch):
+    monkeypatch.setenv('BRISK_ESHITEN_COOKIES', '{session_bfaf77a2: secret-value}')
+    with pytest.raises(sbi.SessionExpiredError, match='^BRISK_ESHITEN_COOKIES is not valid JSON') as error:
+        sbi.login(site='e-shiten')
+    assert 'secret-value' not in str(error.value) and 'line 1 column 2' in str(error.value)
+    with pytest.raises(SystemExit) as stop:
+        cli.main(['live', '--site', 'e-shiten'])
+    assert stop.value.code.startswith('brisk: error: BRISK_ESHITEN_COOKIES is not valid JSON') and '\n' not in stop.value.code
+    monkeypatch.delenv('BRISK_ESHITEN_COOKIES')
+    sbi.cookies_path().parent.mkdir(parents=True, exist_ok=True)
+    sbi.cookies_path().write_text('session_bfaf77a2=secret-value')
+    with pytest.raises(sbi.SessionExpiredError, match='is not valid JSON') as error:
+        sbi.login()
+    assert str(sbi.cookies_path()) in str(error.value) and 'secret-value' not in str(error.value)
 
 
 def test_sbi_market_sharing_requires_current_consent(fake_host):
