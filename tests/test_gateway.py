@@ -73,6 +73,8 @@ def test_live_records_are_the_cloud_apis(archive, decoder):
     later = []
     reader = threading.Thread(target=lambda: later.extend(part))
     reader.start()
+    # Both subscriptions answered before the feed goes on: one that came after the day's end would get nothing.
+    wait_for(lambda: len(feed.gateway._clients) == 2 and all(c.known is not None for c in feed.gateway._clients))
     release(70)
     whole.block_for_close(timeout=30)
     reader.join(30)
