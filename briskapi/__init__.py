@@ -1,4 +1,4 @@
-"""Python API for BRiSK auction data: recordings, the shared archive and the public demo.
+"""Python API for BRiSK auction data: recordings, your private archive and the public demo.
 
     import briskapi
 
@@ -44,7 +44,7 @@ def connect(**options) -> Feed:
 
 
 def recordings(date=None, source=None) -> Table:
-    """Published archive recordings (see Archive.recordings)."""
+    """Your archived recordings (see Archive.recordings)."""
     return Archive().recordings(date, source)
 
 
@@ -54,14 +54,16 @@ def pull(prefix, output=None) -> Recording:
 
 
 def record(output, **options) -> Recording:
-    """Record the public demo (see briskapi._live.record), contribute per consent and make it the default."""
+    """Record the public demo (see briskapi._live.record), upload it per consent and make it the default."""
     return load(_record(output, **options))
 
 
-def consent(accept=False, revoke=False, contributor=None, license=None) -> dict | None:
-    """Show (no arguments), accept or revoke automatic contribution. See PRIVACY.md."""
+def consent(accept=False, revoke=False) -> dict | None:
+    """Show (no arguments), accept or revoke automatic uploads to your private archive (on by default:
+    `default: True` until you decide). Accepting makes your archive identity if there is none and
+    prints it to stderr. See PRIVACY.md."""
     if accept and revoke:
         raise ValueError('Choose accept or revoke')
     if accept:
-        return _cli.save_consent(True, contributor, license)
-    return _cli.save_consent(False) if revoke else _cli.load_consent()
+        return _cli.accept()
+    return _cli.save_consent(False) if revoke else _cli.load_consent() or dict(_cli.DEFAULT)

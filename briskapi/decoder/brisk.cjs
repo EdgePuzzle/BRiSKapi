@@ -1,16 +1,16 @@
 'use strict';
-// Experimental live host for broker-hosted BRiSK: SBI BRiSK (sbi.brisk.jp) and
-// Tachibana's e-shiten BRiSK Next (next.e-shiten.brisk.jp), BRISK_SBI_SITE=e-shiten.
+// Experimental live host for broker-hosted BRiSK: SBI's (sbi.brisk.jp, BRISK_SITE=sbi, the
+// default) and Tachibana e-shiten's BRiSK Next (next.e-shiten.brisk.jp, BRISK_SITE=e-shiten).
 // The session's own WASM decoder under Node, fed from the authenticated WebSocket.
 // No browser or Chrome DevTools. Emits the same JSON batches as decoder.cjs
-// (source=sbi_live or eshiten_live). Cookies come from BRISK_SBI_COOKIES (JSON
-// object), never from the command line.
+// (source=sbi_live or eshiten_live). Cookies come from the site's variable
+// (BRISK_SBI_COOKIES, BRISK_ESHITEN_COOKIES; a JSON object), never from the command line.
 //
 // It follows the vendor client's connect sequence (public Next demo bundle) and
 // upstream's SBI research (pybrisk): feed the WASM from the first frame, wait for its
 // frame numbers, catch the snapshot up to them, answer the server's pings through the WASM,
 // and watch the server heartbeat. The stream is expected to be plain binary (see engineio.cjs
-// for the Socket.IO fallback and why it is unverified); the profile (BRISK_SBI_PROFILE) can
+// for the Socket.IO fallback and why it is unverified); the profile (BRISK_PROFILE) can
 // set that fallback's parameters and the catch-up format, and `--trace-protocol` shows what
 // the server answers.
 const crypto = require('node:crypto');
@@ -21,13 +21,14 @@ const { Link, resolveProfile, heartbeatMonitor, staleDataCheck, redact } = requi
 // Brokers whose BRiSK is this app. On 2026-10-08 both served the same boot (flex_version 18000),
 // master, snapshot and decoder, so only the address differs.
 const SITES = {
-  sbi: { origin: 'https://sbi.brisk.jp', name: 'SBI BRiSK', source: 'sbi_live', transport: 'sbi_websocket' },
+  sbi: { origin: 'https://sbi.brisk.jp', name: 'SBI BRiSK', source: 'sbi_live', transport: 'sbi_websocket',
+    cookies: 'BRISK_SBI_COOKIES' },
   'e-shiten': { origin: 'https://next.e-shiten.brisk.jp', name: 'e-shiten BRiSK Next', source: 'eshiten_live',
-    transport: 'eshiten_websocket' },
+    transport: 'eshiten_websocket', cookies: 'BRISK_ESHITEN_COOKIES' },
 };
 const PROTOCOL_VERSION = 18000;
 const MAX_BYTES = 64 * 1024 * 1024;
-// SBI's decoder must provide everything the host calls (the demo ABI minus portfolio).
+// The site's decoder must provide everything the host calls (the demo ABI minus portfolio).
 const REQUIRED = ['_initialize', '_push', '_applyBasePriceQueue', '_stockCount', '_getStockMaster', '_unserialize',
   '_getDate', '_getTime', '_pushWs', '_getFrameNumbers', '_apiRecieved', '_addTraceUpdate', '_getTrace',
   '_clearTrace', '_getStockView', '_fitItaViewRowPrice10', '_getItaRows', '_malloc', 'addFunction'];
@@ -40,7 +41,7 @@ function site(id = 'sbi') {
 class Session {
   constructor(cookies, fetchImpl = fetch, where = site()) {
     if (!cookies || typeof cookies !== 'object' || !Object.keys(cookies).length) {
-      throw new Error(`Set BRISK_SBI_COOKIES to your ${where.name} session cookies (JSON object)`);
+      throw new Error(`Set ${where.cookies} to your ${where.name} session cookies (JSON object)`);
     }
     this.cookie = Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join('; ');
     this.fetch = fetchImpl;
@@ -94,6 +95,12 @@ const STREAM_PROTOCOL = 'flex';
 // The SBI app's connection check fails when no server heartbeat has come for 10 s
 // (heartbeatIntervalMilliSeconds: 1e4 in its configuration); heartbeats come every 5 s.
 const HEARTBEAT_MS = 10000;
+
+// A recording covers one trading day. The host asks the site for its trading date every ten minutes;
+// when the site serves the next day (or the stream's clock goes back, as a new day's would), the day's
+// session ends cleanly and the next one starts from a fresh boot, master and snapshot.
+const DAY_CHECK_MS = 10 * 60 * 1000;
+const NEW_DAY_US = 3600e6;  // a clock an hour behind the last frame's belongs to another day
 
 // Fetch the frames between the snapshot and the stream's first frame. Mirrors the vendor
 // client: up to five retries, but never for an expired session or a snapshot that is too old.
@@ -192,16 +199,31 @@ function checkAbi(wasm) {
 
 async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImpl = WebSocket, startTimeoutMs = 60000,
   protocolVersion, profile: overrides = {}, trace = null, catchUp = null, heartbeatMs = HEARTBEAT_MS,
-  staleSeconds = 90, connectTimeoutMs = 15000, catchUpBackoffMs, site: siteId = 'sbi' }) {
+  staleSeconds = 90, connectTimeoutMs = 15000, catchUpBackoffMs, site: siteId = 'sbi', after = null,
+  dayCheckMs = DAY_CHECK_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), onBoot = null }) {
   const where = site(siteId);
   const profile = resolveProfile(overrides);
   const session = new Session(cookies, fetchImpl, where);
-  const began = performance.now();
-  const frontend = await session.get('/api/frontend/boot');
+  let frontend = await session.get('/api/frontend/boot');
   session.token = frontend.api_token;
-  const app = await session.get('/api/app/boot');
+  let app = await session.get('/api/app/boot');
+  // After a recorded day, wait for the site to serve the next one.
+  while (after !== null && String(app.date) <= after) {
+    trace?.(`boot: still ${app.date}; waiting for the next trading day`);
+    await sleep(dayCheckMs);
+    try {
+      frontend = await session.get('/api/frontend/boot');
+      session.token = frontend.api_token;
+      app = await session.get('/api/app/boot');
+    } catch (error) {
+      if (/expired/.test(error.message)) throw error;  // a session that ended needs a new login
+      trace?.(`boot check failed (${error.message}); trying again later`);
+    }
+  }
+  onBoot?.(String(app.date));
+  const began = performance.now();
   // The server says which decoder protocol it speaks (the vendor client passes it to the WASM and
-  // falls back to 16000); an explicit option wins, then the boot response, then SBI's 18000.
+  // falls back to 16000); an explicit option wins, then the boot response, then the brokers' 18000.
   protocolVersion ??= app.flex_version ?? PROTOCOL_VERSION;
   const wsUrl = streamUrl(app.ws_url, frontend.api_endpoint, where.origin);
   trace?.(`boot: date ${app.date}, series ${app.series}, flex_version ${protocolVersion}, `
@@ -212,14 +234,21 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   assets['snapshot.dat'] = await session.get(`/api/snapshot/${encodeURIComponent(app.snapshot)}`, 'bytes');
 
   // The WASM calls back into the host; these are the vendor client's six callbacks.
-  let link = null, failure = null, marketFinished = false, settle;
+  let link = null, failure = null, marketFinished = false, settle, dayOver = false;
   const ended = new Promise(resolve => { settle = resolve; });
   const fail = error => {
     failure = failure || error;
     link?.close();
     settle({ code: -1, reason: '' });
   };
-  let monitor = null, timer = null;  // started with the link and always stopped, so a failure cannot leave the process hanging
+  let monitor = null, timer = null, dayTimer = null;  // started with the link and always stopped, so a failure cannot leave the process hanging
+  const endDay = why => {
+    if (dayOver) return;
+    dayOver = true;
+    trace?.(`day over: ${why}`);
+    link?.close();
+    settle({ code: 1000, reason: why });
+  };
   const stale = staleSeconds ? staleDataCheck({ date: app.date, thresholdUs: staleSeconds * 1e6, name: where.name }) : null;
   const decoder = await Decoder.create(assets, { protocolVersion, check: checkAbi,
     checkMaster: master => checkMaster(master, protocolVersion), schedule: app.schedule_info ?? null,
@@ -271,9 +300,11 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     const batch = { type: 'bootstrap', seq: seq++, source: where.source, trading_date: String(app.date).replaceAll('-', ''),
       input_transport: { ...input_transport, dialect: link.mode, engineio: link.version, caught_up_issues: caughtUp },
       source_timestamp_origin: 'brisk_decoder_unverified', exchange_delay_ms: null,
-      source_time_us: now, market_issue_count: decoder.master.length, master, quotes,
+      source_time_us: now, market_issue_count: decoder.master.length, master, quotes, trades: decoder.trades(ids),
       ...(skipped.length && { skipped_issues: skipped.sort((a, b) => a - b) }) };
-    work = work.then(() => failure || emit(batch)).catch(fail);
+    // Trades the snapshot restored (the session's so far) follow the bootstrap, at its clock.
+    const history = decoder.history(ids).map(trades => ({ type: 'history', seq: seq++, source_time_us: now, trades }));
+    work = work.then(async () => { for (const b of [batch, ...history]) if (!failure) await emit(b); }).catch(fail);
   };
 
   // The snapshot is normally older than the stream's first frame. The vendor client feeds
@@ -289,14 +320,20 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     }).catch(fail);
   };
 
+  let lastTime = 0;
   const handle = async (frame, received_unix_ms) => {
+    if (dayOver) return;
     const t0 = process.hrtime.bigint();
     decoder.feed(frame);
     decoder.applyBasePrice();
+    const clock = decoder.time();
+    if (clock + NEW_DAY_US < lastTime) return endDay(`the stream's clock went back to ${clock}`);
+    lastTime = Math.max(lastTime, clock);
     const { quotes, skipped } = decoder.quotes(decoder.changed().filter(id => ids.has(id)));
+    const trades = decoder.trades(ids);
     updates += quotes.length;
     await emit({ type: 'quotes', seq: seq++, source_time_us: decoder.time(), received_unix_ms,
-      decode_ns: Number(process.hrtime.bigint() - t0), replay_lateness_ms: null, quotes,
+      decode_ns: Number(process.hrtime.bigint() - t0), replay_lateness_ms: null, quotes, trades,
       ...(skipped.length && { skipped_issues: skipped.sort((a, b) => a - b) }) });
   };
 
@@ -319,6 +356,12 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
       staleCheck: stale && (() => stale.check(decoder.time())) });
     timer = setTimeout(() => fail(new Error(`${where.name} stream did not initialize within ${startTimeoutMs / 1000}s; `
       + 'no first frame numbers arrived (run with --trace-protocol to see what the server sent)')), startTimeoutMs);
+    dayTimer = setInterval(async () => {
+      try {
+        const now = await session.get('/api/app/boot');
+        if (String(now.date) !== String(app.date)) endDay(`the site serves ${now.date}`);
+      } catch (error) { trace?.(`day check failed: ${error.message}`); }  // the stream's own checks catch a dead session
+    }, dayCheckMs);
     // Cookies go only to the host that set them (elsewhere the session in ws_url authenticates);
     // Origin is what a browser on the site sends.
     const headers = { origin: where.origin };
@@ -331,7 +374,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     // A catch-up that finishes extends the chain (it queues the bootstrap), so wait until it stops growing.
     for (let pending = null; pending !== work;) { pending = work; await pending; }
     if (failure) throw failure;
-    if ((closed.code !== 1000 && !marketFinished) || !started) {
+    if ((closed.code !== 1000 && !marketFinished && !dayOver) || !started) {
       throw new Error(`${where.name} stream closed (${closed.code} ${closed.reason || ''})`.trim());
     }
     const summary = { type: 'end', seq, source_time_us: decoder.time(), frames, quote_updates: updates,
@@ -340,12 +383,22 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     return summary;
   } finally {
     clearTimeout(timer);
+    clearInterval(dayTimer);
     monitor?.stop();
     link?.close();
   }
 }
 
-const USAGE = 'Usage: BRISK_SBI_COOKIES=... [BRISK_SBI_SITE=e-shiten] sbi.cjs [--codes 7203,6758] [--trace-protocol]';
+// One session per trading day, back to back, until `days` have been recorded (the command line: until
+// stopped). Each emits its own bootstrap ... end, which the Python feed keeps as that day's recording.
+async function record({ days = Infinity, ...options }) {
+  let after = null;
+  for (let day = 0; day < days; day++) {
+    await live({ ...options, after, onBoot: date => { after = date; } });
+  }
+}
+
+const USAGE = 'Usage: [BRISK_SITE=sbi|e-shiten] BRISK_SBI_COOKIES=...|BRISK_ESHITEN_COOKIES=... brisk.cjs [--codes 7203,6758] [--trace-protocol]';
 
 function parseArgs(argv) {
   const options = { codes: [], trace: false };
@@ -362,17 +415,18 @@ function parseArgs(argv) {
 async function main(argv, env = process.env) {
   const { codes, trace } = parseArgs(argv);
   let profile = {};
-  if (env.BRISK_SBI_PROFILE) {
-    try { profile = JSON.parse(env.BRISK_SBI_PROFILE); } catch { throw new Error('BRISK_SBI_PROFILE is not valid JSON'); }
+  if (env.BRISK_PROFILE) {
+    try { profile = JSON.parse(env.BRISK_PROFILE); } catch { throw new Error('BRISK_PROFILE is not valid JSON'); }
   }
-  await live({ cookies: JSON.parse(env.BRISK_SBI_COOKIES || 'null'), codes, profile, site: env.BRISK_SBI_SITE || 'sbi',
-    trace: trace ? line => process.stderr.write(`[sbi protocol] ${line}\n`) : null,
+  const where = site(env.BRISK_SITE || 'sbi');
+  await record({ cookies: JSON.parse(env[where.cookies] || 'null'), codes, profile, site: where.id,
+    trace: trace ? line => process.stderr.write(`[brisk protocol] ${line}\n`) : null,
     emit: async record => {
       if (!process.stdout.write(JSON.stringify(record) + '\n')) await once(process.stdout, 'drain');
     } });
 }
 
-module.exports = { Session, SITES, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, main, fetchCatchUp, CATCH_UP_FORMATS, DEFAULT_CATCH_UP,
+module.exports = { Session, SITES, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, fetchCatchUp, CATCH_UP_FORMATS, DEFAULT_CATCH_UP,
   HEARTBEAT_MS,
   PROTOCOL_VERSION, REQUIRED };
 if (require.main === module) main(process.argv.slice(2)).catch(error => {

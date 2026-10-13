@@ -4,8 +4,8 @@
 
 BRiSK の板寄せデータを扱う、非公式の pybrisk 風 Python API と `brisk`
 コマンドラインツールです。ライブフィードの購読、記録データの任意時点での照会、
-公開アーカイブからの共有記録の取得に加え、ご自身の口座で SBI BRiSK や立花証券
-e支店の BRiSK Next も利用できます（パスキーでのサインインにも対応）。本プロジェクトは独立したもので、BRiSK、立花証券、SBI証券、
+自分専用の非公開アーカイブへの保存に加え、ご自身の口座で SBI証券や立花証券
+e支店（BRiSK Next）の BRiSK も利用できます（パスキーでのサインインにも対応）。本プロジェクトは独立したもので、BRiSK、立花証券、SBI証券、
 東京証券取引所（TSE）、日本取引所グループ（JPX）とは提携しておらず、承認も
 受けていません。
 
@@ -13,11 +13,9 @@ e支店の BRiSK Next も利用できます（パスキーでのサインイン�
 > - **口座不要:** 2021年9月27日の公開 BRiSK Next デモ（寄り前のスナップショット
 >   1件と寄付から3分間）を、記録時のペースで再生したもの。リアルタイムの市場
 >   データではありません。
-> - **SBI証券の BRiSK 契約がある場合:** SBI BRiSK の市場データ（ローソク足、
->   信用残、アラート、取引スケジュール、ウォッチリスト）と、試験的なライブ
->   フィード。
-> - **立花証券 e支店の BRiSK Next を使える場合:** 同じ機能。データはお使いの
->   コンピューターから出ません。
+> - **お使いの証券会社の BRiSK（SBI証券、または立花証券 e支店の BRiSK Next）を
+>   使える場合:** BRiSK の市場データ（ローソク足、信用残、アラート、取引
+>   スケジュール、ウォッチリスト）と、試験的なライブフィード。
 
 ## インストール
 
@@ -62,14 +60,14 @@ feed.wait()           # または feed.close()。`with briskapi.connect(...) as 
 どおりに受け取ります。受け取る側の処理が遅い場合、更新を捨てずにフィードの
 ほうが待ちます。
 
-## 記録データとアーカイブ
+## 記録データと自分のアーカイブ
 
 ```python
-recordings = briskapi.recordings(source="historical_mock")   # AWS アカウント不要
+recordings = briskapi.recordings(source="historical_mock")   # 自分の記録だけ。アカウント不要
 if recordings:
     briskapi.pull(recordings[0]["prefix"])      # 検証・展開・キャッシュし、既定のデータにする
 else:
-    briskapi.record("recordings/my-session", web=True)   # アーカイブが空ならデモを自分で記録
+    briskapi.record("recordings/my-session", web=True)   # デモを記録（オプトアウトしない限りアップロード）
 # または briskapi.load("recordings/my-session") でローカルの記録フォルダー（以前の events.jsonl[.gz] も可）を読む。
 
 briskapi.Ticker("7203").quote(at="08:59:59.9999")             # 寄り前の気配（日本時間）
@@ -79,31 +77,35 @@ briskapi.Market().snapshot(at="09:00:00").to_pandas()
 
 記録は NautilusTrader v2 のカタログと同じ構成の Parquet テーブルのフォルダーです。
 `data/order_book_depths.parquet`（すべての気配更新。v2 の `OrderBookDepth` に BRiSK の
-ほかの気配項目を加えたもの）、`data/equity.parquet`（銘柄マスター、v2 の `Equity`）、
+ほかの気配項目を加えたもの）、`data/trades.parquet`（すべての約定、v2 の `TradeTick`）、
+`data/equity.parquet`（銘柄マスター、v2 の `Equity`）、
 `data/custom/BriskBatch.parquet`（フレームごとの計測値）からなります。デモ全体で約
-34 MB です。pandas、Polars、DuckDB でそのまま読めます。`brisk export` で
+41 MB です。pandas、Polars、DuckDB でそのまま読めます。`brisk export` で
 NautilusTrader のカタログや JSONL に書き出せます。全列の説明は ARCHITECTURE.md にあります。
 
 時刻の照会には、バッチではなく各気配のタイムスタンプを使います。デモの
 7203 の最初の気配は日本時間 08:59:59.993551 で、それより前は `NotFoundError`
 になります。`Market().summary()` はローカルの記録やライブフィードでも `start`
-と `end` を返します。アーカイブの一覧では、不正または未対応の記録を警告付きで
-スキップします。デモの記録がない場合もあり、`synthetic_test` は公開処理のテスト用です。
-既存の [サンプルデータ](https://brisk-recordings-honvl-tokyo.s3.ap-northeast-1.amazonaws.com/archive/20260311/cca870a51e7f96f16009c3709c3f597d314b22ed8922bb3ea7fa1acc67a0f85f/events.jsonl.gz)
-はプロトコル調査用の SBI 通信形式で、通信形式に対応したデコーダーが必要です。
+と `end` を返します。アーカイブには自分がアップロードしたものだけが、自分の ID（お使いの
+コンピューターで作られ、どこにも登録しないランダムな鍵。[自分専用のアーカイブ](#自分専用のアーカイブ)
+を参照）の下に保存されます。一覧では、不正または未対応の記録を警告付きでスキップします。
+サンプルが1つだけ、誰でもダウンロードできるよう公開されています。[通信をそのまま記録したもの](https://brisk-recordings-honvl-tokyo.s3.ap-northeast-1.amazonaws.com/samples/20260311/cca870a51e7f96f16009c3709c3f597d314b22ed8922bb3ea7fa1acc67a0f85f/events.jsonl.gz)
+（2026-03-11、日本時間 12:12:40 から）で、このツールがもう読まない旧形式
+`brisk-sbi-wire-jsonl-v1` です。
 
-## SBI BRiSK
+## お使いの証券会社の BRiSK
 
-BRiSK を契約している SBI証券のお客様向けです。ブラウザで
-[sbi.brisk.jp](https://sbi.brisk.jp) にログインし、そのセッション Cookie を
+同じクライアントで、SBI証券の BRiSK（[sbi.brisk.jp](https://sbi.brisk.jp)、既定のサイト）と
+立花証券 e支店の BRiSK Next（専用の項が続きます）を使えます。証券会社と BRiSK の契約が
+必要です。SBI では、ブラウザで sbi.brisk.jp にログインし、そのセッション Cookie を
 渡します。Cookie は DevTools からコピーするか、`pycookiecheat` の
 `chrome_cookies("https://sbi.brisk.jp")` で取得できます。パスキーで `briskapi` に
 サインインさせることもできます（[下記](#パスキーでのサインイン試験的)）。
 
 ```python
-from briskapi import sbi
+from briskapi import brisk
 
-sbi.login(cookies={"session_bfaf77a2": "v2.local..."})   # remember=True で保存（本人のみ読み取り可）
+brisk.login(cookies={"session_bfaf77a2": "v2.local..."})   # remember=True で保存（本人のみ読み取り可）
 toyota = briskapi.Ticker("7203")
 toyota.candles("5m").to_pandas()   # ローソク足: 5分（当日）、日、週、月（5m, 1d, 1w, 1mo）
 toyota.margin(days=30)             # 信用残と貸株料
@@ -114,25 +116,33 @@ market.events()       # バスケット注文、ストップ高・安、出来�
 market.schedule()     # 取引日、状態、取引時間
 market.watchlist()    # 保存済みの銘柄コード
 
-feed = sbi.connect(codes=["7203"])          # ライブ（試験的）。タイミング共有は保存済みの同意に従う
+feed = brisk.connect(codes=["7203"])        # ライブ（試験的）。オプトアウトしない限り、終わった日ごとにアップロード
 toyota.quote()                              # 他のフィードと同じ呼び出し
-# このセッションの市場データも共有する場合は、まず現行ポリシーに同意する:
-# briskapi.consent(accept=True, contributor="your-alias", license="CC0-1.0")
-# feed = sbi.connect(codes=["7203"], share_market_data=True)
+# upload_market_data=False で各日の市場データの記録を、upload=False ですべてをローカルに残す
 ```
 
-結果は下記の規約に従います。エラーは `sbi.SessionExpiredError`（再ログインが
-必要）、`briskapi.NotFoundError`、`sbi.RateLimitError`、`sbi.APIError` です。
+証券会社のフィードは連続して記録し、取引日ごとに1つの記録を作ります。日をまたいでも動き続けます。
+サイトが次の取引日を配信し始めたとき（10分ごとに確認）、またはサーバーが市場の終了後にストリームを
+閉じたときにその日が終わり、パッケージ化されてアップロードされ（市場データの記録とタイミングの要約。
+オプトアウトした場合を除く）、次の日は新しいスナップショットから記録を始めます。`output=DIR`
+（`brisk.connect(output=...)`、`briskapi.connect(output=...)`、`brisk live --output DIR`）を指定すると、
+終わった日ごとに、`SOURCE_YYYYMMDD_FROM-TO`（その日の最初と最後のソース時刻、日本時間 HHMMSS）という名前の
+フォルダー（例: `sbi_live_20261013_085800-153512`）が DIR に残ります。`feed.recordings` は終わった日の一覧
+（`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded`）で、`on_day=callback` はその日ごとに呼ばれます。
+フィードを止めた時点でまだ終わっていない日はアップロードされず、タイミングの要約だけがアップロードされます。
+
+結果は下記の規約に従います。エラーは `brisk.SessionExpiredError`（再ログインが
+必要）、`briskapi.NotFoundError`、`brisk.RateLimitError`、`brisk.APIError` です。
 リクエストは1秒に1回までに制限しています。
 
-ライブフィードは、ご自身のセッションでダウンロードした SBI 自身のデコーダーを
+ライブフィードは、ご自身のセッションでダウンロードした BRiSK 自身のデコーダーを
 Node 上で動かします。ブラウザは使いません。ベンダーのクライアントと同じ接続手順
 （最初のフレームからデコーダーに入力し、スナップショットをストリームに追いつかせ、
 サーバーの ping にデコーダーを通じて応答し、サーバーのハートビートを監視）に従い
 ます。まだ実際の SBI セッションでは検証できていません。ストリームは Next のクライ
 アントと同じく素のバイナリ WebSocket と想定しています。サーバーが Socket.IO で始
 まる場合は、未検証のパラメーターで `/v2/user` 名前空間に参加します（パラメーター
-は `sbi.connect(profile={...})` で設定できます）。`trace_protocol=True`（トークン
+は `brisk.connect(profile={...})` で設定できます）。`trace_protocol=True`（トークン
 はすべて伏せ字）でサーバーの応答を確認してください。想定外の応答は、推測で動かさ
 ず、明示的なエラーで止まります。
 結果をぜひお知らせください。実際のセッションでは現在、サインイン、データの取得、
@@ -140,10 +150,7 @@ Node 上で動かします。ブラウザは使いません。ベンダーのク
 付きで読み込み）までは通ります。その後、`api.brisk.jp` への WebSocket の Upgrade が
 HTTP 502 で返されました。それらのセッションは、ベンダーのクライアントが求める
 サブプロトコル `flex` を求めていませんでした。このバージョンは求めますが、それで
-足りるかはまだ分かっていません。Cookie は sbi.brisk.jp にのみ送られます。SBI の市場
-データは、その記録の開始時に明示的に同意した場合だけ共有します。Python API では
-`share_market_data=True` が必要です。共有がオンなら、市場データの共有を断っても
-タイミングの要約は共有します。
+足りるかはまだ分かっていません。SBI の Cookie は sbi.brisk.jp にのみ送られます。
 
 ### 立花証券 e支店の BRiSK Next
 
@@ -154,16 +161,16 @@ e支店の BRiSK Next（[next.e-shiten.brisk.jp](https://next.e-shiten.brisk.jp)
 `brisk live --site e-shiten` の前に `brisk login` を実行します。
 
 ```python
-sbi.login(cookies={...}, site="e-shiten")   # または BRISK_ESHITEN_COOKIES。remember=True で SBI とは別に保存
-feed = sbi.connect(codes=["7203"])           # ライブ（試験的）
+brisk.login(cookies={...}, site="e-shiten")  # または BRISK_ESHITEN_COOKIES。remember=True で SBI とは別に保存
+feed = brisk.connect(codes=["7203"])         # ライブ（試験的）
 ```
 
-上記の説明は共有も含めてそのまま当てはまります（保存した選択に従ってタイミングの要約を
-共有し、市場データはその記録で同意した場合だけ共有します）。Cookie は
+上記の説明は日ごとの記録とアップロードも含めてそのまま当てはまります（終わった日ごとの市場データの
+記録とタイミングの要約をアップロードします）。Cookie は
 next.e-shiten.brisk.jp にのみ送られます。e支店の
 BRiSK は同時に1セッションまでで、別のタブやブラウザで開くと先に開いていた方が
 止まりました（メッセージ 10011）。そのため、フィードとブラウザの BRiSK は互いに
-相手を止めることがあります。記録や共有の前に、立花証券の BRiSK Next 利用規定で
+相手を止めることがあります。記録やアップロードの前に、立花証券の BRiSK Next 利用規定で
 データの蓄積や二次利用についての定めを確認してください。
 
 ## パスキーでのサインイン（試験的）
@@ -200,7 +207,7 @@ Chrome と Node を使います）、Linux でもテストしています。
    サイトから BRiSK を開いてください（`--launch-url` を指定すれば自動で開きます）。`briskapi` が
    BRiSK のセッション Cookie を読み取って保存し、Chrome を閉じます。
 3. **あとは使うだけ。** SBI証券と e支店では、保存した Cookie を `brisk live --sbi` または
-   `brisk live --site e-shiten` と `briskapi.sbi` API が使います。他の証券会社には `briskapi` の
+   `brisk live --site e-shiten` と `briskapi.brisk` API が使います。他の証券会社には `briskapi` の
    データクライアントがまだないため、Cookie はご自身の利用のために保存される
    （`~/.config/brisk/cookies/`）だけです。
 
@@ -253,20 +260,26 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | --- | --- |
 | `briskapi.connect(...)` | ライブの `Feed`（既定のデータ源になる） |
 | `Ticker(code).info()` | 銘柄名、売買単位、呼値の種別、基準値、値幅制限 |
-| `Ticker(code).quote(at=None)` | 買い・売り気配とその数量・件数、板の各側の上位10本（`bids`、`asks`）、予想約定価格・数量、成行・引け条件付きの数量、直近の約定、売買代金、銘柄の状態 |
-| `Ticker(code).auction(at=None)` | 板寄せの予想状態と `market_order_imbalance`（成行の買い数量 − 売り数量） |
+| `Ticker(code).quote(at=None)` | 買い・売り気配とその数量・件数、板の各側の上位10本（`bids`、`asks`）と引け条件付き注文の上位10本（`closing_bids`、`closing_asks`）、板全体の注文合計、予想約定価格・数量、成行・引け条件付きの数量、直近の約定、売買代金、銘柄の状態、`special_quote`（特別気配の側・価格・タイマーの終了時刻） |
+| `Ticker(code).auction(at=None, closing=False)` | 板寄せの予想状態、成行注文、板の合計と `market_order_imbalance`（成行の買い数量 − 売り数量）。`closing=True` で引けの板寄せ |
 | `Ticker(code).history(start, end)` | すべての更新（時系列順） |
+| `Ticker(code).trades(start, end)` | すべての約定（歩み値）：時刻、価格、株数、仕掛けた側（`buy`、`sell`。寄付きの約定の多くは None） |
 | `Market().stocks()` | 全銘柄のマスター |
 | `Market().snapshot(at=None)` | 全銘柄の気配 |
-| `Market().imbalances(at=None, top=None)` | 成行注文の売買差（絶対値）が大きい順の銘柄 |
+| `Market().imbalances(at=None, top=None, closing=False)` | 成行注文の売買差（絶対値）が大きい順の銘柄（引けの板寄せも可） |
+| `Market().special_quotes(at=None)` | 特別気配の銘柄：側、価格、タイマーの終了時刻 |
+| `Market().trades(start, end)` | 全銘柄の約定（時刻順） |
+| `Market().frames()` | 記録のバッチ：時刻、計測値、気配と約定の件数 |
 | `Market().summary()` | データ源、日付、銘柄数、時刻の範囲 |
 | `Feed.quotes(codes)` / `Feed.on_quote(fn, codes)` | 届いた順のライブ更新 |
-| `briskapi.recordings()` / `.pull()` / `.load()` | アーカイブの一覧、検証付きダウンロード、ローカルファイル |
-| `briskapi.record(output, web=True, ...)` | デモの記録（共有設定に従って共有） |
-| `briskapi.consent(...)` | 共有の設定 |
+| `Feed.recordings` | ライブフィードの終わった日の一覧：`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded` |
+| `briskapi.recordings()` / `.pull()` / `.load()` | 自分のアーカイブの一覧、検証付きダウンロード、ローカルファイル |
+| `briskapi.Archive().upload(dir)` / `.delete(prefix)` / `.deleted()` / `.restore(prefix)` / `.timing()` / `.owner` | アップロード、削除、過去30日間に削除したもの（`deleted_at`、`restore_until` 付き）、元に戻す、自分のタイミングレポート、自分の owner ID |
+| `briskapi.record(output, web=True, ...)` | デモの記録（設定に従ってアップロード） |
+| `briskapi.consent(...)` | アップロードの設定 |
 | `Ticker(code).candles(interval)` / `.margin(days)` | 証券会社の BRiSK（SBI、e支店）のローソク足、信用残と貸株料 |
 | `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | 証券会社の BRiSK の市場データ |
-| `briskapi.sbi.login(site=...)` / `.connect()` | SBI（既定）または e支店の BRiSK のセッションとライブフィード |
+| `briskapi.brisk.login(site=...)` / `.connect()` | SBI（既定）または e支店の BRiSK のセッションとライブフィード |
 | `briskapi.passkey.enroll()` / `.login()` / `.forget()` | 証券会社の BRiSK へのパスキーでのサインイン |
 
 価格は円単位の浮動小数点数で、ベンダーの「値なし」（0）は `None` になります。
@@ -283,54 +296,83 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 ```sh
 brisk live --web --codes 7203,6758          # 気配の更新ごとに JSON を1行出力（--raw でベンダー形式）
 brisk sites | enroll | login | forget       # Chrome 経由のパスキーで証券会社の BRiSK にサインイン（試験的）
-brisk live --sbi --codes 7203               # SBI BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_SBI_PROFILE）
+brisk live --sbi --codes 7203               # SBI証券の BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_PROFILE）
 brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）または `brisk login` が保存したもの
-brisk record --web --output recordings/s1   # デモを記録（同意済みなら共有）
-brisk list --date 20210927 --source historical_mock
+brisk live --sbi --output days              # 日をまたいで動き続け、終わった日ごとに days/ に残し（例: sbi_live_20261013_085800-153512）、stderr に {"day": {...}} を1行出力
+brisk record --web --output recordings/s1   # デモを記録（オプトアウトしない限りアップロード）
+brisk list --date 20210927 --source historical_mock   # 自分の記録（--timing で自分のタイミングレポート、--deleted で過去30日間に削除したもの）
 brisk pull PREFIX --output recordings/downloaded   # brisk list が返した prefix を使う
+brisk delete PREFIX                         # 自分のアップロードを自分のアーカイブから削除（30日間は復元可能）
+brisk restore PREFIX                        # 過去30日間に削除したアップロードを元に戻す（タイミングレポートのキーも可）
+brisk prune recordings/s1                   # ディスクを空ける: アーカイブにある記録のローカルのコピーを削除
 brisk export recordings/s1 --nautilus catalog      # NautilusTrader v2 のカタログ（または --jsonl FILE）
-brisk consent [--accept | --revoke]         # 共有設定の表示・変更
-brisk upload recordings/s1                  # 記録の共有を再試行
+brisk consent [--accept | --revoke]         # 自動アップロードの設定の表示・変更（--no-upload: 今回だけ）
+brisk upload recordings/s1                  # 記録のアップロードを再試行
+brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元コード、別のコンピューターで使う
 ```
 
 各コマンドの詳細は `--help` で確認できます。`pull` はすべて検証してから
 書き込み、既存のフォルダーを上書きすることはありません。
 
-共有がオンの場合、対話型の `brisk live --sbi` と `--site e-shiten` は記録開始時に毎回、そのセッションの
-市場データを公開するか確認します。Enter で今回だけ同意し、この選択は保存しません。
-スクリプトでは `--share-market-data` で同意でき、`--no-share-market-data` なら確認
-せずに断れます。公開にはセッションの正常終了が必要です。`brisk list --source sbi_live`
-（または `eshiten_live`）で共有された証券会社の記録を一覧できます。市場データの正確性は
-提供者の申告に基づきます。
+`brisk live --sbi` と `--site e-shiten` は、止めるまで動き続け、取引日ごとに1つの記録を作ります。
+オプトアウトしない限り、終わった日ごとの市場データの記録とタイミングの要約を確認なしで
+アップロードします。`--no-upload-market-data` で記録だけを、`--no-upload` で両方をローカルに
+残せます。`brisk list --source sbi_live`（または `eshiten_live`）で自分の証券会社の記録を
+一覧できます。
 
-## 記録の共有
+## 自分専用のアーカイブ
 
-コマンドラインで初めてデモの記録またはライブセッションを始めると、共有される
-内容が表示され、一度だけ確認されます（Enter で同意）。それ以降は、最後まで
-正常に終わったデモのセッションが自動的にアップロードされ、公開されます。
-Python API から確認を求めることはありません。決めるまでは、セッションは
-お使いのコンピューターにだけ保存されます。
+アップロードすると、最後まで正常に終わったすべてのセッションのコピーを、お使いの
+コンピューターの外に無料で持てます（到着時に検証し、デモの完全な再生は基準と一致する
+必要があります）。アーカイブに入った記録は、`brisk prune DIR` でローカルのコピーを
+削除でき（先に SHA-256 をアーカイブと照合します）、`brisk pull` でこのコンピューターにも
+別のコンピューターにも戻せます。アップロードは `archive/OWNER/YYYYMMDD/FROM-TO-SHA256`
+（`brisk list` が返す prefix）の下に保存されます。FROM と TO は記録の最初と最後のソース時刻
+（日本時間、HHMMSS）なので、その日の記録は時刻順に並びます。
 
-- **証券会社（SBI、e支店）のタイミング共有:** デコード時間、受信時のデータの
-  遅れ、フレーム間隔のパーセンタイル、停滞回数、フレーム数、取引日、最初と
-  最後の分、エイリアスとライセンスです。`briskapi.Archive().timing()` で全員の
-  レポートを一覧できます。
-- **任意の証券会社の市場データ共有:** 記録開始時に毎回明示的に同意すると、デコードした
-  銘柄マスター、価格、数量、銘柄コード、ローカルの計測値も公開アーカイブに追加
-  します。Cookie、トークン、接続の診断情報は含めません。
-- **デモのセッションで共有される内容:** 記録した市場データ、ローカルの計測値（お使いの
-  コンピューターの時計を含み、記録した日時がわかります）、公開エイリアス
-  （既定はランダムな `anon-…`）とライセンス。IP アドレスはアップロード回数の
-  制限にのみ使います。
-- **公開範囲:** 公開された記録は誰でも閲覧でき、永続的に残り、ご自身では削除
-  できません。詳しくは [PRIVACY.md](PRIVACY.md)（英語）をご覧ください。
-- **共有をやめる:** `brisk consent --revoke`、環境変数 `BRISK_CONTRIBUTE=0`、
-  または1回だけなら `--no-upload`。
-- **ライセンス:** 同意すると、選んだデータライセンス（CC0-1.0 または
-  CC-BY-4.0）で記録を再配布する権利があると宣言したことになります。本
-  プロジェクトのオープンソースライセンスは、ベンダーや取引所のデータに関する
-  権利を与えるものではありません。宣言できない場合は共有をオフにしてください。
-- 途中までの再生（`--limit-frames`）や途中で閉じたセッションは共有されません。
+アップロードしたものは非公開で、一覧・ダウンロード・削除ができるのはご自身だけです。
+アカウントはありません。必要になったとき、ツールがあなたの **ID**（ランダムな秘密の値）を
+作り、アーカイブはその一方向ハッシュである owner ID の下にアップロードを保存します。
+秘密の値は、システムの資格情報ストア（macOS のキーチェーンまたは Windows の資格情報
+マネージャー）と、本人だけが読めるファイル `~/.config/brisk/identity.json` の2か所に
+保存され、一方が失われてももう一方から戻ります。作成時には **復元コード**（英数字28文字）が
+表示されるので、書き留めてください。`brisk identity --recovery-code` で再表示でき、
+`brisk identity --recover CODE` で別のコンピューターでも使えます（`BRISK_IDENTITY` でも
+指定可）。秘密の値を持つ人はアーカイブにとってあなた本人なので、他人に渡さないでください。
+これも保存したコピーもなくすと、アップロードにはアクセスできなくなります。ほかの
+ホスティングサービスと同様に、アーカイブの運営者は保存されたデータにアクセスできます。
+詳しくは [PRIVACY.md](PRIVACY.md)（英語）をご覧ください。
+
+アップロードは既定でオンです。コマンドラインで初めて記録またはライブセッションを始めると、
+アップロードされる内容が表示され、一度だけ確認されます（Enter で同意、`n` で拒否）。答えは
+保存され、それ以降は最後まで正常に終わったセッション（ライブフィードでは終わった日）が、改めて
+確認することなく自動的にアップロードされます。確認できない場面（Python API や端末のないコマンド実行）では、
+`brisk consent --accept` または `--revoke`（`briskapi.consent(accept=True)` または
+`revoke=True`）で決めるまで、セッションは既定でアップロードされ、プロセスごとに一度その旨を
+表示します（Python では警告）。
+
+- **デモのセッションでアップロードされる内容:** ローカルの計測値（お使いの
+  コンピューターの時計を含み、記録した日時がわかります）。デモの再生の市場データは誰にとっても
+  同じなので、アーカイブは1つだけ保持します。デモのアップロードで送るのは自分のタイミングの
+  テーブルだけ（約41 MB の代わりに約0.4 MB）で、アーカイブはそれを、検証済みのデモの市場データの
+  テーブルと結び付け、`brisk pull` はこれまでどおり検証したうえで完全な記録を返します
+  （そのアーカイブへの最初のデモのアップロードだけは、記録全体を送ります）。IP アドレスは
+  アップロード回数の制限にのみ使います。
+- **証券会社（SBI、e支店）のセッションでアップロードされる内容:** タイミングの要約（デコード
+  時間、受信時のデータの遅れ、フレーム間隔のパーセンタイル、停滞回数、フレーム数、取引日、
+  最初と最後の分。`briskapi.Archive().timing()` で一覧できます）と、取引日が終わった時点で
+  その日のデコードした市場データの記録（銘柄マスター、価格、数量、板、約定、銘柄コード、
+  ローカルの計測値）。Cookie、トークン、接続の診断情報はアップロードしません。
+- **アップロードをやめる:** 1回だけなら `--no-upload`（Python では `upload=False`）。
+  `--no-upload-market-data`（`upload_market_data=False`）は証券会社の記録の市場データだけを
+  ローカルに残します。その環境のすべての実行では `BRISK_UPLOAD=0`、恒久的には
+  `brisk consent --revoke`。
+- **削除と復元:** `brisk delete PREFIX` でアップロードを自分のアーカイブから削除し、一覧にも
+  ダウンロードにも出なくなります。30日間は元に戻せます。`brisk list --deleted` で削除したもの
+  （`deleted_at` と `restore_until` 付き）を一覧でき、`brisk restore PREFIX`（タイミングレポートの
+  キーも可）で復元します。30日を過ぎると復元できなくなり、削除されます。
+- 途中までの再生（`--limit-frames`）や、その日が終わる前に閉じた記録はアップロードされません。
+  途中で止めた証券会社のフィードは、タイミングの要約だけをアップロードします。
 
 ## その他のドキュメント（英語）
 
@@ -338,7 +380,7 @@ Python API から確認を求めることはありません。決めるまでは
 - [PRIVACY.md](PRIVACY.md): プライバシーポリシー
 - [CONTRIBUTING.md](CONTRIBUTING.md): 開発、テスト、リリース
 - [tools/brisk_mock/README.md](tools/brisk_mock/README.md): フィールド定義、タイミングとレイテンシー、SBI のマスター配置の確認、任意の Rust コレクター
-- [infra/README.md](infra/README.md): 独自アーカイブのデプロイ
+- [infra/README.md](infra/README.md): アーカイブのデプロイ
 - [THIRD_PARTY.md](THIRD_PARTY.md): デコーダー、データ、pybrisk の権利表示
 
 ソフトウェアは MIT ライセンスです。

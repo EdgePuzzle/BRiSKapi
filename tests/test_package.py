@@ -8,7 +8,7 @@ import pytest
 
 import briskapi
 import briskapi.cli as cli
-from briskapi import _live, sbi
+from briskapi import _live, brisk
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
-    monkeypatch.delenv('BRISK_CONTRIBUTE', raising=False)
+    monkeypatch.delenv('BRISK_UPLOAD', raising=False)
     monkeypatch.setattr(briskapi, '_current', None)
 
 
@@ -61,9 +61,9 @@ def test_every_entry_point_checks_node_first(tmp_path):
         briskapi.connect(cache=tmp_path, node=missing)
     with pytest.raises(briskapi.BriskError, match='not found'):
         cli.record_events(tmp_path / 'events.jsonl', cache=tmp_path, node=missing)
-    sbi.login({'session_bfaf77a2': 'v'})
+    brisk.login({'session_bfaf77a2': 'v'})
     with pytest.raises(briskapi.BriskError, match='not found'):
-        sbi.connect(node=missing)
+        brisk.connect(node=missing)
     assert briskapi._current is None
 
 

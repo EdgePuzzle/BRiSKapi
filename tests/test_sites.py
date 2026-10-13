@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from briskapi import sbi, sites
+from briskapi import brisk, sites
 
 
 @pytest.fixture(autouse=True)
@@ -26,7 +26,7 @@ def test_the_built_in_sites_are_five_brokers_and_sbi_and_e_shiten_have_a_data_cl
         assert urlsplit(site.login_url).scheme == 'https' and site.passkey_button and site.source == 'built in'
     assert {site.id: site.client for site in sites.BUILTIN.values() if site.client} == {'sbi': 'sbi', 'e-shiten': 'e-shiten'}
     for site in (sites.BUILTIN['sbi'], sites.BUILTIN['e-shiten']):
-        assert urlsplit(sbi.SITES[site.client].origin).hostname == site.cookie_host, 'cookies go only to the client of that host'
+        assert urlsplit(brisk.SITES[site.client].origin).hostname == site.cookie_host, 'cookies go only to the client of that host'
         assert site.cookie_prefix == 'session_'
     assert all(site.cookie_host == f'{site.id}.brisk.jp' for site in sites.BUILTIN.values() if not site.client)
 

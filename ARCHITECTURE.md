@@ -1,26 +1,27 @@
 # Architecture
 
-How briskapi works, what the data means and how the shared archive protects
+How briskapi works, what the data means and how the private archive protects
 itself. For usage, see the [README](README.md).
 
 ## Components
 
 | Component | Where | Role |
 | --- | --- | --- |
-| Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `sbi.cjs` drives SBI BRiSK's (or e-shiten BRiSK Next's) decoder from an authenticated session. Both emit one JSON batch per frame. |
-| Python API | `briskapi/` | `Recording` (files), `Feed` (live, background thread), `Ticker`/`Market` views and `Archive`. |
-| SBI session | `briskapi/sbi.py` | Cookie login (SBI, or e-shiten with `site="e-shiten"`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `sbi.connect()` starts the live host. |
-| Archive client | `briskapi/cli.py`, `briskapi/schema.py`, `briskapi/_parquet.py` | The `brisk` CLI, sharing consent, Parquet packaging, upload, verified download and export. |
+| Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `brisk.cjs` drives a broker's BRiSK decoder (SBI's, or e-shiten BRiSK Next's) from an authenticated session, one trading day after another. Both emit one JSON batch per frame. |
+| Python API | `briskapi/` | `Recording` (files), `Feed` (live, background thread, with a worker thread that packages and uploads each finished day), `Ticker`/`Market` views and `Archive`. |
+| BRiSK site client | `briskapi/brisk.py` | Cookie login (SBI by default, or e-shiten with `site="e-shiten"`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `brisk.connect()` starts the live host. |
+| Archive client | `briskapi/cli.py`, `briskapi/schema.py`, `briskapi/_parquet.py`, `briskapi/identity.py` | The `brisk` CLI, upload consent, your identity, Parquet packaging, upload, verified download, deletion, restore and export. |
 | Auction state | `rust/brisk_quote_ingest` | Optional Rust tools: `brisk_quote_ingest` validates batches, keeps per-security state and publishes latest-state files; `brisk_recording` reconstructs a saved recording. |
-| Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL issues upload tickets; S3-triggered ingest validates and publishes; DynamoDB holds quotas. |
+| Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL serves each owner's uploads, listings, downloads, deletions and restores; S3-triggered ingest validates and stores; DynamoDB holds quotas. |
 
 ```
 demo assets (HTTPS, pinned) ─► decoder.cjs ─┐
-SBI/e-shiten session ────────► sbi.cjs ─────┴─► JSON batches ─┬─► briskapi.Feed: live state, callbacks, iterators
+SBI/e-shiten session ────────► brisk.cjs ───┴─► JSON batches ─┬─► briskapi.Feed: live state, callbacks, iterators
                                                              ├─► brisk live: JSON lines
                                                              └─► briskapi.record ─► Parquet recording (demo only)
 
-JSON batches ─► Parquet tables ─► zip ─► upload ticket ─► S3 staging ─► verification ─► archive/ ─► briskapi.pull
+JSON batches ─► Parquet tables ─► zip ─► upload ticket ─► S3 staging ─► verification ─► archive/OWNER/… ─► briskapi.pull
+                                                                                         (a replay's market tables: reference/)
 ```
 
 ## Data source
@@ -63,14 +64,21 @@ Every source produces the same stream:
 
 1. `bootstrap`: the security master and every selected security's initial quote,
    plus transport and clock provenance.
-2. `quotes`: one batch per frame with the quotes that changed in it. Empty
-   batches are kept, so sequence continuity and feed health stay separate from a
+2. `history` (only after a snapshot that restores trades, as a live session's started
+   mid-day can): those trades, up to 50,000 per batch, right after the bootstrap and at
+   its clock. The bootstrap's volumes already count them.
+3. `quotes`: one batch per frame with the quotes that changed in it and its trades.
+   Empty batches are kept, so sequence continuity and feed health stay separate from a
    quiet security's last update.
-3. `end`: frame and update counts, written only after a clean finish.
+4. `end`: frame and update counts, written only after a clean finish.
+
+That is one trading day. A demo replay is one such stream; a broker's live host emits
+one per day, back to back, each numbered from its own bootstrap (see
+[Trading days](#trading-days)).
 
 Sequence gaps, clock regressions, malformed input and interruption invalidate a
 stream in the Rust state and in archive validation. The Python feed checks
-sequence continuity and a clean end.
+sequence continuity within each day and a clean end of each.
 
 Recording time queries filter each quote by its own `source_time_us`, including
 quotes in batches whose clock is later than the query. Batch clocks are upper
@@ -81,7 +89,7 @@ when no manifest is available, while feeds track it under the state lock.
 
 ## Recording format
 
-A recording is a directory of three Parquet tables (`briskapi/_parquet.py`), laid out
+A recording is a directory of four Parquet tables (`briskapi/_parquet.py`), laid out
 like a NautilusTrader v2 catalog's `data/`. Each table is v2's own schema with BRiSK's
 fields added after it. Rows carry v2's `identifier` column (`CODE.XTKS`), as v2
 returns multi-instrument queries, instead of one directory per instrument: a
@@ -91,21 +99,23 @@ reference fingerprints are the same for every format.
 
 | File | Rows | Columns |
 | --- | --- | --- |
-| `data/order_book_depths.parquet` | One per quote update, sorted by issue, then batch | v2 `OrderBookDepth`: `bids`, `asks` (up to ten levels each, best first: `price`, `size`, `count`, `order_id` 0), `flags` (16, plus 32 on the bootstrap snapshot), `sequence` (the frame number), `ts_event` (source time), `ts_init` (the same). Then `identifier`, `issue_id`, `seq` (the batch), `max_frame`, the prices (`last_price`, `open_price`, `bid_price`, `ask_price`, `indicative_price`, `closing_indicative_price`, `indicative_open_price`, `reference_price`; null for the vendor's zero), the counts and enums (`indicative_volume`, `indicative_imbalance_side`, `closing_indicative_volume`, `closing_indicative_imbalance_side`, `quote_flag`, `quote_side`, `volume`, `issue_status`, market and closing market buy/sell quantities, `bid_quantity`, `bid_orders`, `ask_quantity`, `ask_orders`), `special_quote_time` and `turnover` |
+| `data/order_book_depths.parquet` | One per quote update, sorted by issue, then batch | v2 `OrderBookDepth`: `bids`, `asks` (up to ten levels each, best first: `price`, `size`, `count`, `order_id` 0), `flags` (16, plus 32 on the bootstrap snapshot), `sequence` (the frame number), `ts_event` (source time), `ts_init` (the same). Then `identifier`, `issue_id`, `seq` (the batch), `max_frame`, the prices (`last_price`, `open_price`, `bid_price`, `ask_price`, `indicative_price`, `closing_indicative_price`, `indicative_open_price`, `reference_price`; null for the vendor's zero), the counts and enums (`indicative_volume`, `indicative_imbalance_side`, `closing_indicative_volume`, `closing_indicative_imbalance_side`, `quote_flag`, `quote_side`, `volume`, `issue_status`, market and closing market buy/sell quantities, `bid_quantity`, `bid_orders`, `ask_quantity`, `ask_orders`, and the board totals `bid_total_quantity`/`_orders`, `ask_total_…` and their `bid_closing_total_…`/`ask_closing_total_…`), `special_quote_time`, `turnover`, and the closing-condition orders' books `closing_bids` and `closing_asks` (shaped like `bids` and `asks`) |
+| `data/trades.parquet` | One per execution, sorted by issue, then in the decoder's order | v2 `TradeTick`: `price`, `size` (shares), `aggressor_side` (BUY for the decoder's type 1, SELL for 2, NO_AGGRESSOR otherwise), `trade_id` (the issue's frame number and the trade's place in it), `ts_event`/`ts_init` (the trade's time). Then `identifier`, `issue_id`, `seq` (the batch), `frame` and `side` (the raw type) |
 | `data/equity.parquet` | One per security, by issue | v2 `Equity` (`id`, `raw_symbol`, `currency` JPY, `price_precision` 1, `price_increment` 0.1, `lot_size`, `max_price`/`min_price` from the daily limits, `ts_event`/`ts_init` at JST midnight; `info`, JSON in v2, is a null string), then `issue_id`, `tick_type`, `issue_type`, `name`, `base_price` |
-| `data/custom/BriskBatch.parquet` | One per batch | `seq`, `kind` (bootstrap, quotes or end), `received_unix_ms`, `decode_ns`, `replay_lateness_ms`, `skipped_issues`, `frames`, `quote_updates`, `replay_wall_ms`; on the bootstrap row `source`, `trading_date`, `input_transport` (canonical JSON), `source_timestamp_origin`, `exchange_delay_ms`, `market_issue_count`; v2 custom data's `type`, `ts_event` and `ts_init` |
+| `data/custom/BriskBatch.parquet` | One per batch | `seq`, `kind` (bootstrap, history, quotes or end), `received_unix_ms`, `decode_ns`, `replay_lateness_ms`, `skipped_issues`, `frames`, `quote_updates`, `replay_wall_ms`; on the bootstrap row `source`, `trading_date`, `input_transport` (canonical JSON), `source_timestamp_origin`, `exchange_delay_ms`, `market_issue_count`; v2 custom data's `type`, `ts_event` and `ts_init` |
 
 Prices and level sizes are `decimal128(38, 16)` as in v2; times are UTC
 `timestamp[ns]`. `ts_init` repeats the source time rather than a local clock, since a
 demo replay's receipt clock is years after its market time; receipt times stay exact
 in `BriskBatch.received_unix_ms`. Tables are zstd-compressed in row groups of 65,536
 rows, so one security's history reads only its row groups. The complete demo replay
-(735,382 updates) is 34 MB, against 754 MB of JSONL and 117 MB gzipped.
+(735,382 updates and 92,263 trades) is 41 MB, against 965 MB of JSONL.
 
-`brisk export DIR --nautilus CATALOG` writes v2's layout: `equity` and
-`order_book_depths` per instrument, readable by v2's `ParquetDataCatalog`, and the
-rest of each quote as custom data `BriskQuote` (int64 columns in vendor units, so a
-v2 `customdataclass` can declare them). `--jsonl FILE` writes canonical batches.
+`brisk export DIR --nautilus CATALOG` writes v2's layout: `equity`, `order_book_depths`
+and `trades` per instrument, readable by v2's `ParquetDataCatalog`, and the rest of each
+quote as custom data `BriskQuote` (int64 columns in vendor units, so a v2
+`customdataclass` can declare them, and the closing-condition books as JSON text).
+`--jsonl FILE` writes canonical batches.
 
 ## Live feed
 
@@ -118,49 +128,70 @@ the feed. An exception in a callback stops the feed and is re-raised by `wait()`
 A feed keeps current state only, unless `history=True` retains every update per
 security.
 
-When sharing is enabled, a demo feed also writes the session to a temporary file.
-After a clean end it packages and uploads the file, then deletes it. SBI feeds
-accumulate timing statistics when sharing is enabled (`briskapi/timing.py`). Market
-recording additionally requires a separate opt-in for that session. The interactive
-CLI asks before starting the decoder (Enter accepts); scripts use
-`--share-market-data` or `sbi.connect(share_market_data=True)`. The per-session
-choice is not persisted. Current consent is required, and `BRISK_CONTRIBUTE=0`
-or `contribute=False` disables both forms of sharing. Only a clean end publishes
-market data; an interrupted capture's temporary file is deleted.
+A feed records one trading day at a time. It splits the stream into days, each a
+`bootstrap ... end` numbered from its own bootstrap: the sequence check admits a new
+bootstrap only after an end, and at it the feed's state resets (the quotes, and with
+`history=True` the retained updates and trades) and its timing statistics start again.
+A demo replay is one day; a broker's live host (see [Trading days](#trading-days)) goes
+on to the next.
+
+When uploads are enabled or `output` is given, the feed also writes each day to a
+temporary file as it arrives. At the day's end it hands the file to a worker thread (a
+`ThreadPoolExecutor` of one, so days finish in order) and reads on. The worker packages
+the day, keeps it in `output` as `SOURCE_YYYYMMDD_FROM-TO` (`schema.local_name`; FROM and
+TO are the day's first and last source clock, JST HHMMSS; a folder already there is left
+alone, with a warning), uploads it to the owner's private archive and uploads its
+timing summary, as chosen, then appends its result (`trading_date`, `name`, `path`,
+`uploaded`, `timing_uploaded`) to `feed.recordings`, calls `on_day(result)` and deletes
+the temporary file. A packaging or upload failure is a warning and a result that says so,
+never a failed feed, and neither is an `on_day` callback that raises. `brisk live --output
+DIR` prints each result as `{"day": ...}` on stderr. Broker feeds (SBI, e-shiten) do the
+same with their market recording and also accumulate timing statistics
+(`briskapi/timing.py`). Uploads are on by default
+(`cli.consented`): with no saved choice the CLI asks once, on a terminal, before the first
+session (Enter accepts), and a run that can't ask (the Python API, a CLI without a
+terminal) uploads by default after a once-per-process notice, without saving a choice. `upload_market_data=False`
+(`--no-upload-market-data`) keeps a broker session's market recording local;
+`BRISK_UPLOAD=0` or `upload=False` (`--no-upload`) disables both uploads. Only a day that
+reached its end is packaged, kept or uploaded. A day that is unfinished when the feed
+closes or fails is discarded, its temporary file with it: its market data is never kept
+or uploaded, and a broker feed closed on purpose uploads only that day's timing summary. `wait()` and
+`close()` return after the days already finished are kept and uploaded.
 
 ## Timing reports
 
-A timing report is shared independently of a broker (SBI, e-shiten) market-recording opt-in. A report
-(`brisk-timing-v1`) holds p50/p90/p99/max of decode time, feed-clock age at
-receipt and frame spacing, a stall count (gaps over one second), the frame
-count, trading date, first/last JST minute, client version, alias and license.
+A timing report is uploaded even when a broker (SBI, e-shiten) session keeps its market
+recording local. A report (`brisk-timing-v2`) holds p50/p90/p99/max of decode time, feed-clock age
+at receipt and frame spacing, a stall count (gaps over one second), the frame count,
+trading date, first/last JST minute and client version. It covers one day: a session
+that records several uploads one report per day, each when its day ends, and a day cut
+short by closing the feed gets one for the part recorded.
 
-The ticket API accepts `{"timing": report}`. The service checks exact fields,
-bounds and microsecond precision, monotonic percentiles, at least 100 frames and
-a trading date within the last 30 days; rate limits it (six per IP address per
-hour, 600 in total); and writes its own canonical JSON to
-`timing/YYYYMMDD/SHA256.json`, so identical reports deduplicate. A report is at
-most 2 KB, so it can't carry other data. `briskapi.Archive().timing()` reads
-them back.
+The API's `timing` action takes the report. The service checks exact fields, bounds and
+microsecond precision, monotonic percentiles, at least 100 frames and a trading date within
+the last 30 days; rate limits it (six per IP address per hour, 600 in total); and writes its
+own canonical JSON to `timing/OWNER/YYYYMMDD/SHA256.json`, so identical reports deduplicate.
+A report is at most 2 KB. `briskapi.Archive().timing()` reads the owner's back.
 
-## SBI BRiSK
+## Broker BRiSK (SBI, e-shiten)
 
 The endpoint sequence was learned from pybrisk: session cookies authenticate
 `/api/frontend/boot`, which returns a bearer token; `/api/app/boot` then gives
 the trading date, series, schedule, WebSocket URL and master/snapshot hashes.
 Requests are rate limited and never follow redirects, because a redirect means
-an expired session and following it would forward credentials. `sbi.connect()`
+an expired session and following it would forward credentials. `brisk.connect()`
 asks `/api/frontend/boot` before it starts the live host, so an expired session
 is one `SessionExpiredError` line and Node never starts. Cookies given as JSON
 (the `BRISK_*_COOKIES` variables or a saved cookie file) that don't parse are
 the same error, naming the variable or file but never the value.
 
-The live host (`briskapi/decoder/sbi.cjs`) uses the same session to fetch the
-master and snapshot, finds SBI's decoder through the app's own bundles (it is
-served only to logged-in sessions and changes with SBI releases, so it can't be
+The live host (`briskapi/decoder/brisk.cjs`) uses the same session to fetch the
+master and snapshot, finds the site's decoder through the app's own bundles (it is
+served only to logged-in sessions and changes with the broker's releases, so it can't be
 pinned), checks that it exports every function the host calls, and decodes
 WebSocket frames with protocol version 18000. Cookies reach it through the
-environment, never the command line.
+environment (the site's own variable, `BRISK_SBI_COOKIES` or `BRISK_ESHITEN_COOKIES`;
+`BRISK_SITE` names the site), never the command line.
 
 The page may name its bundles by absolute or relative path, and a bundle names the
 loader either as a literal path or as a template with an exchange variant,
@@ -174,7 +205,7 @@ to the site's own host; elsewhere the session in `ws_url` authenticates the stre
 which is opened with the site as `Origin`.
 
 The host follows the connect sequence in the vendor client (the public Next demo
-bundle) and in pybrisk's SBI research (`engineio.cjs` and `sbi.cjs`):
+bundle) and in pybrisk's SBI research (`engineio.cjs` and `brisk.cjs`):
 
 1. The WASM is started with its six callbacks (`send`, `updateNumber`,
    `heartbeat`, `basePrice`, `authError`, `marketFinished`) using the vendor's
@@ -250,7 +281,7 @@ message the host reads, and a WebAssembly trap leaves the decoder's stack 16 byt
 which the host restores; either way the error names the frame or the issue.
 
 The stock view and the master are read at version-specific positions. Protocol
-16000 (the demo) is the vendor client's own layout. For 18000 (SBI) the stock
+16000 (the demo) is the vendor client's own layout. For 18000 (the brokers' BRiSK) the stock
 view has the same fields in the same order with the leading word, the numeric
 security code, dropped (the code is text there), so every index is one lower.
 SBI's decoder of March 2026 confirms it: its `_getStockView` writes the demo's fields
@@ -294,6 +325,32 @@ shows orders at better prices, as in crossed auction books, it reads every row b
 first, in one call, since each call sums the whole board. On the demo's data this equals
 reading the whole board on every issue at several times, in both builds, and costs about
 22 µs per quote (a quote about 47 µs in all; boards run to 3,521 rows).
+
+OVER, UNDER and the window sum the whole board for every group, so the one-row read made
+for the market row also gives each group's board totals (`bid_total_quantity` and the
+rest). The closing-condition limit orders (引け条件付) form a book of their own, walked like
+a side's with light 0 (which keeps the closing groups), and only where its total shows
+orders: on the demo's data both equal reading the whole board, and a full replay takes
+5% longer.
+
+Trades come from the decoder's QR records, which it keeps on the host side: for each
+execution it calls the imported `_qr_emplace(stock, type, time, price10, lots, lot, frame)`
+(`stock` is the issue's `_getStockPointer`), reads its last price back through
+`_qr_lastprice10` and withdraws a record with `_qr_pop_back`. The exported `_getQR` is a
+stub that returns 0 in both builds, and `_getTrace` only lists changed issues. On the
+demo's data every issue's volume and turnover change by exactly its records' shares (lots
+times lot) and price times shares, frame by frame. Type 1 records lie at or above the
+prevailing ask (93%) and type 2 at or below the bid (89%); type 0 is the first trade of
+1,508 issues around 09:00:00.09 and 22 later prints, so it looks like an auction
+execution. The record's time is the same clock as the quotes', 0-30 ms (median 2.8 ms)
+before the quote that shows it. The host takes the records after each frame; one
+withdrawn after it was emitted ends the session (none is withdrawn on the demo). Records a
+snapshot restores (a live session's could hold the whole day so far) come after the
+bootstrap in `history` batches of at most 50,000, by issue; the snapshot's quotes already
+count them, so they stay out of the volume check.
+SBI's 2026 build has the same QR imports, called from the same two routines (one per
+execution, one with the containers' set-up), but its trades are unverified: the offline
+capture comes without a snapshot, and without one the build sets up no QR containers.
 
 An issue whose quote traps the decoder (its state for that issue is inconsistent: see
 below) is skipped, listed in the batch's `skipped_issues`, and not read again until its
@@ -359,7 +416,7 @@ What is verified: the decoder SBI served in pybrisk's March 2026 capture exports
 the demo's interface apart from `_getPortfolio`, and it initializes under Node with
 protocol 18000. (Its stock view carries the issue status one word after the demo's
 last, as the status plus 8; minus 8 it equals the demo's `_getPortfolio` status on all
-731,251 views of the demo's stream replayed through both builds. SBI quotes record it
+731,251 views of the demo's stream replayed through both builds. Broker quotes record it
 from there.) Offline, it loads
 that capture's master, schedule and catch-up reply: the catch-up advances each of its
 1,552 issues by exactly the updates requested, briskapi's request for them is the one the
@@ -394,7 +451,7 @@ connection, or the capture may have damaged them. A live session will tell. The 
 check (`tools/brisk_mock/sbi_master_layout.py`) replays the stream both ways.
 (pybrisk's own `capture_summary.json` has wrong bytes in 2,478 of these messages; the
 archive's copy matches pybrisk's per-message files.)
-What is not verified against a live session: any of the above on SBI itself, the
+What is not verified against a live session: any of the above on a broker's own stream, the
 18000 master layout on today's build (found on SBI's of March 2026; each start checks it
 against the master file), the stream's opening messages and whether it is plain binary
 as recorded. Live, the master and the snapshot load with the schedule; the WebSocket
@@ -402,13 +459,40 @@ upgrade to `api.brisk.jp` was then answered with HTTP 502 (400 without the `sess
 parameter, 404 on the site host, and no HTTP/2 extended CONNECT) with every header
 variant tried, all without the `flex` subprotocol, which the host now asks for; whether
 that is all the server wants is not known yet. The Socket.IO fallback's parameters live in a
-profile (`BRISK_SBI_PROFILE`, or `sbi.connect(profile=...)`) and are unverified. The
+profile (`BRISK_PROFILE`, or `brisk.connect(profile=...)`) and are unverified. The
 profile can also name another catch-up format (`catchUp`).
 `--trace-protocol` prints the connection with every token redacted, so a first
 attempt shows what the server answers. Anything wrong ends in an explicit error (a
 stream that never initializes, a refused namespace, a rejected catch-up, an
-implausible stock view or master) rather than guessed data. Not implemented: reconnecting.
-The feed fails and needs a restart.
+implausible stock view or master) rather than guessed data. Not implemented: reconnecting
+within a day. A lost connection, or any other failure, ends the recording: the feed fails
+(the days it had finished are kept and uploaded) and needs a restart.
+
+### Trading days
+
+A recording covers one trading day, and `record()` in `brisk.cjs` runs one `live()`
+session after another (`brisk live` until it is stopped). A day ends, with an `end`
+batch, when:
+
+- the site's boot serves a new date: the host asks `/api/app/boot` every `DAY_CHECK_MS`
+  (ten minutes) and compares its date with the day's. A failed check is only traced,
+  since the stream's own checks catch a dead session;
+- the stream's clock goes back by more than an hour (`NEW_DAY_US`), as a new day's
+  would. A smaller step back is not a new day, and a recording with one fails the
+  archive's market-clock check;
+- the server closes the stream, cleanly (code 1000) or, once the decoder has called
+  `marketFinished`, in any way. Any other close is an error, as above.
+
+The next day begins by asking the boot, every ten minutes, until the site serves a
+later date than the one just recorded, then boots afresh: the frontend and app boots,
+the decoder, master and snapshot, and the catch-up. Its batches are numbered from 0,
+so each day is its own `bootstrap ... end`, and the Python feed keeps it as its own
+recording. The wait is plain HTTP, so a session that expires meanwhile, or any other
+failed request, ends the recording with that error instead of waiting on; how long a
+broker's session cookie lasts is not known. The wait and the roll are tested offline
+against fake servers (a server that closes after the first day, and a site that serves
+the next date at a later check). The clock rule has no test, and none of it has run
+against a live session.
 
 ### Tachibana e-shiten BRiSK Next
 
@@ -425,11 +509,11 @@ garbage). Their master file was about 800 KB for 4,443 issues, which fits the sa
 e-shiten enforces one BRiSK session per user: opening
 it in a second tab stopped the first (message 10011).
 
-`site="e-shiten"` selects it (`BRISK_SBI_SITE` for the host; saved cookies in
+`site="e-shiten"` selects it (`BRISK_SITE=e-shiten` for the host; saved cookies in
 `e-shiten-cookies.json`, `BRISK_ESHITEN_COOKIES`). Its batches say
-`source=eshiten_live` and `kind=eshiten_websocket`. Its sessions are contributed as
-SBI's are: a timing summary under saved consent, market data only after the per-capture
-opt-in, with the same opt-outs; packaging keeps only `next.e-shiten.brisk.jp` as its
+`source=eshiten_live` and `kind=eshiten_websocket`. Its sessions are uploaded as
+SBI's are: a timing summary and, after each day's clean end, the market recording, under the saved
+choice and with the same opt-outs; packaging keeps only `next.e-shiten.brisk.jp` as its
 transport provenance (`BROKER_TRANSPORT` in `schema.py`). `brisk login` can sign in to it with a passkey (site `e-shiten`; see
 [Tachibana e-shiten's sign-in](#tachibana-e-shitens-sign-in)).
 
@@ -506,8 +590,8 @@ the login URL, button text, cookie host and any user ID box and user ID come in 
    cookie that starts with the site's `cookie_prefix` on exactly its BRiSK host. Only that host's
    cookies are returned, never those of the broker's main site, whose session is destroyed with
    the profile.
-6. **Delivery.** SBI and e-shiten have a data client (`briskapi.sbi`, with `site="e-shiten"` for the
-   latter), so their cookies go to `sbi.login()` and are saved as that site's cookies; the
+6. **Delivery.** SBI and e-shiten have a data client (`briskapi.brisk`, with `site="e-shiten"` for the
+   latter), so their cookies go to `brisk.login()` and are saved as that site's cookies; the
    others are saved to `~/.config/brisk/cookies/<site>.json` (owner-only) for the person's own use.
    A data client sends its cookies to one host, so a site bound to a client whose cookie host is not
    that client's host is refused before Chrome starts (a `sites.json` entry can never claim a client).
@@ -611,18 +695,60 @@ rust/brisk_quote_ingest/target/release/brisk_recording \
 This rebuilds final state for offline analysis. It does not retimestamp data or
 simulate original exchange delivery.
 
-## Shared archive
+## Private archive
 
-The public configuration is [briskapi/archive.json](briskapi/archive.json): bucket
-`brisk-recordings-honvl-tokyo` in Tokyo (`ap-northeast-1`). Anyone can read
-published `archive/` and `timing/` objects and list those prefixes over HTTPS. `incoming/`
-(staging) is private. Deployment is described in [infra/README.md](infra/README.md).
+The configuration is [briskapi/archive.json](briskapi/archive.json): bucket
+`brisk-recordings-honvl-tokyo` in Tokyo (`ap-northeast-1`) and the function URL. Nothing in
+the bucket is public but `samples/` (the legacy wire-format sample capture): each owner
+reaches its own uploads through the function only.
+Deployment is described in [infra/README.md](infra/README.md).
+
+### Identity
+
+There is no registration. On first use the client makes a random 128-bit secret,
+`brisk-id-v1-` followed by 26 lowercase base32 characters (`briskapi/identity.py`), or takes
+`BRISK_IDENTITY`. It keeps two copies: one in the system's credential store (service
+`briskapi-archive-identity`, through `passkey.py`'s Keychain and Credential Manager code)
+and one in an owner-only file, `identity.json` in the config directory. Reading repairs a
+missing copy from the other, refuses copies that differ, and never overwrites an unreadable
+file (it is set aside as `identity.json.unreadable`). Every
+API request but a ticket's status sends it as `Authorization: Bearer <secret>`, over TLS. The
+service derives the **owner ID**, the first 32 hex digits of
+SHA-256("brisk-owner-v1:" + secret) (`schema.owner`), and keeps nothing else: no account,
+no stored key, nothing to look up. Everything an owner uploads is filed under
+`archive/OWNER/` or `timing/OWNER/`, and listings, downloads, deletions and restores are
+scoped to the caller's owner ID. Owner IDs can't be reversed to secrets, so they may appear
+in prefixes, quotas and logs. The one thing outside the owners' prefixes is the archive's
+single copy of a demo replay's market tables (below), which holds no owner's data.
+
+A secret is a bearer credential: whoever holds it acts as that owner. Its **recovery code**
+is the same 26 characters in upper case plus two checksum characters (base32 of SHA-256 of
+the body), in groups of four; reading it ignores case, spaces and dashes, takes 0, 1 and 8
+for O, I and B, and refuses a code whose checksum fails. `brisk identity --recovery-code`
+prints it, `--recover CODE` saves it on another computer (`--replace` over a different
+identity) and `--export` prints the secret itself. It is never registered, so nothing can
+recover a lost secret without its code. A signature scheme would keep the secret on the client entirely,
+but needs Ed25519 or similar on both ends, which Python's standard library lacks; the
+bearer secret needs no dependency.
+
+The API (`archive_service.py`), JSON with an `action`:
+
+| Action | Fields | Returns |
+| --- | --- | --- |
+| `upload` | `manifest`, `part` | A ticket and an S3 POST policy bound to `incoming/TICKET/recording.zip`, the exact size of what is sent and encryption. `part` is null for the whole recording (the zip of its four tables), or `{sha256, bytes}` of the zip of its timing table alone, which only a demo or synthetic replay may send. A timing-only upload is accepted once the archive holds the replay's market tables; until then the answer is HTTP 409 (`send`: `recording`), with no ticket issued or counted, and the client sends the whole recording. The owner ID waits in `incoming/TICKET/owner.json` for ingest, and a `part` in `part.json`. |
+| `timing` | `report` | The stored key. |
+| `list` | `kind` (`recordings`, `timing` or `deleted`), `date`, `after` | A page of the owner's manifests (50) or reports (500), and the key to continue after. `deleted` lists what the owner deleted and can still restore: recordings (`prefix`, `manifest`) and reports (`key`, `report`), each with `deleted_at` and `restore_until`, up to 200 and without paging (`after` must be null). |
+| `download` | `prefix` | The manifest and a 15-minute presigned URL for each of the four tables (`files`), for the owner's own prefix only. A demo recording's market tables are the archive's copy under `reference/`. |
+| `delete` | `prefix` (a recording's) or a timing key | The current objects deleted, the manifest first, so a listing never shows half a recording. Without a version ID the versioned bucket keeps them as noncurrent versions, which `restore` can bring back for 30 days and the lifecycle removes after 31; the execution role can't delete archive or timing versions. A replay's `reference/` tables are not touched. |
+| `restore` | `prefix` (a recording's) or a timing key | `{"status": "restored", "restored": N}`: each key deleted in the last `RESTORE_DAYS` (30) days is copied back from its newest kept version (`copy_object`), the manifest last. Not found when nothing is restorable. See [Deleting, restoring and retention](#deleting-restoring-and-retention). |
+
+`GET /?ticket=UUID` returns a ticket's status; the unguessable ticket is its credential.
 
 ### Integrity
 
 The client is open source, so the service validates every upload. Demo and
-synthetic content must match a reference; SBI live content has no reference and
-is contributor-declared:
+synthetic content must match a reference; broker live content has no reference and
+is uploader-declared:
 
 - **Reference replay.** Market content must equal the pinned demo replay.
   [briskapi/references/historical_mock.json](briskapi/references/historical_mock.json) holds a
@@ -642,19 +768,29 @@ is contributor-declared:
   rejected. Local timing values must be plausible: decode ≤ 10 s, receipt clock
   monotonic within 24 h, millisecond values with at most microsecond precision,
   and pacing consistent throughout. End-of-stream counts must match.
-  SBI quotes use null
+  Broker quotes use null
   replay lateness. Its end frame count includes pre-bootstrap catch-up frames,
-  so it can exceed the number of emitted quote batches. SBI packaging removes
-  connection/decoder diagnostics and publishes only
-  `{"kind":"sbi_websocket","origin":"https://sbi.brisk.jp/"}` as transport metadata.
+  so it can exceed the number of emitted quote batches. Broker packaging removes
+  connection/decoder diagnostics and keeps only the site's fixed transport metadata,
+  `{"kind":"sbi_websocket","origin":"https://sbi.brisk.jp/"}` for SBI
+  (`eshiten_websocket` and `https://next.e-shiten.brisk.jp/` for e-shiten).
   The service rejects any additional transport fields.
-- **Verified tables, the service's zip.** The service publishes the uploaded tables
-  once verified, inside its own deterministic zip, so zip comments, extra fields and
-  timestamps never reach the archive. The tables themselves are not rewritten: what
+- **Verified tables, no uploaded zip.** The service stores the uploaded tables
+  once verified, each as its own object. The zip that carried them is never kept, so
+  its comments, extra fields and timestamps never reach the archive, and the
+  manifest it stores hashes the service's own deterministic zip of the four tables as
+  stored. The tables themselves are not rewritten: what
   table verification can't see (Parquet statistics, unused dictionary entries,
   encoder choices in pages) is the one place an upload could keep a few bytes of
-  its own.
+  its own. For a demo replay's market tables, the first verified upload's bytes become the
+  archive's copy.
   `synthetic_test` accepts only the fixed one-security probe in `briskapi/schema.py`.
+- **A timing table alone is verified as a whole recording.** When an upload sends only
+  its timing table, the service fetches the archive's copy of the market tables,
+  assembles the four, and runs the same checks as for a whole recording (reference
+  replay, canonical tables, exact fields, and the summary in the uploaded manifest) before
+  storing the timing table. The timing table is therefore checked against the market
+  data it describes: batch sequence, clocks and counts.
 - **Nothing lingers in staging.** Each upload is deleted right after validation,
   whether accepted or rejected. A ticket admits only its first object version;
   later POSTs with the same upload form are deleted on arrival.
@@ -662,46 +798,112 @@ is contributor-declared:
   unreadable Parquet are rejected like any other invalid upload. Row counts, list
   lengths and declared decoded sizes are checked before data is read.
 
-A client chooses its alias (up to 64 characters), its license and bounded timing
-measurements. These cannot be verified. SBI master names and market values also
-remain unverified contributor content; exact fields and canonical encoding do
-not establish market accuracy or redistribution permission. Upload quotas apply
-to every source.
+A client chooses its bounded timing measurements, which cannot be verified. Broker master
+names and market values also remain unverified uploader content; exact fields and
+canonical encoding do not establish market accuracy. Upload quotas apply to every source.
 
-### Publication and limits
+### Storage and limits
 
+A recording is stored as its four tables (`_parquet.FILES`), not as the zip it arrived
+in. Only the staging object `incoming/TICKET/recording.zip` is a zip, and it is deleted
+once validated:
+
+```
+archive/OWNER/YYYYMMDD/FROM-TO-SHA256/
+    data/equity.parquet                      } a demo or synthetic replay keeps these
+    data/order_book_depths.parquet           } three in reference/ instead (below)
+    data/trades.parquet                      }
+    data/custom/BriskBatch.parquet           the timing table: always the recording's own
+    files.json                               where each of the four tables is
+    manifest.json                            written last: the commit marker
+reference/SOURCE/TIMELINE/
+    data/equity.parquet  data/order_book_depths.parquet  data/trades.parquet
+    complete.json                            written after the tables
+timing/OWNER/YYYYMMDD/SHA256.json
+```
+
+- Recordings are content addressed per owner. FROM and TO are the recording's first and
+  last source clock (JST, HHMMSS: `schema.recording_name`, matched by `RECORDING_PREFIX`),
+  so a day's recordings list in time order, and SHA-256 is that of the service's zip of
+  the four tables as stored, the one the stored manifest hashes. Storage writes the
+  tables first, then `files.json`, and the immutable manifest last; listings and
+  downloads read only committed recordings.
+- A demo or synthetic replay's market tables (equity, depths, trades) are the same for
+  every recording of it, so the archive keeps them once, under
+  `reference/SOURCE/TIMELINE/`, where TIMELINE is the reference's batch-clock hash
+  (`reference_prefix`). The first verified replay becomes the copy: its tables are written
+  with conditional puts and `complete.json` after them, so a race keeps the first of
+  each table and a copy without `complete.json` is not used. A recording of that replay, the first included,
+  stores only its timing table, and its `files.json` points the other three into the copy.
+  `download` accepts a `files.json` only if it names exactly the four tables, each under
+  the recording's own prefix or its source's `reference/` prefix. The role can read and
+  write `reference/` but never delete there, and no owner can list it.
+- An upload to a replay with a stored copy sends only the timing table: `upload` with
+  `part`, the size and SHA-256 of the one-table zip, and a ticket bound to that size.
+  Without a copy the service answers 409 and the client (`cli.upload`) sends the whole
+  recording; `market=True` sends it regardless. Ingest verifies the assembled recording in
+  full either way (see Integrity).
 - Upload tickets last 15 minutes and bind the object key, exact size and encryption.
 - Uploads are bound to their first S3 object version. Retries of that event are
-  safe, and overwriting an upload cannot replace a published dataset.
-- Recordings are content addressed: `archive/YYYYMMDD/SHA256/`, where SHA-256 is
-  that of the published `recording.zip`. Publication writes the data first and the
-  immutable manifest last, as the catalog commit marker.
-- Limits: a 64 MiB package, 1 GiB in canonical JSON form and 16 MiB per batch in
+  safe, and overwriting an upload cannot replace a stored recording.
+- Limits: a 64 MiB package, 2 GiB in canonical JSON form and 16 MiB per batch in
   that form. Tickets are limited to four per IP address per hour (stored as a keyed
-  hash, never the address), 64 per hour in total and 5 GiB of authorized uploads per
-  UTC day. A complete demo replay is a 34 MB package.
-- Ticket metadata in staging expires after two days. Published data is retained.
-- `pull` checks the package's size and SHA-256, the tables, the manifest and the
-  reference replay where available, then moves the folder (the tables and the
-  manifest; the zip isn't kept) into place atomically.
-  Manifest validation and archive identity checks precede payload download.
-  Listings warn and skip invalid/unsupported manifests, including old probes
+  hash, never the address), eight per owner per hour, 64 per hour in total and 5 GiB
+  of authorized uploads per UTC day, counted by what is sent (a timing table alone,
+  once the copy exists). A complete demo replay is a 41 MB package.
+- Ticket metadata in staging expires after two days. Stored data is kept until its
+  owner deletes it; what an owner deletes can be restored for 30 days and is removed
+  after 31.
+- `brisk prune DIR` removes a local package only after finding its SHA-256 in the
+  owner's listing and re-hashing the local tables. The listing's hash is the service's,
+  over the tables as stored, so a demo recording is found only if its market tables are
+  byte-identical to the archive's copy.
+- `pull` asks `download` for the manifest and one presigned URL per table, and checks
+  the manifest and archive identity before fetching any. It downloads the four tables
+  (stopping beyond the manifest's byte count), packs them into the deterministic zip and
+  checks that zip's size and SHA-256 against the manifest, then the tables, summary and
+  reference replay (`inspect_package`). It moves the folder (the tables and the
+  manifest; no zip is kept) into place atomically.
+- Listings warn and skip invalid/unsupported manifests, including old probes
   with incomplete reference metadata, without hiding S3/network failures.
+
+### Deleting, restoring and retention
+
+`delete` removes the current versions of an owner's objects, the manifest first. The
+bucket is versioned, so each object stays as a noncurrent version beneath a delete marker.
+The execution role may delete such a version only in staging (`s3:DeleteObjectVersion`),
+so nothing the function does, bugs included, purges one under `archive/` or `timing/`:
+only the lifecycle does.
+
+- `list` with kind `deleted` and `restore` read the bucket's versions under the
+  owner's prefixes (`s3:ListBucketVersions`, `versions()` in the service). A key counts as
+  deleted when its latest version is a delete marker, and is restorable when an older
+  version is kept and the marker is at most `RESTORE_DAYS` (30) days old. The listing
+  reads each manifest or report from its kept version and adds `deleted_at` and
+  `restore_until`.
+- `restore` copies each such key's newest kept version back to its own key
+  (`copy_object` with that version ID, so a new current version), the manifest last, so
+  a half-restored recording is never listed. After 30 days it finds nothing.
+- The bucket's lifecycle (`deploy.py`: rules `ExpireDeleted-archive` and
+  `ExpireDeleted-timing`) expires noncurrent versions under `archive/` and `timing/`
+  `DELETED_DAYS` (31) days after they became noncurrent, a day after the restore window,
+  and removes delete markers once no version is left beneath them. S3 applies lifecycle
+  rules asynchronously, so removal can trail that by a day. Current objects are not
+  affected, and `reference/` has no rule, since no owner deletes there.
 
 ### Sources
 
 The decoded schema accepts `historical_mock`, `synthetic_test`, `sbi_live` and
-`eshiten_live`. The small, self-authored `synthetic_test` fixture verifies publication;
-filter by source when selecting market data. Opted-in decoded broker recordings retain
+`eshiten_live`. The small, self-authored `synthetic_test` fixture verifies uploads;
+filter by source when selecting market data. Uploaded decoded broker recordings retain
 `source=sbi_live` or `eshiten_live` and undergo canonical-field, integrity and continuity checks.
-Their market accuracy and redistribution permission are contributor-declared;
-they are not silently treated as reference-verified demo data. New raw-wire
-submissions remain unsupported. The existing legacy wire capture is labeled
-`sample_data`, with schema `brisk-sbi-wire-jsonl-v1`, for protocol research. It is
-separate from the validated decoded-recording catalog and retains its own manifest.
+Their market accuracy is uploader-declared; they are not silently treated as
+reference-verified demo data. New raw-wire uploads remain unsupported. Objects stored
+while the archive was public (before policy version 6) sit outside any owner's prefix and
+are unreachable through the API.
 
 ## Development and deployment
 
 Tests and conventions are in [CONTRIBUTING.md](CONTRIBUTING.md). Archive
 deployment, IAM scope, costs and removal are in [infra/README.md](infra/README.md).
-Archive changes reach contributors only after `infra/deploy.py` runs.
+Archive changes reach clients only after `infra/deploy.py` runs.

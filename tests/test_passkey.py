@@ -13,7 +13,7 @@ import pytest
 
 import briskapi
 import briskapi.cli as cli
-from briskapi import passkey, sbi, sites
+from briskapi import brisk, passkey, sites
 
 REPO = Path(__file__).resolve().parent.parent
 posix_only = pytest.mark.skipif(os.name != 'posix', reason='uses a POSIX shell script or POSIX file modes')
@@ -33,7 +33,7 @@ RECORD = {'site': 'sbi', 'credential': PASSKEY}
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
     monkeypatch.delenv('BRISK_PASSKEY_STORE', raising=False)
-    monkeypatch.setattr(sbi, '_client', None)
+    monkeypatch.setattr(brisk, '_client', None)
 
 
 # ---- stores ----
@@ -306,7 +306,7 @@ def test_login_signs_in_saves_the_advanced_passkey_and_uses_the_cookies(tmp_path
                            passkey_button='Passkey', headless=True, chrome=Path('/opt/chrome'), profile_dir=tmp_path / 'profile')
     assert store.load() == {'site': 'sbi', 'credential': {**PASSKEY, 'signCount': 5}}, 'the sign counter must be saved'
     assert signin.site.id == 'sbi' and signin.cookies == {'session_x': 'cookie-value', 'other': 'o'}
-    assert signin.client.session.cookies == signin.cookies and sbi._default() is signin.client
+    assert signin.client.session.cookies == signin.cookies and brisk._default() is signin.client
     seen = json.loads(log.read_text(encoding='utf-8'))
     assert seen['argv'] == ['login'], 'nothing but the mode may be on the command line'
     request = seen['request']
@@ -338,7 +338,7 @@ def test_a_site_without_a_data_client_keeps_its_cookies_in_a_file_and_leaves_the
     helper('login-ok')
     store = saved(tmp_path, {'site': 'monex', 'credential': PASSKEY})
     signin = passkey.login(store=store)
-    assert signin.site.id == 'monex' and signin.client is None and sbi._client is None
+    assert signin.site.id == 'monex' and signin.client is None and brisk._client is None
     file = tmp_path / 'config' / 'brisk' / 'cookies' / 'monex.json'
     assert signin.saved_to == file and json.loads(file.read_text(encoding='utf-8')) == {'session_x': 'cookie-value', 'other': 'o'}
     assert_private(file, 0o600)
@@ -351,7 +351,7 @@ def test_login_without_remember_keeps_the_sbi_cookies_in_memory(tmp_path, helper
     helper('login-ok')
     signin = passkey.login(store=saved(tmp_path), remember=False)
     assert signin.saved_to is None and not (tmp_path / 'config' / 'brisk' / 'sbi-cookies.json').exists()
-    assert sbi._default().session.cookies['session_x'] == 'cookie-value'
+    assert brisk._default().session.cookies['session_x'] == 'cookie-value'
 
 
 def test_cookies_of_another_site_are_never_given_to_the_sbi_client(tmp_path, helper):
@@ -364,7 +364,7 @@ def test_cookies_of_another_site_are_never_given_to_the_sbi_client(tmp_path, hel
             passkey.login(store=store, sites_file=edited)
     assert not log.exists(), 'the refusal must come before Chrome is started'
     assert store.load() == RECORD, 'no sign-in happened, so the counter is unchanged'
-    assert sbi._client is None
+    assert brisk._client is None
 
 
 ESHITEN = {'site': 'e-shiten', 'user_id': 'abc123', 'credential': PASSKEY}
@@ -381,8 +381,8 @@ def test_e_shiten_signs_in_with_the_saved_user_id_and_its_data_client_gets_the_c
                                          'next.e-shiten.brisk.jp', 'session_')
     assert store.load() == {**ESHITEN, 'credential': {**PASSKEY, 'signCount': 5}}, 'saving the counter must keep the user ID'
     assert signin.client.site == 'e-shiten' and signin.client.session.origin == 'https://next.e-shiten.brisk.jp'
-    assert sbi._default() is signin.client
-    assert signin.saved_to == sbi.cookies_path('e-shiten') and not sbi.cookies_path('sbi').exists()
+    assert brisk._default() is signin.client
+    assert signin.saved_to == brisk.cookies_path('e-shiten') and not brisk.cookies_path('sbi').exists()
     assert json.loads(signin.saved_to.read_text(encoding='utf-8')) == signin.cookies
     assert_private(signin.saved_to, 0o600)
 
@@ -410,7 +410,7 @@ def test_cookies_of_another_site_are_never_given_to_the_e_shiten_client(tmp_path
         with pytest.raises(passkey.PasskeyError,
                            match=r'never given to the e-shiten BRiSK Next client, which only talks to next\.e-shiten\.brisk\.jp'):
             passkey.login(store=store, sites_file=edited)
-    assert not log.exists() and store.load() == ESHITEN and sbi._client is None
+    assert not log.exists() and store.load() == ESHITEN and brisk._client is None
 
 
 def test_non_ascii_text_from_the_helper_is_read_as_utf_8_whatever_the_system_code_page(tmp_path, helper):
@@ -432,7 +432,7 @@ def test_a_refused_login_is_an_error_but_the_passkey_counter_is_still_saved(tmp_
     with pytest.raises(passkey.PasskeyError, match='The login was refused'):
         passkey.login(store=store)
     assert store.load()['credential']['signCount'] == 5
-    assert sbi._client is None
+    assert brisk._client is None
 
 
 def test_a_helper_that_dies_is_reported_and_its_last_passkey_is_kept(tmp_path, helper):
@@ -605,8 +605,8 @@ def test_forget_deletes_the_saved_login(tmp_path):
     assert store.load() is None
 
 
-def test_nothing_in_the_sbi_module_is_about_passkeys():
-    assert not [name for name in dir(sbi) if 'passkey' in name.lower()]
+def test_nothing_in_the_brisk_module_is_about_passkeys():
+    assert not [name for name in dir(brisk) if 'passkey' in name.lower()]
 
 
 # ---- command line ----
@@ -724,7 +724,7 @@ def test_full_stack_a_site_you_define_enroll_then_login(tmp_path):
 
         signin = passkey.login(store=store, headless=True)
         seen = broker.state()
-        assert signin.site.id == 'fake' and signin.client is None and sbi._client is None
+        assert signin.site.id == 'fake' and signin.client is None and brisk._client is None
         assert signin.cookies['session_fake'] == seen['briskCookieValue'] and 'main_session' not in signin.cookies
         assert json.loads(signin.saved_to.read_text(encoding='utf-8')) == signin.cookies and signin.saved_to.name == 'fake.json'
         assert seen['accepted'] == 1
@@ -737,21 +737,21 @@ def test_full_stack_a_site_you_define_enroll_then_login(tmp_path):
 
 @needs_chrome
 def test_full_stack_sbi_signs_in_and_its_data_client_gets_the_cookies(tmp_path, monkeypatch):
-    monkeypatch.setitem(sbi.SITES, 'sbi', sbi.SITES['sbi']._replace(origin='https://brisk.localhost'))
+    monkeypatch.setitem(brisk.SITES, 'sbi', brisk.SITES['sbi']._replace(origin='https://brisk.localhost'))
     with FakeBroker() as broker:
         main = broker.origins['mainOrigin']
         define(tmp_path, {'id': 'sbi', 'login_url': main + '/login', 'cookie_host': 'brisk.localhost'})
         store = passkey.FileStore(tmp_path / 'passkey.json')
         passkey.enroll(site='sbi', store=store, login_url=main + '/enroll', headless=True, confirm=broker.registered)
         signin = passkey.login(store=store, headless=True)
-        assert signin.site.id == 'sbi' and sbi._default() is signin.client
+        assert signin.site.id == 'sbi' and brisk._default() is signin.client
         assert signin.client.session.cookies['session_fake'] == broker.state()['briskCookieValue']
-        assert signin.saved_to == sbi.cookies_path() and broker.state()['accepted'] == 1
+        assert signin.saved_to == brisk.cookies_path() and broker.state()['accepted'] == 1
 
 
 @needs_chrome
 def test_full_stack_e_shiten_types_the_user_id_signs_in_through_its_popup_and_its_data_client_gets_the_cookies(tmp_path, monkeypatch):
-    monkeypatch.setitem(sbi.SITES, 'e-shiten', sbi.SITES['e-shiten']._replace(origin='https://brisk.localhost'))
+    monkeypatch.setitem(brisk.SITES, 'e-shiten', brisk.SITES['e-shiten']._replace(origin='https://brisk.localhost'))
     with FakeBroker() as broker:
         main = broker.origins['mainOrigin']
         define(tmp_path, {'id': 'e-shiten', 'login_url': main + '/eshiten/login', 'enroll_url': main + '/enroll',
@@ -761,7 +761,7 @@ def test_full_stack_e_shiten_types_the_user_id_signs_in_through_its_popup_and_it
         signin = passkey.login(store=store, headless=True)
         seen = broker.state()
         assert seen['userIds'] == ['abc123'] and seen['accepted'] == 1 and seen['refusals'] == []
-        assert signin.site.id == 'e-shiten' and signin.client.site == 'e-shiten' and sbi._default() is signin.client
+        assert signin.site.id == 'e-shiten' and signin.client.site == 'e-shiten' and brisk._default() is signin.client
         assert signin.client.session.cookies['session_fake'] == seen['briskCookieValue']
-        assert signin.saved_to == sbi.cookies_path('e-shiten')
+        assert signin.saved_to == brisk.cookies_path('e-shiten')
         assert store.load()['credential']['signCount'] == seen['counter'] and store.load()['user_id'] == 'abc123'

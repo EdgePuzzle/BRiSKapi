@@ -16,6 +16,10 @@ JST = dt.timezone(dt.timedelta(hours=9), 'JST')
 PRICES = ('last_price10', 'open_price10', 'bid_price10', 'ask_price10', 'indicative_price10',
           'closing_indicative_price10', 'indicative_open_price10', 'reference_price10')
 MASTER_PRICES = ('base_price10', 'limit_up10', 'limit_down10')
+BOOK_VIEWS = {'bid_levels': 'bids', 'ask_levels': 'asks', 'bid_closing_levels': 'closing_bids', 'ask_closing_levels': 'closing_asks'}
+SIDES = {0: 'buy', 1: 'sell'}
+# The decoder's trade types: 1 buyer-initiated, 2 seller-initiated; 0 (most opening auction prints) has no side.
+TRADE_SIDES = {1: 'buy', 2: 'sell'}
 
 
 class BriskError(Exception):
@@ -77,22 +81,35 @@ def micros(date: str, at) -> int | None:
 def quote_view(quote: dict, date: str) -> dict:
     """Yen prices (None for the vendor's zero sentinel), JST times and the raw quantities/enums.
 
-    The book sides become `bids` and `asks`: the best prices holding orders, best first, as
-    {'price', 'quantity', 'orders'}. `turnover10` (tenths of a yen) becomes `turnover` in yen.
+    The book sides become `bids` and `asks` (and the closing-condition orders' `closing_bids` and
+    `closing_asks`): the best prices holding orders, best first, as {'price', 'quantity', 'orders'}.
+    `turnover10` (tenths of a yen) becomes `turnover` in yen. `special_quote` is None, or the special
+    quote (quote_flag 2) as {'side': 'buy' or 'sell', 'price', 'until'}, where `until` is when its 180 s
+    timer ends; the raw `quote_flag` and `quote_side` stay.
     """
     view = {'code': quote['code'], 'issue_id': quote['issue_id'], 'time': timestamp(date, quote['source_time_us'])}
     for key, value in quote.items():
         if key in PRICES:
             view[key[:-2]] = value / 10 if value else None
-        elif key in ('bid_levels', 'ask_levels'):
-            view[key[:3] + 's'] = [{'price': p / 10, 'quantity': q, 'orders': n} for p, q, n in value]
+        elif key in BOOK_VIEWS:
+            view[BOOK_VIEWS[key]] = [{'price': p / 10, 'quantity': q, 'orders': n} for p, q, n in value]
         elif key == 'turnover10':
             view['turnover'] = value / 10
         elif key == 'special_quote_time_us':
             view['special_quote_time'] = timestamp(date, value) if value else None
         elif key not in view and key != 'source_time_us':
             view[key] = value
+    special = quote.get('quote_flag') == 2
+    view['special_quote'] = {'side': SIDES.get(quote['quote_side']), 'price': view.get('reference_price'),
+                             'until': view.get('special_quote_time')} if special else None
     return view
+
+
+def trade_view(trade: dict, date: str) -> dict:
+    """A trade with its JST time, yen price, shares and side ('buy', 'sell' or None)."""
+    return {'code': trade['code'], 'issue_id': trade['issue_id'], 'time': timestamp(date, trade['time_us']),
+            'price': trade['price10'] / 10, 'quantity': trade['quantity'], 'side': TRADE_SIDES.get(trade['side']),
+            'frame': trade['frame']}
 
 
 def master_view(entry: dict) -> dict:
@@ -109,7 +126,7 @@ class Recording:
     once and kept in memory (one security's history is read alone). JSONL is read as a stream.
     """
 
-    contribution = None  # Publication status when record() contributed this recording.
+    uploaded = None  # The archive's status when record() uploaded this recording.
 
     def __init__(self, path):
         path = Path(path).expanduser()
@@ -231,6 +248,27 @@ class Recording:
         if limit is None:
             self._final = dict(quotes)
         return quotes
+
+    def trades(self, code=None, start=None, end=None) -> list[dict]:
+        """Raw trades in source-time order, of one security or all, optionally bounded by time."""
+        issue = None if code is None else self.issue(code)['issue_id']
+        low, high = micros(self.trading_date, start), micros(self.trading_date, end)
+        if self.format == 'parquet':
+            columns = self._columns or _parquet.Columns.load(self.directory, issue_id=issue)
+            trades = columns.trades(issue, low, high)
+        else:
+            trades = [t for batch in self.batches() for t in batch.get('trades', ())
+                      if (issue is None or t['issue_id'] == issue) and (low is None or t['time_us'] >= low)
+                      and (high is None or t['time_us'] <= high)]
+        return sorted(trades, key=lambda t: t['time_us'])  # stable: each issue keeps the decoder's order
+
+    def frames(self) -> list[dict]:
+        """Every batch without its master, quotes and trades: clocks, local timing, skipped issues,
+        and how many quotes and trades it held."""
+        if self.format == 'parquet':
+            return _parquet.frames(self.directory)
+        return [{**{k: v for k, v in b.items() if k not in ('master', 'quotes', 'trades')},
+                 'quote_count': len(b.get('quotes', ())), 'trade_count': len(b.get('trades', ()))} for b in self.batches()]
 
     def updates(self, code: str, start=None, end=None) -> Iterator[dict]:
         """Raw quote updates for one security, skipping unrelated batches without parsing them."""

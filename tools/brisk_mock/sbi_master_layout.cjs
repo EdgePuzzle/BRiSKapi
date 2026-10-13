@@ -22,7 +22,7 @@ const zlib = require('node:zlib');
 const path = require('node:path');
 const assert = require('node:assert');
 const { Decoder, parseStockView } = require('../../briskapi/decoder/decoder.cjs');
-const { checkAbi, checkMaster, CATCH_UP_FORMATS, DEFAULT_CATCH_UP } = require('../../briskapi/decoder/sbi.cjs');
+const { checkAbi, checkMaster, CATCH_UP_FORMATS, DEFAULT_CATCH_UP } = require('../../briskapi/decoder/brisk.cjs');
 
 // Start a decoder, push the catch-up reply and read back what it did to the requested issues.
 async function catchUp(assets, sent, reply, schedule) {
@@ -96,18 +96,21 @@ async function stream(assets, schedule, file, { withoutStalls = false } = {}) {
   decoder.feed(openingMessage(decoder.master.length));
   const opening = numbers === decoder.master.length && decoder.laggingIssues().length === 0;
   decoder.begin();
-  const updated = new Set();
-  let accepted = 0, changes = 0, error = null;
+  const updated = new Set(), tradeTypes = {};
+  let accepted = 0, changes = 0, trades = 0, error = null;
   for (const message of messages) {
     try { decoder.feed(message); accepted++; } catch (e) { error = e.message; break; }
     const ids = decoder.changed();
     changes += ids.length;
     ids.forEach(id => updated.add(id));
+    // The 2026 build records each execution through the same QR import as the demo's.
+    for (const t of decoder.trades()) { trades++; tradeTypes[t.side] = (tradeTypes[t.side] || 0) + 1; }
   }
   // Server pings are the heartbeats (0xF0, 0xF2, 0xF4, 0xF6 and an 8-byte clock); each reply must be the ping it answers.
   const pings = messages.filter(m => (m[0] & 0xf9) === 0xf0).map(m => m.toString('hex'));
   const echoed = pongs.filter((pong, k) => pong === pings[k]).length;
   return { messages: messages.length, opening_accepted: opening, accepted, ...(error ? { stopped: error } : {}), quote_changes: changes,
+    trades, trade_types: tradeTypes,
     issues_updated: updated.size, server_pings: pings.length, replies: pongs.length, replies_echoing_their_ping: echoed, heartbeats };
 }
 

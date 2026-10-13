@@ -34,7 +34,7 @@ function redact(text) {
     .replace(LONG_HEX, mask);
 }
 
-const SBI_PROFILE = Object.freeze({
+const DEFAULT_PROFILE = Object.freeze({
   namespace: '/v2/user',
   // UNVERIFIED, and probably not BRiSK's (see above): the parameter names come from the
   // capture's other Socket.IO connection; these sources are guesses.
@@ -50,18 +50,18 @@ const SBI_PROFILE = Object.freeze({
 
 const PROFILE_KEYS = new Set(['connectQuery', 'startLive', 'binaryPrefix', 'catchUp']);
 
-// Overrides come from BRISK_SBI_PROFILE / --profile as JSON, so they are plain data.
+// Overrides come from BRISK_PROFILE / --profile as JSON, so they are plain data.
 function resolveProfile(overrides = {}) {
   if (overrides === null || typeof overrides !== 'object' || Array.isArray(overrides)) {
-    throw new Error('SBI profile must be a JSON object');
+    throw new Error('The BRiSK profile must be a JSON object');
   }
   const unknown = Object.keys(overrides).filter(key => !PROFILE_KEYS.has(key));
-  if (unknown.length) throw new Error(`Unknown SBI profile keys: ${unknown.join(', ')}`);
+  if (unknown.length) throw new Error(`Unknown BRiSK profile keys: ${unknown.join(', ')}`);
   return {
-    namespace: SBI_PROFILE.namespace,
-    connectQuery: ctx => ({ ...SBI_PROFILE.connectQuery(ctx), ...overrides.connectQuery }),
-    startLive: overrides.startLive === undefined ? SBI_PROFILE.startLive : () => overrides.startLive,
-    binaryPrefix: overrides.binaryPrefix ?? SBI_PROFILE.binaryPrefix,
+    namespace: DEFAULT_PROFILE.namespace,
+    connectQuery: ctx => ({ ...DEFAULT_PROFILE.connectQuery(ctx), ...overrides.connectQuery }),
+    startLive: overrides.startLive === undefined ? DEFAULT_PROFILE.startLive : () => overrides.startLive,
+    binaryPrefix: overrides.binaryPrefix ?? DEFAULT_PROFILE.binaryPrefix,
     catchUp: overrides.catchUp,
   };
 }
@@ -257,7 +257,7 @@ function heartbeatMonitor({ intervalMs = 7000, checkEveryMs = 1000, onFail, now 
   let last = null;
   const timer = setInterval(() => {
     if (last !== null && now() - last > intervalMs) {
-      onFail(new Error(`SBI BRiSK connection check failure: no heartbeat for ${Math.round((now() - last) / 1000)}s`));
+      onFail(new Error(`BRiSK connection check failure: no heartbeat for ${Math.round((now() - last) / 1000)}s`));
     }
     const stale = staleCheck?.();
     if (stale) onFail(stale);
@@ -287,4 +287,4 @@ function staleDataCheck({ date, thresholdUs = 90_000_000, now = Date.now, name =
   };
 }
 
-module.exports = { Link, SBI_PROFILE, resolveProfile, heartbeatMonitor, staleDataCheck, redact };
+module.exports = { Link, DEFAULT_PROFILE, resolveProfile, heartbeatMonitor, staleDataCheck, redact };

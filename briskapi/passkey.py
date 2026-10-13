@@ -260,7 +260,7 @@ def default_store():
 
 
 def cookies_path(site_id) -> Path:
-    """Where `login` keeps the BRiSK cookies of a site that has no data client (SBI's go to sbi.cookies_path())."""
+    """Where `login` keeps the BRiSK cookies of a site that has no data client (a site with one keeps them at brisk.cookies_path())."""
     return config_dir() / 'cookies' / f'{site_id}.json'
 
 
@@ -378,8 +378,8 @@ def _choose(sites):
 def _check_client(site):
     """A data client sends its cookies to one host. Cookies of any other site must never be handed to it."""
     if site.client:
-        from briskapi import sbi
-        served = sbi.SITES[site.client]
+        from briskapi import brisk
+        served = brisk.SITES[site.client]
         host = urllib.parse.urlsplit(served.origin).hostname
         if site.cookie_host != host:
             raise PasskeyError(f'Cookies of {site.cookie_host} are never given to the {served.name} client, which only talks to {host}')
@@ -387,9 +387,9 @@ def _check_client(site):
 
 def _deliver(site, cookies, remember):
     if site.client:
-        from briskapi import sbi
-        client = sbi.login(cookies=cookies, remember=remember, site=site.client)
-        return SignIn(site, cookies, client, sbi.cookies_path(site.client) if remember else None)
+        from briskapi import brisk
+        client = brisk.login(cookies=cookies, remember=remember, site=site.client)
+        return SignIn(site, cookies, client, brisk.cookies_path(site.client) if remember else None)
     path = None
     if remember:
         path = cookies_path(site.id)

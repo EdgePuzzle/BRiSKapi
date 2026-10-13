@@ -5,20 +5,22 @@ verification and updated docs. Keep vendor assets, captures, account/session
 material, build products and cloud credentials out of Git. Do not commit AWS
 upload tickets; they are short-lived bearer credentials.
 
-Recording contributions are automatic once a user accepts the one-time prompt
-(`brisk consent`); see `PRIVACY.md`. Any change to what is collected must update
-that policy and bump `POLICY_VERSION` in `briskapi/cli.py`, so saved choices lapse
-and users are asked again. No maintainer approval is required for recordings: the
-service checks the exact tables and their canonical encoding, the schema, integrity,
-continuity, the reference replay and the contributor declaration, then publishes the
-verified tables in its own zip. Do not include account, authentication or
-order information. The accepted decoded schema is documented in
+Recording uploads go to each user's private archive automatically, by default (the CLI
+asks once on a terminal; `brisk consent` changes it); see `PRIVACY.md`. Tests run offline
+(`tests/conftest.py` refuses non-local requests), so a test that records or connects
+patches the upload calls or passes `upload=False`. Any change to what is collected must
+update that policy and bump `POLICY_VERSION` in `briskapi/cli.py`, so saved choices lapse
+and users are asked again. The service checks the exact tables and their canonical
+encoding, the schema, integrity, continuity and the reference replay, then stores the
+verified tables under the uploader's owner ID (a demo replay's market tables are kept once,
+so such an upload sends only its timing table). Do not include account,
+authentication or order information. The accepted decoded schema is documented in
 `briskapi/schema.py` and its tables in `briskapi/_parquet.py`; it contains
 market/auction data and local timing only.
 
 Data quality metadata includes source, JST trading date and source-time range,
 security coverage, batches, quote count and expanded (canonical JSON) size. The
-SHA-256 refers to the published zip, which the service creates deterministically.
+SHA-256 is that of the deterministic zip of the four tables as stored.
 Distinct receipt clocks remain distinct recordings; identical payloads
 deduplicate by hash. `briskapi/references/historical_mock.json` pins the demo replay; it
 changes only with a re-audited asset pin (`tools/brisk_mock/build_reference.py`).
@@ -45,13 +47,13 @@ behavior.
 Keep `README.md` and `README.ja.md` in step; internals belong in `ARCHITECTURE.md`.
 Everything the installed package needs at runtime lives in `briskapi/` (package
 data is listed in `pyproject.toml`); CI installs the wheel outside the repository
-and runs it. SBI tests use pybrisk's sample payloads and a fake server. Broker market
-recordings (SBI, e-shiten) need an explicit opt-in at the beginning of each capture (Enter
-accepts the interactive prompt), plus current consent and a redistribution declaration.
-Without that opt-in, broker sessions contribute timing reports only
-(`briskapi/timing.py`, validated by `validate_timing` in `briskapi/schema.py`).
-Live market content has no reference replay; it passes structural and continuity
-checks, while its accuracy and redistribution permission remain contributor-declared.
+and runs it. The BRiSK site client's tests (`tests/test_brisk.py`, `tools/brisk_mock/brisk.test.cjs`) use
+pybrisk's SBI sample payloads and a fake server. Unless a user
+opts out, broker sessions (SBI, e-shiten) upload a timing report
+(`briskapi/timing.py`, validated by `validate_timing` in `briskapi/schema.py`) and, after each
+day's clean end, their market recording; `--no-upload-market-data` keeps the recording local and
+`--no-upload` both. Live market content has no reference replay; it passes structural
+and continuity checks, while its accuracy remains uploader-declared.
 Never archive cookies, tokens or connection diagnostics. New uploads must be
 decoded; the existing legacy wire capture is labeled `sample_data` and is not an
 ingest format.
@@ -69,7 +71,7 @@ Rust tools for Linux (x86-64, ARM64), macOS (Apple silicon) and Windows with
 their decoder host, creates the GitHub Release with checksums and publishes to
 PyPI. Running the workflow manually is a dry run that publishes nothing.
 
-`cloud_smoke.py` is an opt-in real cloud test against the configured archive. It
-publishes only the fixed synthetic fixture and checks that tampered content is
-rejected. Archive changes reach contributors only after `infra/deploy.py` runs
-(see `infra/README.md`).
+`cloud_smoke.py` is an opt-in real cloud test against the configured archive. It uploads
+only the fixed synthetic fixture under throwaway identities, checks that another identity
+and anonymous requests reach none of it (anonymous requests reach only `samples/`) and that
+tampered content is rejected, then deletes it from the owner's archive. Archive changes reach clients only after `infra/deploy.py` runs (see `infra/README.md`).

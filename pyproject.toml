@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "briskapi"
 version = "0.9.0"
-description = "Unofficial Python API and CLI for BRiSK auction data: demo replay, SBI and Tachibana e-shiten sessions, an experimental live feed and a shared archive"
+description = "Unofficial Python API and CLI for BRiSK auction data: demo replay, broker BRiSK sessions (SBI, Tachibana e-shiten), an experimental live feed and a private archive"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
-dependencies = ["boto3>=1.41,<2", "numpy>=1.26", "pyarrow>=19"]
+dependencies = ["numpy>=1.26", "pyarrow>=19"]
 keywords = ["brisk", "market-data", "auction", "tokyo-stock-exchange", "japan", "sbi", "tachibana", "e-shiten"]
 classifiers = [
     "Development Status :: 3 - Alpha",

@@ -35,7 +35,7 @@ jobs:
           python -m venv /tmp/wheel-venv
           /tmp/wheel-venv/bin/python -m pip install "$GITHUB_WORKSPACE"/dist/briskapi-*.whl
           /tmp/wheel-venv/bin/brisk --help > /dev/null
-          /tmp/wheel-venv/bin/python -I -c "import briskapi.cli as c, briskapi.sbi as s; assert c.DECODER.exists() and s.DECODER.exists()"
+          /tmp/wheel-venv/bin/python -I -c "import briskapi.cli as c, briskapi.brisk as s; assert c.DECODER.exists() and s.DECODER.exists()"
       - uses: actions/upload-artifact@v4
         with:
           name: python-dist

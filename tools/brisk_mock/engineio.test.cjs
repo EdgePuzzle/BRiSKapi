@@ -4,7 +4,7 @@
 const test = require('node:test');
 const { afterEach } = test;
 const assert = require('node:assert/strict');
-const { Link, SBI_PROFILE, resolveProfile, heartbeatMonitor, redact } = require('../../briskapi/decoder/engineio.cjs');
+const { Link, DEFAULT_PROFILE, resolveProfile, heartbeatMonitor, redact } = require('../../briskapi/decoder/engineio.cjs');
 
 class FakeSocket extends EventTarget {
   constructor(url, init) {
@@ -189,8 +189,8 @@ test('profile overrides merge over the documented defaults, and typos are reject
   assert.equal(query.tabId, 'mine');
   assert.equal(query.api_key, CTX.marketToken);
   assert.deepEqual(profile.startLive(CTX), { series: 0 });
-  assert.deepEqual(SBI_PROFILE.startLive(CTX), {});
-  assert.throws(() => resolveProfile({ startLiv: {} }), /Unknown SBI profile keys: startLiv/);
+  assert.deepEqual(DEFAULT_PROFILE.startLive(CTX), {});
+  assert.throws(() => resolveProfile({ startLiv: {} }), /Unknown BRiSK profile keys: startLiv/);
   assert.throws(() => resolveProfile([]), /JSON object/);
   assert.throws(() => resolveProfile(null), /JSON object/);
   const { socket } = open({ profile });

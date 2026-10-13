@@ -60,11 +60,12 @@ live architecture reference; it is not a verified Tachibana BRiSK Next connector
 The reader also polls every 500 ms and extracts QR events, which does not provide
 the complete auction state this collector needs.
 
-briskapi's own SBI live feed (`briskapi.sbi.connect`, `brisk live --sbi`) does not
-use a browser or CDP. `briskapi/decoder/sbi.cjs` logs in with your session cookies,
-downloads SBI's decoder, master and snapshot, opens the WebSocket itself and runs
-the same Node `Decoder` as this demo host (protocol version 18000 for SBI). It is
-experimental and has not been validated against a live SBI session.
+briskapi's own broker live feed (`briskapi.brisk.connect`, `brisk live --sbi` or
+`--site e-shiten`) does not use a browser or CDP. `briskapi/decoder/brisk.cjs` logs in
+with your session cookies, downloads the site's decoder, master and snapshot, opens the
+WebSocket itself and runs the same Node `Decoder` as this demo host (protocol version
+18000 for the brokers' BRiSK: SBI, e-shiten). It is experimental and has not been
+validated against a live broker session.
 
 Its 18000 master record layout, the session schedule and the catch-up can be checked
 offline, without an account:
@@ -120,7 +121,10 @@ traded volume and turnover (`turnover10`, tenths of a yen: price times shares, s
 `turnover10 / volume / 10` is the VWAP in yen), and the issue status (0-7, the
 decoder's; 1 is pre-open, 2 the morning session). `bid_levels` and `ask_levels` hold
 each side's ten best prices that have orders, best first, as `[price10, quantity,
-orders]`. Prices suffixed `price10` are tenths of a yen; a zero price is the vendor's
+orders]`; `bid_closing_levels` and `ask_closing_levels` the same for the
+closing-condition (引け条件付) limit orders. `bid_total_quantity`, `bid_total_orders`,
+`ask_total_…` and `bid_closing_total_…`, `ask_closing_total_…` sum each group's limit
+orders over the whole board. Prices suffixed `price10` are tenths of a yen; a zero price is the vendor's
 unavailable sentinel. The indicative matching price excludes closing-condition
 orders; closing indicative fields remain separate. `reference_price10` is the price
 the decoder's indicative matching starts from (the special quote's price, otherwise
@@ -131,9 +135,16 @@ price exceeds the buy quantity (or nothing matches), else 0. Buy/sell and quote 
 are preserved as raw vendor values; no unverified tradability or execution rule is
 derived from them. Policy version 5 renamed `auction_reference_price10` and
 `indicative_side` to these names, and added the book, turnover, the closing
-imbalance side and SBI's issue status. An issue whose quote the decoder can't read
-(its state for that issue is inconsistent) is listed in the batch's
-`skipped_issues` instead, until it updates.
+imbalance side and SBI's issue status. Policy version 6 added the closing-condition books, the board totals and trades. An
+issue whose quote the decoder can't read (its state for that issue is inconsistent) is
+listed in the batch's `skipped_issues` instead, until it updates.
+
+Bootstrap, history and quote batches carry `trades`: every execution the decoder recorded
+since the previous batch (history batches: those its snapshot restored), by issue and in the decoder's order, as `{issue_id, code, frame,
+time_us, price10, quantity, side}`. `quantity` is shares, `time_us` the execution's time
+(the same clock as `source_time_us`) and `side` the decoder's raw type: 1 when the trade
+was at or above the prevailing ask (buyer-initiated), 2 at or below the bid, 0 for most
+opening auction prints. An issue's volume and turnover change by exactly its trades.
 
 `source_time_us` is microseconds since JST midnight on `trading_date`, as BRiSK's
 server stamps it: absolute in the snapshot, then moved by each update's delta. The
@@ -224,8 +235,8 @@ node tools/brisk_mock/benchmark.cjs /tmp/brisk-mock-cache
 
 `tools/brisk_mock/test_reference.py` (same cache variable) replays the demo and
 checks that it matches the archive's committed reference fingerprint, which the
-service uses to accept only genuine demo replays. Opted-in live SBI recordings
-have separate structural and continuity checks without a reference replay.
+service uses to accept only genuine demo replays. Uploaded live broker recordings
+(SBI, e-shiten) have separate structural and continuity checks without a reference replay.
 
 The last check uses installed Playwright/Chromium and compares six auction fields
 for six securities with the public demo's own JS accessors while its tutorial

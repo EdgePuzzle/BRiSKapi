@@ -385,20 +385,74 @@ test('a quote\'s book holds the best ten prices of each side, as reading the who
   const stream = frames(assets['ws.dat']);
   decoder.start(stream.next().value.data);
   for (let n = 0; n < 2500; n++) { decoder.feed(stream.next().value.data); decoder.changed(); }
-  let crossed = 0, full = 0;
+  let crossed = 0, full = 0, closing = 0;
   for (let issue = 0; issue < decoder.master.length; issue += 7) {
     const m = decoder.master[issue], q = decoder.quote(issue);
     const index = price => decoder.w._getTickPrice10ToIndex(decoder.id, m.tick_type, price);
     const low = index(m.limit_down10);
-    const { rows } = decoder.rows(issue, low, index(m.limit_up10) - low + 1);
-    assert.deepEqual(q.bid_levels, rows.filter(r => r[1]).reverse().slice(0, 10).map(r => [r[0], r[1], r[2]]), m.code);
-    assert.deepEqual(q.ask_levels, rows.filter(r => r[3]).slice(0, 10).map(r => [r[0], r[3], r[4]]), m.code);
-    const at = rows.find(r => r[0] === q.bid_price10);
-    assert.deepEqual([q.bid_quantity, q.bid_orders], at ? [at[1], at[2]] : [0, 0], m.code);
+    const { rows } = decoder.rows(issue, low, index(m.limit_up10) - low + 1, true);
+    const best = (group, buy) => (buy ? rows.slice().reverse() : rows).filter(r => r[group][0]).slice(0, 10)
+      .map(r => [r.price10, ...r[group]]);
+    assert.deepEqual(q.bid_levels, best('bid', true), m.code);
+    assert.deepEqual(q.ask_levels, best('ask', false), m.code);
+    assert.deepEqual(q.bid_closing_levels, best('bid_closing', true), m.code);
+    assert.deepEqual(q.ask_closing_levels, best('ask_closing', false), m.code);
+    for (const group of ['bid', 'bid_closing', 'ask', 'ask_closing']) {
+      const sum = k => rows.reduce((total, r) => total + r[group][k], 0);
+      assert.deepEqual([q[`${group}_total_quantity`], q[`${group}_total_orders`]], [sum(0), sum(1)], `${m.code} ${group}`);
+    }
+    const at = rows.find(r => r.price10 === q.bid_price10);
+    assert.deepEqual([q.bid_quantity, q.bid_orders], at ? at.bid : [0, 0], m.code);
     crossed += q.bid_levels.length > 0 && q.ask_levels.length > 0 && q.bid_levels[0][0] >= q.ask_levels[0][0];
     full += q.bid_levels.length === 10;
+    closing += q.bid_closing_levels.length > 0 || q.ask_closing_levels.length > 0;
   }
-  assert.ok(crossed > 10 && full > 100, `crossed ${crossed}, full ${full}`);
+  assert.ok(crossed > 10 && full > 100 && closing > 10, `crossed ${crossed}, full ${full}, closing ${closing}`);
+});
+
+test('the decoder\'s QR records are the trades: they account for every volume and turnover change', { skip: !cache }, async () => {
+  const assets = loadAssets(cache);
+  const decoder = await Decoder.create(assets);
+  const stream = frames(assets['ws.dat']);
+  decoder.start(stream.next().value.data);
+  const all = new Set(decoder.master.map(m => m.issue_id));
+  const base = new Map(decoder.quotes([...all]).quotes.map(q => [q.issue_id, [q.volume, q.turnover10]]));
+  assert.deepEqual(decoder.trades(all), [], 'no trades before the first frame');
+  const traded = new Map(), sides = new Map();
+  let checked = 0;
+  for (let n = 0; n < 3000; n++) {
+    decoder.feed(stream.next().value.data);
+    const changed = decoder.changed();
+    for (const t of decoder.trades(all)) {
+      const [volume, turnover] = traded.get(t.issue_id) ?? [0, 0];
+      traded.set(t.issue_id, [volume + t.quantity, turnover + t.price10 * t.quantity]);
+      sides.set(t.side, (sides.get(t.side) ?? 0) + 1);
+      assert.ok(t.code === decoder.master[t.issue_id].code && t.quantity > 0 && t.price10 > 0, t.code);
+    }
+    for (const q of decoder.quotes(changed).quotes) {
+      const [volume, turnover] = traded.get(q.issue_id) ?? [0, 0];
+      const [v0, t0] = base.get(q.issue_id);
+      assert.deepEqual([q.volume - v0, q.turnover10 - t0], [volume, turnover], q.code);
+      checked++;
+    }
+  }
+  assert.ok(checked > 50000 && traded.size > 1000, `${checked} quotes, ${traded.size} traded issues`);
+  assert.deepEqual([...sides.keys()].sort(), [0, 1, 2]);
+  decoder.qrm.withdrawn = 1;
+  assert.throws(() => decoder.trades(all), /withdrew/);
+});
+
+test('trades a snapshot restores come apart, by issue, in batches', { skip: !cache }, async () => {
+  const assets = loadAssets(cache);
+  const decoder = await Decoder.create(assets);
+  assert.deepEqual(decoder.history(), [], 'the demo\'s pre-open snapshot restores no trades');
+  const stock = issue => decoder.w._getStockPointer(decoder.id, issue);
+  const record = (issue, timestamp) => ({ p: stock(issue), type: 1, timestamp, price10: 1000, qty: 2, lot: 100, frame: 5 });
+  decoder.restored = [record(3, 30), record(1, 10), record(3, 31), record(2, 20), record(1, 11)];
+  const batches = decoder.history(new Set([1, 3]), 3);
+  assert.deepEqual(batches.map(b => b.map(t => [t.issue_id, t.time_us, t.quantity])),
+    [[[1, 10, 200], [1, 11, 200], [3, 30, 200]], [[3, 31, 200]]]);
+  assert.deepEqual(decoder.history(), [], 'taken once');
 });
 
 test('a catch-up must bring exactly the lagging issues to the stream\'s first frame', () => {

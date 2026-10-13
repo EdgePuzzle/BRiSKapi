@@ -1,4 +1,4 @@
-"""Timing-only reports: validation, accumulation, publication and reading."""
+"""Timing-only reports: validation, accumulation, storage and reading."""
 import copy
 import datetime as dt
 import hashlib
@@ -11,15 +11,15 @@ import briskapi
 import briskapi.cli as cli
 import briskapi.schema as schema
 from briskapi.timing import TimingStats
-from test_archive import DB, S3, event
-from test_sbi import sbi_session
+from test_archive import DB, OTHER, OWNER, S3, SECRET, event, isolated, online  # noqa: F401 - fixtures
+from test_brisk import sbi_session
 
 
 def report(**changes):
     stats = TimingStats('sbi_live')
     for batch in sbi_session():
         stats.add(batch)
-    return {**stats.report('anon-1234abcd', 'CC0-1.0'), **changes}
+    return {**stats.report(), **changes}
 
 
 @pytest.fixture(autouse=True)
@@ -34,13 +34,13 @@ def test_accumulated_report_is_valid_and_market_free():
     short = TimingStats('sbi_live')
     for batch in sbi_session(frames=50):
         short.add(batch)
-    assert short.report('a', 'CC0-1.0') is None and TimingStats('sbi_live').report('a', 'CC0-1.0') is None
+    assert short.report() is None and TimingStats('sbi_live').report() is None
 
 
 @pytest.mark.parametrize('change', [
     {'extra': 1}, {'schema': 'v0'}, {'source': 'historical_mock'}, {'trading_date': '2026-03-11'},
     {'trading_date': '20260230'}, {'first_minute': '25:00'}, {'first_minute': '15:00', 'last_minute': '09:00'},
-    {'frames': 99}, {'stalls': 10**6}, {'client_version': 'latest'}, {'contributor': 'a b'}, {'license': 'MIT'},
+    {'frames': 99}, {'stalls': 10**6}, {'client_version': 'latest'}, {'contributor': 'anon'},
     {'decode_ms': {'p50': 1, 'p90': 1, 'p99': 1}}, {'decode_ms': {'p50': 2, 'p90': 1, 'p99': 3, 'max': 4}},
     {'decode_ms': {'p50': 1, 'p90': 1, 'p99': 1, 'max': 10**6}}, {'decode_ms': {'p50': 0.0001, 'p90': 1, 'p99': 1, 'max': 1}},
     {'source_age_ms': {'p50': -10**7, 'p90': 1, 'p99': 1, 'max': 1}}, {'interarrival_ms': None},
@@ -58,38 +58,44 @@ def test_report_date_window():
             schema.validate_timing(r, today=today)
 
 
-def test_service_publishes_canonical_report(monkeypatch):
-    s3, db = S3(), DB()
+def test_service_keeps_canonical_report_for_its_owner(monkeypatch, online):
+    s3, db = online
     r = report()
     monkeypatch.setattr(service, 'dt', type('dt', (), {'datetime': type('d', (), {
         'now': staticmethod(lambda tz: dt.datetime(2026, 3, 12, tzinfo=tz))}), 'timezone': dt.timezone}))
-    published = json.loads(service.api(event(body={'timing': r}), s3, db)['body'])
+    stored = json.loads(service.api(event(body={'action': 'timing', 'report': r}), s3, db)['body'])
     body = schema.encode(r)
-    assert published == {'status': 'published', 'key': f'timing/20260311/{hashlib.sha256(body).hexdigest()}.json'}
-    assert s3.objects[published['key']] == body
+    assert stored == {'status': 'stored', 'key': f'timing/{OWNER}/20260311/{hashlib.sha256(body).hexdigest()}.json'}
+    assert s3.objects[stored['key']] == body
     # Same report again: same object, no error.
-    assert json.loads(service.api(event(body={'timing': r}), s3, db)['body']) == published
+    assert json.loads(service.api(event(body={'action': 'timing', 'report': r}), s3, db)['body']) == stored
     # e-shiten sessions report the same way (to a separate archive, so the listing below stays one report).
     e = report(source='eshiten_live')
-    assert json.loads(service.api(event(body={'timing': e}), S3(), db)['body'])['status'] == 'published'
+    assert json.loads(service.api(event(body={'action': 'timing', 'report': e}), S3(), db)['body'])['status'] == 'stored'
     assert {c['Key']['id']['S'].split(':')[0][:7] for c in db.calls} >= {'timing-', 'global-'}
-    entries = list(cli.timing_reports(s3, 'bucket'))
-    assert entries == [(published['key'], r)] and list(cli.timing_reports(s3, 'bucket', '20260311'))
+    entries = list(cli.timing_reports('https://api.test'))
+    assert entries == [(stored['key'], r)] and list(cli.timing_reports('https://api.test', '20260311'))
     with pytest.raises(ValueError):
-        list(cli.timing_reports(s3, 'bucket', '../x'))
-    archive = briskapi.Archive(s3=s3)
-    assert archive.timing()[0]['frames'] == 150
+        list(cli.timing_reports('https://api.test', '../x'))
+    monkeypatch.setattr(cli, 'settings', lambda path=None: {'api_url': 'https://api.test'})
+    assert briskapi.Archive().timing()[0]['frames'] == 150
+    # Another owner sees none of it; the owner can delete it.
+    other = event(body={'action': 'list', 'kind': 'timing', 'date': None, 'after': None}, secret=OTHER)
+    assert json.loads(service.api(other, s3, db)['body']) == {'items': [], 'next': None}
+    with pytest.raises(ValueError, match='Not your upload'):
+        service.api(event(body={'action': 'delete', 'prefix': stored['key']}, secret=OTHER), s3, db)
+    assert cli.delete('https://api.test', stored['key'])['status'] == 'deleted' and stored['key'] not in s3.objects
     bad = copy.deepcopy(r); bad['frames'] = 1
     monkeypatch.setattr(service, 'clients', lambda: (s3, db))
-    assert service.handler(event(body={'timing': bad}), None)['statusCode'] == 400
+    assert service.handler(event(body={'action': 'timing', 'report': bad}), None)['statusCode'] == 400
     stale = {**r, 'trading_date': '20250101'}
-    assert service.handler(event(body={'timing': stale}), None)['statusCode'] == 400
+    assert service.handler(event(body={'action': 'timing', 'report': stale}), None)['statusCode'] == 400
     db.reject = True
-    assert service.handler(event(body={'timing': report(contributor='other')}), None)['statusCode'] == 400
+    assert service.handler(event(body={'action': 'timing', 'report': r}), None)['statusCode'] == 400
 
 
-def test_contribute_timing_posts_report(monkeypatch):
+def test_upload_timing_posts_report(monkeypatch):
     calls = []
-    monkeypatch.setattr(cli, 'request_json', lambda url, data: calls.append((url, data)) or {'status': 'published'})
-    assert cli.contribute_timing({'x': 1}, 'https://api.test') == {'status': 'published'}
-    assert calls == [('https://api.test', {'timing': {'x': 1}})]
+    monkeypatch.setattr(cli, 'request_json', lambda url, data, secret: calls.append((url, data, secret)) or {'status': 'stored'})
+    assert cli.upload_timing({'x': 1}, 'https://api.test') == {'status': 'stored'}
+    assert calls == [('https://api.test', {'action': 'timing', 'report': {'x': 1}}, SECRET)]

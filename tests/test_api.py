@@ -10,6 +10,7 @@ import pytest
 import briskapi as brisk
 import briskapi.cli as cli
 import briskapi.schema as schema
+import warnings
 from briskapi import _archive, _live, _parquet, _recording
 
 TOYOTA = {'issue_id': 1, 'code': '7203', 'tick_type': 3, 'base_price10': 101000, 'limit_up10': 131000,
@@ -17,7 +18,7 @@ TOYOTA = {'issue_id': 1, 'code': '7203', 'tick_type': 3, 'base_price10': 101000,
 
 
 def quote(issue, code, frame, at, **fields):
-    return {**dict.fromkeys(schema.QUOTE_KEYS, 0), 'bid_levels': [], 'ask_levels': [], 'issue_id': issue, 'code': code,
+    return {**dict.fromkeys(schema.QUOTE_KEYS, 0), **{key: [] for key in schema.BOOK_KEYS}, 'issue_id': issue, 'code': code,
             'frame': frame, 'max_frame': frame, 'source_time_us': at, **fields}
 
 
@@ -26,6 +27,8 @@ def market():
     open_us = 9 * 3600 * 1_000_000
     sony = {**TOYOTA, 'issue_id': 0, 'code': '6758', 'name': 'Sony', 'base_price10': 120000}
     timing = dict(received_unix_ms=1632700800000, decode_ns=1000, replay_lateness_ms=None)
+    trade = lambda frame, at, price10, quantity, side: dict(issue_id=1, code='7203', frame=frame, time_us=at, price10=price10,  # noqa: E731
+                                                          quantity=quantity, side=side)
     return [
         dict(type='bootstrap', seq=0, source='historical_mock', trading_date='20210927', source_time_us=open_us - 45,
              input_transport={'kind': 'local_cache'}, source_timestamp_origin='brisk_decoder_unverified', exchange_delay_ms=None,
@@ -33,13 +36,18 @@ def market():
                  quote(0, '6758', 1, open_us - 50, indicative_price10=120500, market_buy_quantity=500, market_sell_quantity=900),
                  quote(1, '7203', 1, open_us - 45, indicative_price10=101500, indicative_volume=304700,
                        market_buy_quantity=201300, market_sell_quantity=105700, special_quote_time_us=open_us - 1,
-                       bid_levels=[[101500, 3000, 4], [101400, 100, 1]], ask_levels=[[101600, 200, 2]])]),
+                       bid_levels=[[101500, 3000, 4], [101400, 100, 1]], ask_levels=[[101600, 200, 2]],
+                       bid_closing_levels=[[101500, 500, 1]], bid_closing_total_quantity=500, bid_closing_total_orders=1,
+                       bid_total_quantity=3100, ask_total_quantity=200, quote_flag=2, quote_side=1,
+                       reference_price10=101500)], trades=[]),
         dict(type='quotes', seq=1, source_time_us=open_us + 10, **timing, quotes=[
-            quote(1, '7203', 2, open_us + 10, last_price10=101500, volume=304700, turnover10=309270500)]),
+            quote(1, '7203', 2, open_us + 10, last_price10=101500, volume=304700, turnover10=30927050000)],
+             trades=[trade(2, open_us + 5, 101500, 304700, 0)]),
         dict(type='quotes', seq=2, source_time_us=open_us + 20, **timing, quotes=[
-            quote(0, '6758', 2, open_us + 20, last_price10=120500)]),
+            quote(0, '6758', 2, open_us + 20, last_price10=120500)], trades=[]),
         dict(type='quotes', seq=3, source_time_us=open_us + 30, **timing, quotes=[
-            quote(1, '7203', 3, open_us + 30, last_price10=101600, volume=310000)]),
+            quote(1, '7203', 3, open_us + 30, last_price10=101600, volume=310000, turnover10=31465530000)],
+             trades=[trade(3, open_us + 25, 101600, 2000, 1), trade(3, open_us + 25, 101600, 3300, 1)]),
         dict(type='end', seq=4, source_time_us=open_us + 30, frames=4, quote_updates=3, replay_wall_ms=1.5),
     ]
 
@@ -58,7 +66,7 @@ def save(batches, directory, form):
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
     monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path / 'cache'))
-    monkeypatch.delenv('BRISK_CONTRIBUTE', raising=False)
+    monkeypatch.delenv('BRISK_UPLOAD', raising=False)
     monkeypatch.setattr(brisk, '_current', None)
 
 
@@ -116,9 +124,9 @@ def test_market(recording, tmp_path):
     summary = m.summary()
     assert summary['securities'] == 2 and summary['end'].microsecond == 30
     (recording.directory / 'manifest.json').write_text(json.dumps(
-        {'summary': {'last_source_time_us': 32_400_000_030, 'batches': 5}, 'contributor': 'alice', 'license': 'CC0-1.0'}))
+        {'summary': {'last_source_time_us': 32_400_000_030, 'batches': 5}}))
     summary = brisk.Market(brisk.Recording(recording.directory)).summary()
-    assert summary['contributor'] == 'alice' and summary['end'].microsecond == 30
+    assert summary['batches'] == 5 and summary['end'].microsecond == 30
 
 
 @pytest.mark.parametrize('form', ['parquet', 'jsonl'])
@@ -163,6 +171,31 @@ def test_summary_covers_empty_batches_and_caches_the_range(tmp_path, monkeypatch
     assert brisk.Market(rec).summary() == summary
 
 
+def test_trades_auctions_and_special_quotes(recording):
+    toyota = brisk.Ticker('7203')
+    trades = toyota.trades()
+    assert [(t['price'], t['quantity'], t['side']) for t in trades] == [(10150.0, 304700, None), (10160.0, 2000, 'buy'),
+                                                                       (10160.0, 3300, 'buy')]
+    assert trades[0]['time'] == dt.datetime(2021, 9, 27, 9, 0, 0, 5, tzinfo=brisk.JST) and trades[1]['frame'] == 3
+    assert len(toyota.trades(start='09:00:00.000010')) == 2 and toyota.trades(raw=True)[0]['price10'] == 101500
+    assert brisk.Ticker('6758').trades() == [] and len(brisk.Market().trades(end='09:00:00.000006')) == 1
+    pre_open = toyota.quote(at='08:59:59.99996')
+    assert pre_open['closing_bids'] == [{'price': 10150.0, 'quantity': 500, 'orders': 1}] and pre_open['closing_asks'] == []
+    assert pre_open['special_quote'] == {'side': 'sell', 'price': 10150.0, 'until': pre_open['special_quote_time']}
+    assert toyota.quote()['special_quote'] is None
+    closing = toyota.auction(at='08:59:59.99996', closing=True)
+    assert closing['bid_closing_total_quantity'] == 500 and 'closing_indicative_price' in closing and 'indicative_open_price' not in closing
+    assert toyota.auction(at='08:59:59.99996')['bid_total_quantity'] == 3100
+    assert brisk.Market().imbalances(at='08:59:59.99996', closing=True)[0]['market_order_imbalance'] == 0
+    special = brisk.Market().special_quotes(at='08:59:59.99996')
+    assert [(q['code'], q['side'], q['price']) for q in special] == [('7203', 'sell', 10150.0)]
+    assert brisk.Market().special_quotes() == []
+    frames = brisk.Market().frames()
+    assert [(f['type'], f['quote_count'], f['trade_count']) for f in frames] == [
+        ('bootstrap', 2, 0), ('quotes', 1, 1), ('quotes', 1, 0), ('quotes', 1, 2), ('end', 0, 0)]
+    assert frames[1]['received_unix_ms'] == 1632700800000 and frames[0]['time'].hour == 8
+
+
 @pytest.mark.parametrize('at,expected', [
     (None, None), (5, 5), ('9:00', 32_400_000_000), ('09:00:01.5', 32_401_500_000),
     (dt.time(9, 0, 0, 7), 32_400_000_007),
@@ -184,8 +217,8 @@ def test_default_recording_and_consent(recording):
     brisk._current = None
     with pytest.raises(brisk.BriskError, match='Nothing loaded'):
         brisk.Ticker('7203').info()
-    assert brisk.consent() is None
-    assert brisk.consent(accept=True, contributor='bob')['contributor'] == 'bob'
+    assert brisk.consent() == {'policy_version': cli.POLICY_VERSION, 'enabled': True, 'default': True}
+    assert brisk.consent(accept=True)['enabled'] is True
     assert brisk.consent(revoke=True)['enabled'] is False
     with pytest.raises(ValueError):
         brisk.consent(accept=True, revoke=True)
@@ -208,8 +241,8 @@ def test_parquet_recording_reads_back_the_decoder_batches(tmp_path):
         rec.open()
     toyota = brisk.Ticker('7203', rec).quote(at='08:59:59.99996')
     assert toyota['bids'] == [{'price': 10150.0, 'quantity': 3000, 'orders': 4}, {'price': 10140.0, 'quantity': 100, 'orders': 1}]
-    assert brisk.Ticker('7203', rec).quote()['turnover'] == 0 and brisk.Ticker('7203', rec).history()[0]['frame'] == 1
-    assert brisk.Ticker('7203', brisk.Recording(rec.directory)).history(raw=True)[1]['turnover10'] == 309270500
+    assert brisk.Ticker('7203', rec).quote()['turnover'] == 3146553000.0 and brisk.Ticker('7203', rec).history()[0]['frame'] == 1
+    assert brisk.Ticker('7203', brisk.Recording(rec.directory)).history(raw=True)[1]['turnover10'] == 30927050000
 
 
 def test_table_to_pandas():
@@ -217,25 +250,21 @@ def test_table_to_pandas():
     assert isinstance(brisk.Table([{'a': 1}]).to_pandas(), pd.DataFrame)
 
 
-class S3:
-    pass
-
-
 def test_archive(tmp_path, monkeypatch):
+    owner = brisk.Archive().owner
     m = {'summary': {'source': 'synthetic_test', 'trading_date': '20210927', 'codes': ['0000'], 'batches': 3,
-                     'quote_updates': 2}, 'bytes': 10, 'contributor': 'c', 'license': 'CC0-1.0', 'sha256': 'f' * 64}
-    monkeypatch.setattr(cli, 'manifests', lambda s3, bucket, date: [('archive/20210927/' + 'f' * 64, m),
-                                                                    ('archive/x', {**m, 'summary': {**m['summary'], 'source': 'historical_mock'}})])
+                     'quote_updates': 2}, 'bytes': 10, 'sha256': 'f' * 64}
+    monkeypatch.setattr(cli, 'manifests', lambda url, date: [(f'archive/{owner}/20210927/085959-090300-' + 'f' * 64, m),
+                                                             ('archive/x', {**m, 'summary': {**m['summary'], 'source': 'historical_mock'}})])
     pulls = []
 
-    def pull(s3, bucket, prefix, output):
+    def pull(url, prefix, output):
         pulls.append(output)
         _parquet.write(schema.synthetic_recording(), output)
 
     monkeypatch.setattr(cli, 'pull', pull)
-    monkeypatch.setattr(cli, 'client', lambda config: S3())
     archive = brisk.Archive()
-    assert isinstance(archive.s3, S3) and archive.config['region'] == 'ap-northeast-1'
+    assert archive.config['region'] == 'ap-northeast-1' and len(archive.owner) == 32
     rows = brisk.recordings(source='synthetic_test')
     assert len(rows) == 1 and rows[0]['securities'] == 1 and len(archive.recordings()) == 2
     prefix = rows[0]['prefix']
@@ -248,8 +277,12 @@ def test_archive(tmp_path, monkeypatch):
     assert pulls[-1] == tmp_path / 'explicit'
     with pytest.raises(ValueError, match='prefix'):
         archive.pull('../../etc')
-    monkeypatch.setattr(cli, 'contribute', lambda directory, url, timeout: {'status': 'published', 'url': url})
-    assert archive.contribute(tmp_path)['url'] == archive.config['api_url']
+    monkeypatch.setattr(cli, 'upload', lambda directory, url, timeout: {'status': 'stored', 'url': url})
+    assert archive.upload(tmp_path)['url'] == archive.config['api_url']
+    monkeypatch.setattr(cli, 'delete', lambda url, prefix: {'status': 'deleted', 'prefix': prefix})
+    assert archive.delete(prefix)['prefix'] == prefix
+    monkeypatch.setattr(cli, 'timing_reports', lambda url, date: [('timing/x', {'frames': 1})])
+    assert archive.timing() == [{'key': 'timing/x', 'frames': 1}]
 
 
 @pytest.fixture
@@ -283,38 +316,46 @@ def recorder(monkeypatch):
 
     uploads = []
     monkeypatch.setattr(cli, 'record_events', record_events)
-    monkeypatch.setattr(cli, 'contribute', lambda directory, url, verify: uploads.append(verify) or {'status': 'published'})
+    monkeypatch.setattr(cli, 'upload', lambda directory, url, verify: uploads.append(verify) or {'status': 'stored'})
     return calls, uploads
 
 
-def test_record_follows_consent(recorder, tmp_path, monkeypatch):
+def test_record_uploads_by_default(recorder, tmp_path, monkeypatch):
     calls, uploads = recorder
-    with pytest.warns(UserWarning, match='undecided'):
-        rec = brisk.record(tmp_path / 'local', web=True, codes=['7203'])
-    assert calls == ['7203'] and rec.format == 'parquet' and brisk.current() is rec and not uploads
-    with pytest.raises(brisk.BriskError, match='already exists'):
-        brisk.record(tmp_path / 'local', web=True, contribute=False)
-    with pytest.raises(brisk.BriskError, match='consent'):
-        brisk.record(tmp_path / 'x', web=True, contribute=True)
-    brisk.consent(accept=True, contributor='carol')
-    rec = brisk.record(tmp_path / 'shared', web=True)
-    assert rec.contribution == {'status': 'published'} and uploads == [False]
-    assert rec.manifest['contributor'] == 'carol' and rec.format == 'parquet'
-    rec = brisk.record(tmp_path / 'kept', web=True, contribute=False)
-    assert rec.contribution is None and rec.manifest and len(uploads) == 1
-    monkeypatch.setenv('BRISK_CONTRIBUTE', '0')
-    assert brisk.record(tmp_path / 'env', web=True).contribution is None
-    monkeypatch.delenv('BRISK_CONTRIBUTE')
+    # Nothing decided: the recording uploads, and the process is told once.
+    with pytest.warns(UserWarning, match='by default') as told:
+        rec = brisk.record(tmp_path / 'first', web=True, codes=['7203'])
+    assert 'recovery code' in str(told[0].message) and 'upload=False' in str(told[0].message)
+    assert calls == ['7203'] and rec.format == 'parquet' and brisk.current() is rec
+    assert rec.uploaded == {'status': 'stored'} and uploads == [False]
+    assert set(rec.manifest) == {'schema', 'sha256', 'bytes', 'summary'}
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        assert brisk.record(tmp_path / 'second', web=True).uploaded == {'status': 'stored'} and len(uploads) == 2
+    # The opt-outs package as usual but keep it local.
+    rec = brisk.record(tmp_path / 'kept', web=True, upload=False)
+    assert rec.uploaded is None and rec.manifest and len(uploads) == 2
+    monkeypatch.setenv('BRISK_UPLOAD', '0')
+    assert brisk.record(tmp_path / 'env', web=True).uploaded is None
+    monkeypatch.delenv('BRISK_UPLOAD')
     assert brisk.record(tmp_path / 'partial', web=True, limit_frames=5).manifest is None
     with pytest.raises(brisk.BriskError, match='complete'):
-        brisk.record(tmp_path / 'p2', web=True, limit_frames=5, contribute=True)
+        brisk.record(tmp_path / 'p2', web=True, limit_frames=5, upload=True)
+    # Revoked: local only, and upload=True is refused.
+    brisk.consent(revoke=True)
+    rec = brisk.record(tmp_path / 'local', web=True)
+    assert rec.uploaded is None and rec.manifest is None and len(uploads) == 2
+    with pytest.raises(brisk.BriskError, match='already exists'):
+        brisk.record(tmp_path / 'local', web=True, upload=False)
+    with pytest.raises(brisk.BriskError, match='uploads on'):
+        brisk.record(tmp_path / 'x', web=True, upload=True)
 
 
 def test_module_entry_point(monkeypatch, capsys):
     monkeypatch.setattr(sys, 'argv', ['brisk', 'consent'])
     sys.modules.pop('briskapi.__main__', None)
     import briskapi.__main__  # noqa: F401
-    assert json.loads(capsys.readouterr().out)['enabled'] is None
+    assert json.loads(capsys.readouterr().out) == {'policy_version': cli.POLICY_VERSION, 'enabled': True, 'default': True}
 
 
 @pytest.fixture
@@ -337,7 +378,7 @@ def gated_decoder(tmp_path, monkeypatch):
 
 def test_live_feed(gated_decoder, tmp_path):
     gate = gated_decoder()
-    with brisk.connect(cache=tmp_path, codes=['7203', '6758'], contribute=False, history=True) as feed:
+    with brisk.connect(cache=tmp_path, codes=['7203', '6758'], upload=False, history=True) as feed:
         assert feed.status == 'running' and brisk.current() is feed and 'running' in repr(feed)
         assert feed.codes == ['6758', '7203'] and feed.source == 'historical_mock' and feed.trading_date == '20210927'
         assert brisk.Market().summary()['start'] == brisk.Market().summary()['end']
@@ -353,7 +394,7 @@ def test_live_feed(gated_decoder, tmp_path):
         gate.touch()
         assert [q['frame'] for q in toyota] == [2, 3]
         feed.wait()
-        assert feed.status == 'completed' and feed.seq == 4 and feed.contribution is None
+        assert feed.status == 'completed' and feed.seq == 4 and feed.uploaded is None
         assert brisk.Market().summary()['end'].microsecond == 30
         assert sony == [1, 2] and len(raw_all) == 2 and 'last_price10' in raw_all[0]
         assert [q['frame'] for q in feed.updates('7203')] == [1, 2, 3]
@@ -361,6 +402,10 @@ def test_live_feed(gated_decoder, tmp_path):
         assert [q['last_price'] for q in feed.snapshot()] == [12050.0, 10160.0]
         assert feed.snapshot(raw=True)[1]['last_price10'] == 101600
         assert [q['frame'] for q in feed.quotes('6758')] == [2]  # finished feed: state, then end
+        assert [t['quantity'] for t in feed.trades('7203')] == [304700, 2000, 3300] and len(feed.trades()) == 3
+        assert brisk.Ticker('7203').trades(start='09:00:00.00002')[0]['side'] == 'buy'
+        with pytest.raises(brisk.BriskError, match='no frames'):
+            brisk.Market().frames()
         late = []
         feed.on_quote(late.append)
         assert len(late) == 2
@@ -372,12 +417,14 @@ def test_live_feed(gated_decoder, tmp_path):
 
 def test_feed_failures(gated_decoder, tmp_path):
     gate = gated_decoder(exit_code=3)
-    feed = brisk.connect(cache=tmp_path, contribute=False)
+    feed = brisk.connect(cache=tmp_path, upload=False)
     updates = feed.quotes()
     with pytest.raises(TimeoutError):
         list(feed.quotes(timeout=0.05))[2:]
     with pytest.raises(brisk.BriskError, match='history'):
         list(feed.updates('7203'))
+    with pytest.raises(brisk.BriskError, match='history'):
+        feed.trades()
     gate.touch()
     with pytest.raises(brisk.BriskError, match='exited with 3'):
         list(updates)
@@ -386,7 +433,7 @@ def test_feed_failures(gated_decoder, tmp_path):
     gate.unlink()
 
     gated_decoder(market()[:-1])
-    feed = brisk.connect(cache=tmp_path, contribute=False)
+    feed = brisk.connect(cache=tmp_path, upload=False)
     gate.touch()
     with pytest.raises(brisk.BriskError, match='before replay completion'):
         feed.wait()
@@ -394,14 +441,14 @@ def test_feed_failures(gated_decoder, tmp_path):
 
     broken = market(); broken[2]['seq'] = 7
     gated_decoder(broken)
-    feed = brisk.connect(cache=tmp_path, contribute=False)
+    feed = brisk.connect(cache=tmp_path, upload=False)
     gate.touch()
     with pytest.raises(brisk.BriskError, match='sequence'):
         feed.wait()
     gate.unlink()
 
     gated_decoder()
-    feed = brisk.connect(cache=tmp_path, contribute=False)
+    feed = brisk.connect(cache=tmp_path, upload=False)
     feed.on_quote(lambda q: 1 / 0 if q['frame'] > 1 else None)
     gate.touch()
     with pytest.raises(brisk.BriskError, match='division'):
@@ -409,14 +456,14 @@ def test_feed_failures(gated_decoder, tmp_path):
     gate.unlink()
 
     gated_decoder()
-    feed = brisk.connect(cache=tmp_path, contribute=False)
+    feed = brisk.connect(cache=tmp_path, upload=False)
     feed.close()
     assert feed.status == 'closed' and feed.codes  # state read before closing stays readable
 
     gated_decoder(hold=True)
     with pytest.raises(TimeoutError):
-        brisk.connect(cache=tmp_path, contribute=False, timeout=0.2)
-    feed = brisk.Feed(cache=tmp_path, contribute=False)
+        brisk.connect(cache=tmp_path, upload=False, timeout=0.2)
+    feed = brisk.Feed(cache=tmp_path, upload=False)
     with pytest.raises(TimeoutError, match='still running'):
         feed.wait(timeout=0.05)
     feed.close()
@@ -424,32 +471,36 @@ def test_feed_failures(gated_decoder, tmp_path):
         feed.ready()
 
 
-def test_feed_contributes_complete_sessions(gated_decoder, tmp_path, monkeypatch):
+def test_feed_uploads_complete_sessions(gated_decoder, tmp_path, monkeypatch):
     gate = gated_decoder()
     gate.touch()
     packaged = []
 
-    def package(events, output, contributor, license):
-        packaged.append((events.read_text().splitlines(), contributor))
+    def package(events, output):
+        packaged.append(events.read_text().splitlines())
 
     monkeypatch.setattr(cli, 'package', package)
-    monkeypatch.setattr(cli, 'contribute', lambda directory, url, verify, out: {'status': 'published', 'verify': verify})
-    with pytest.raises(brisk.BriskError, match='consent'):
-        brisk.Feed(cache=tmp_path, contribute=True)
-    with pytest.warns(UserWarning, match='undecided'):
-        assert brisk.connect(cache=tmp_path).wait().contribution is None
-    brisk.consent(accept=True, contributor='dana')
-    feed = brisk.connect(cache=tmp_path).wait()
-    assert feed.contribution == {'status': 'published', 'verify': False}
-    assert packaged == [([json.dumps(b) for b in market()], 'dana')]
-    assert brisk.connect(cache=tmp_path, limit_frames=2).wait().contribution is None
+    monkeypatch.setattr(cli, 'upload', lambda directory, url, verify, out: {'status': 'stored', 'verify': verify})
+    with pytest.warns(UserWarning, match='by default'):
+        feed = brisk.connect(cache=tmp_path).wait()
+    assert feed.uploaded == {'status': 'stored', 'verify': False}
+    assert packaged == [[json.dumps(b) for b in market()]]
+    assert brisk.connect(cache=tmp_path, limit_frames=2).wait().uploaded is None
+    assert brisk.connect(cache=tmp_path, upload=False).wait().uploaded is None and len(packaged) == 1
+    brisk.consent(revoke=True)
+    with pytest.raises(brisk.BriskError, match='uploads on'):
+        brisk.Feed(cache=tmp_path, upload=True)
+    assert brisk.connect(cache=tmp_path).wait().uploaded is None and len(packaged) == 1
+    brisk.consent(accept=True)
     monkeypatch.setattr(cli, 'package', lambda *a: 1 / 0)
-    with pytest.warns(UserWarning, match='contribution failed'):
-        assert brisk.connect(cache=tmp_path).wait().contribution['status'] == 'failed'
+    with pytest.warns(UserWarning, match='upload failed'):
+        assert brisk.connect(cache=tmp_path).wait().uploaded['status'] == 'failed'
 
 
 def test_cli_live(gated_decoder, tmp_path, monkeypatch, capsys):
     gated_decoder().touch()
+    monkeypatch.setattr(cli, 'package', lambda *a: None)
+    monkeypatch.setattr(cli, 'upload', lambda *a, **k: {'status': 'stored'})
     cli.main(['live', '--cache', str(tmp_path), '--codes', '7203'])
     out = capsys.readouterr()
     lines = [json.loads(line) for line in out.out.splitlines()]
@@ -459,12 +510,11 @@ def test_cli_live(gated_decoder, tmp_path, monkeypatch, capsys):
         assert q['frame'] >= frames.get(q['code'], 0) and q['time'].startswith('2021-09-27T')
         frames[q['code']] = q['frame']
     assert frames == {'7203': 3, '6758': 2}
-    assert 'undecided' in out.err
+    # Without a terminal to ask on, the session uploads by default and says so.
+    assert 'on by default' in out.err and '"uploaded": {"status": "stored"}' in out.err
     monkeypatch.setattr(cli, 'interactive', lambda: True)
     monkeypatch.setattr(cli.sys, 'stdin', io.StringIO('\n'))
-    monkeypatch.setattr(cli, 'package', lambda *a: None)
-    monkeypatch.setattr(cli, 'contribute', lambda *a, **k: {'status': 'published'})
     cli.main(['live', '--cache', str(tmp_path), '--raw'])
     out = capsys.readouterr()
-    assert 'public and permanent' in out.err and '"contribution": {"status": "published"}' in out.err
+    assert 'private archive' in out.err and '"uploaded": {"status": "stored"}' in out.err
     assert all('last_price10' in json.loads(line) for line in out.out.splitlines())

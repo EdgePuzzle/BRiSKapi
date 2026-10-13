@@ -1,4 +1,4 @@
-"""Timing-only statistics shared by default for SBI BRiSK sessions."""
+"""Timing-only statistics uploaded (with upload consent) to your private archive for broker BRiSK sessions."""
 from __future__ import annotations
 
 import datetime as dt
@@ -58,14 +58,14 @@ class TimingStats:
         # Age of the feed's own clock at local receipt; only as accurate as both clocks.
         self.age.append(received - (self._midnight_ms + batch['source_time_us'] / 1000))
 
-    def report(self, contributor, license):
-        """The shareable report, or None when the session was too short to say anything."""
+    def report(self):
+        """The report to upload, or None when the session was too short to say anything."""
         if self.trading_date is None or self.frames < MIN_TIMING_FRAMES:
             return None
         minute = lambda ms: dt.datetime.fromtimestamp(ms / 1000, JST).strftime('%H:%M')
         report = dict(schema=TIMING_SCHEMA, source=self.source, trading_date=self.trading_date,
                       first_minute=minute(self.first), last_minute=minute(self.last), frames=self.frames,
-                      stalls=self.stalls, client_version=_client_version(), contributor=contributor, license=license,
+                      stalls=self.stalls, client_version=_client_version(),
                       decode_ms=_distribution(self.decode, *TIMING_BOUNDS['decode_ms']),
                       source_age_ms=_distribution(self.age, *TIMING_BOUNDS['source_age_ms']),
                       interarrival_ms=_distribution(self.gaps or [0], *TIMING_BOUNDS['interarrival_ms']))

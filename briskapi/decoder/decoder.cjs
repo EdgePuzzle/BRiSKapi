@@ -11,6 +11,14 @@ const { verifyAsset, loadWebAssets } = require('./web.cjs');
 const BUFFER = 4 * 1024 * 1024;
 const LEVELS = 10;   // price levels kept on each side of a quote's book
 const WINDOW = 32;   // book rows read per call while walking away from the best price
+const HISTORY = 50000;   // trades per history batch (those a snapshot restores)
+// The order groups of a _getItaRows row (204 bytes): quantity (u64) and order count (u64) word offsets.
+const GROUPS = {
+  bid: { name: 'bid', buy: true, closing: false, quantity: 5, orders: 9 },
+  bid_closing: { name: 'bid_closing', buy: true, closing: true, quantity: 16, orders: 20 },
+  ask: { name: 'ask', buy: false, closing: false, quantity: 28, orders: 32 },
+  ask_closing: { name: 'ask_closing', buy: false, closing: true, quantity: 39, orders: 43 },
+};
 
 function u64(words, i) {
   const value = words[i] + 4294967296 * words[i + 1];
@@ -68,15 +76,29 @@ function* frames(data) {
   }
 }
 
-// QR history is needed by the vendor's rollback/last-price callbacks. Retain it
-// for the finite recording; do not replace it with the trade-only upstream hook.
+// The decoder's QR records are its trades (歩み値), one per execution, kept by the host per stock object
+// (`p` is the issue's _getStockPointer): type (1 buyer-initiated, 2 seller-initiated, 0 most opening
+// auction prints), time in microseconds after JST midnight, price, quantity in lots of `lot` shares and
+// the issue's frame number. The vendor's rollback/last-price callbacks need the whole history; new
+// trades also wait in `pending` until Decoder.trades() takes them. A trade withdrawn (popped) after it
+// was taken is counted, and ends the session there.
 class QuoteHistory {
-  constructor() { this.qrs = new Map(); }
+  constructor() { this.qrs = new Map(); this.pending = []; this.withdrawn = 0; }
   initialize(p) { this.qrs.set(p, []); }
-  deinitialize(p) { this.qrs.delete(p); }
+  deinitialize(p) { this.qrs.delete(p); this.pending = this.pending.filter(trade => trade.p !== p); }
   clone(dst, src) { this.qrs.set(dst, this.qrs.get(src).slice()); }
-  emplace(p, type, timestamp, price10, qty, lot, frame) { this.qrs.get(p).push({ price10, frame }); }
-  popBack(p) { this.qrs.get(p).pop(); }
+  emplace(p, type, timestamp, price10, qty, lot, frame) {
+    const trade = { p, type, timestamp, price10, qty, lot, frame };
+    this.qrs.get(p).push(trade);
+    this.pending.push(trade);
+  }
+  popBack(p) {
+    const trade = this.qrs.get(p).pop();
+    const at = this.pending.lastIndexOf(trade);
+    if (at >= 0) this.pending.splice(at, 1);
+    else if (trade) this.withdrawn++;
+  }
+  take() { const trades = this.pending; this.pending = []; return trades; }
   size(p) { return this.qrs.get(p).length; }
   lastPrice10(p) { return this.qrs.get(p).at(-1)?.price10 || 0; }
 }
@@ -211,7 +233,7 @@ function checkMasterFile(master, data) {
 }
 
 class Decoder {
-  // options.protocolVersion: 16000 for the Next demo (default), 18000 for SBI BRiSK.
+  // options.protocolVersion: 16000 for the Next demo (default), 18000 for the brokers' BRiSK (SBI, e-shiten).
   // options.callbacks: { send(Buffer), heartbeat(ns BigInt), frameNumbers(Array), basePrice(issueIndex),
   //   authError(), marketFinished() }, the vendor client's six WASM callbacks.
   // options.boot: { exceptional_sq, base_prices } from the app boot response, applied in the
@@ -236,15 +258,18 @@ class Decoder {
       }).then(wasm => resolve({ wasm }));
     });
     options.check?.(wasm);
-    return new Decoder(wasm, assets, { ...options, stderr });
+    return new Decoder(wasm, assets, { ...options, stderr, qrm: context.qrm });
   }
 
   // options.schedule: the boot's schedule_info. Used only by decoders that take one (the 2026
   //   builds export _createSchedule; the 2021 demo's doesn't); null there is an error.
   constructor(w, assets, { protocolVersion = manifest.protocol_version, callbacks = {}, boot = {}, checkMaster, schedule,
-    stderr = { invalidIssueCode: 0 } } = {}) {
+    stderr = { invalidIssueCode: 0 }, qrm = new QuoteHistory() } = {}) {
     this.w = w;
     this.stderr = stderr;
+    this.qrm = qrm;
+    this.stocks = new Map();   // stock object (QR container) -> issue
+    this.restored = [];        // QR records a snapshot restored
     this.layoutShift = stockViewShift(protocolVersion);
     this.layout = masterLayout(protocolVersion);
     this.sqIssue = SQ_ISSUE[protocolVersion];
@@ -399,6 +424,9 @@ class Decoder {
       size += length; count++; offset += length;
     }
     if (size) flush();
+    // Trades a snapshot restores (a live session's could be the whole day so far) predate the stream;
+    // its quotes already count them. They are kept apart, for history().
+    this.restored.push(...this.qrm.take());
   }
 
   // Bars of OHLC history ahead of the quote fields in a stock view. SBI's build
@@ -492,6 +520,37 @@ class Decoder {
     return ids;
   }
 
+  // The trades recorded since the last call, in the decoder's order: those of `ids` (a Set), or all.
+  trades(ids) {
+    if (this.qrm.withdrawn) throw new Error(`The decoder withdrew ${this.qrm.withdrawn} trade(s) already recorded`);
+    return this.issueTrades(this.qrm.take(), ids);
+  }
+
+  // The trades the snapshot restored, by issue (each issue's in the decoder's order), in batches of
+  // `size`; taken once.
+  history(ids, size = HISTORY) {
+    const trades = this.issueTrades(this.restored, ids).sort((a, b) => a.issue_id - b.issue_id);
+    this.restored = [];
+    return Array.from({ length: Math.ceil(trades.length / size) }, (_, k) => trades.slice(k * size, (k + 1) * size));
+  }
+
+  issueTrades(records, ids) {
+    const trades = [];
+    for (const t of records) {
+      // Stock objects are replaced when a snapshot loads, so the map is rebuilt when one is new.
+      if (!this.stocks.has(t.p)) this.stocks = new Map(this.master.map(m => [this.w._getStockPointer(this.id, m.issue_id), m.issue_id]));
+      const issue_id = this.stocks.get(t.p);
+      if (issue_id === undefined) throw new Error('A trade for an unknown stock object');
+      if (!Number.isSafeInteger(t.timestamp) || !(t.qty > 0) || !(t.lot > 0)) {
+        throw new Error(`Trade not recognised: ${this.master[issue_id].code} at frame ${t.frame}`);
+      }
+      if (ids && !ids.has(issue_id)) continue;
+      trades.push({ issue_id, code: this.master[issue_id].code, frame: t.frame, time_us: t.timestamp, price10: t.price10,
+        quantity: t.qty * t.lot, side: t.type });
+    }
+    return trades;
+  }
+
   // Quotes for `ids`. An issue whose quote traps the decoder (its state for that issue is inconsistent)
   // is skipped and listed, and not read again until its frame number moves: read again at the same
   // frame, the decoder returns stale derived fields instead of trapping.
@@ -536,30 +595,44 @@ class Decoder {
       if (!(quote.issue_status >= 0 && quote.issue_status <= 7)) throw new Error(`Issue status unrecognised: ${m.code}`);
     }
     // _getItaRows(id, issue, first row index, rows, price rows, market row, OVER, UNDER, light) writes
-    // 204-byte rows; one price row is asked for here only to get the market row, whose buy and sell
-    // groups (quantity at +20 and +112) and closing groups (+64, +156) are the market orders. It always
-    // returns 1; a window off the board throws. light = 0 keeps the closing groups.
+    // 204-byte rows; one price row is asked for here to get the market row, whose buy and sell
+    // groups (quantity at +20 and +112) and closing groups (+64, +156) are the market orders, and
+    // OVER and UNDER, which with the price row sum the whole board. It always returns 1; a window off
+    // the board throws. light = 0 keeps the closing groups.
     const price = quote.indicative_price10 || quote.bid_price10 || quote.ask_price10 || m.base_price10;
     const index = this.w._fitItaViewRowPrice10(this.id, issue_id, price, 1);
     this.w._getItaRows(this.id, issue_id, index, 1, this.buf + 612, this.buf, this.buf + 204, this.buf + 408, 0);
-    const row = new Uint32Array(this.w.HEAPU8.buffer, this.buf, 51);
+    const row = new Uint32Array(this.w.HEAPU8.buffer, this.buf, 204);
     quote.market_buy_quantity = u64(row, 5);
     quote.market_sell_quantity = u64(row, 28);
     quote.closing_market_buy_quantity = u64(row, 16);
     quote.closing_market_sell_quantity = u64(row, 39);
-    Object.assign(quote, this.book(issue_id, m, quote));
+    // Limit orders on the whole board, each group: OVER (words 51 on) + the price row (153) + UNDER (102).
+    const total = word => u64(row, 51 + word) + u64(row, 153 + word) + u64(row, 102 + word);
+    const totals = {};
+    for (const [name, group] of Object.entries(GROUPS)) {
+      totals[`${name}_total_quantity`] = total(group.quantity);
+      totals[`${name}_total_orders`] = total(group.orders);
+    }
+    Object.assign(quote, this.book(issue_id, m, quote, totals), totals);
     return quote;
   }
 
   // The quantity and orders at the quote's bid and ask prices, and the book's best LEVELS prices that
   // hold orders on each side, best first, as [price10, quantity, orders]. Row indices step one tick
   // between the issue's limits (_getTickPrice10ToIndex takes the tick type, not the issue).
-  book(issue_id, m, quote) {
+  // The closing-condition (引け条件付) limit orders make a book of their own, read the same way, where
+  // the board totals show any.
+  book(issue_id, m, quote, totals) {
     const index = price => this.w._getTickPrice10ToIndex(this.id, m.tick_type, price);
     const low = index(m.limit_down10), high = index(m.limit_up10);
     const inside = price => price >= m.limit_down10 && price <= m.limit_up10;
-    const bid_levels = this.levels(issue_id, low, high, true, inside(quote.bid_price10) ? index(quote.bid_price10) : high);
-    const ask_levels = this.levels(issue_id, low, high, false, inside(quote.ask_price10) ? index(quote.ask_price10) : low);
+    const bidHint = inside(quote.bid_price10) ? index(quote.bid_price10) : high;
+    const askHint = inside(quote.ask_price10) ? index(quote.ask_price10) : low;
+    const bid_levels = this.levels(issue_id, low, high, GROUPS.bid, bidHint);
+    const ask_levels = this.levels(issue_id, low, high, GROUPS.ask, askHint);
+    const bid_closing_levels = totals.bid_closing_total_quantity ? this.levels(issue_id, low, high, GROUPS.bid_closing, bidHint) : [];
+    const ask_closing_levels = totals.ask_closing_total_quantity ? this.levels(issue_id, low, high, GROUPS.ask_closing, askHint) : [];
     const at = (levels, price, buy) => {
       const level = levels.find(([p]) => p === price);
       if (level) return level.slice(1);
@@ -567,11 +640,11 @@ class Decoder {
       const passed = levels.length < LEVELS || (buy ? price >= levels.at(-1)[0] : price <= levels.at(-1)[0]);
       if (!price || !inside(price) || passed) return [0, 0];
       const [row] = this.rows(issue_id, index(price), 1).rows;
-      return buy ? [row[1], row[2]] : [row[3], row[4]];
+      return buy ? row.bid : row.ask;
     };
     const [bid_quantity, bid_orders] = at(bid_levels, quote.bid_price10, true);
     const [ask_quantity, ask_orders] = at(ask_levels, quote.ask_price10, false);
-    return { bid_quantity, bid_orders, ask_quantity, ask_orders, bid_levels, ask_levels };
+    return { bid_quantity, bid_orders, ask_quantity, ask_orders, bid_levels, ask_levels, bid_closing_levels, ask_closing_levels };
   }
 
   // One side's best LEVELS prices with orders. `hint` is where the best price should be (the quote's).
@@ -579,24 +652,25 @@ class Decoder {
   // lies beyond. If the first window shows orders at better prices than the hint (OVER for buys, UNDER
   // for sells, as in a crossed auction book), every row beyond the hint is read first, in one call:
   // each read sums the whole board for OVER and UNDER, so one long read beats a search of short ones.
-  levels(issue_id, low, high, buy, hint) {
-    const quantity = r => (buy ? r[1] : r[3]), orders = r => (buy ? r[2] : r[4]);
-    const better = w => (buy ? w.over.buy : w.under.sell), worse = w => (buy ? w.under.buy : w.over.sell);
+  levels(issue_id, low, high, group, hint) {
+    const { buy, closing, name } = group;
+    const quantity = r => r[name][0], orders = r => r[name][1];
+    const better = w => (buy ? w.over[name] : w.under[name]), worse = w => (buy ? w.under[name] : w.over[name]);
     const window = from => {
       const to = buy ? Math.max(low, from - WINDOW + 1) : Math.min(high, from + WINDOW - 1);
       const first = Math.min(from, to);
-      return { first, last: Math.max(from, to), ...this.rows(issue_id, first, Math.abs(from - to) + 1) };
+      return { first, last: Math.max(from, to), ...this.rows(issue_id, first, Math.abs(from - to) + 1, closing) };
     };
     const levels = [];
     const take = rows => {
       for (const r of buy ? rows.slice().reverse() : rows) {
-        if (quantity(r) && levels.length < LEVELS) levels.push([r[0], quantity(r), orders(r)]);
+        if (quantity(r) && levels.length < LEVELS) levels.push([r.price10, quantity(r), orders(r)]);
       }
     };
     let w = window(hint);
     if (better(w)) {
       const first = buy ? hint + 1 : low, last = buy ? high : hint - 1;
-      take(this.rows(issue_id, first, last - first + 1).rows);
+      take(this.rows(issue_id, first, last - first + 1, closing).rows);
     }
     for (;;) {
       take(w.rows);
@@ -605,18 +679,20 @@ class Decoder {
     }
   }
 
-  // Price rows first..first + count - 1 of an issue's book as [price10, buy quantity, buy orders, sell
-  // quantity, sell orders], and the quantities on each side above (OVER) and below (UNDER) them.
-  // light = 1: the closing groups, traded volume and cumulative columns aren't needed here.
-  rows(issue_id, first, count) {
+  // Price rows first..first + count - 1 of an issue's book, each { price10, bid: [quantity, orders],
+  // ask: [...] } (and bid_closing, ask_closing with `closing`), and each group's quantity on the rows
+  // above (OVER) and below (UNDER) them. Without `closing`, light = 1: the closing groups, traded
+  // volume and cumulative columns aren't computed.
+  rows(issue_id, first, count, closing = false) {
     const buf = this.buf;
     // Boards run to a few thousand rows (3,521 at most in the demo's market); the buffer holds 20,000.
     if (612 + 204 * count > BUFFER) throw new Error(`A book read of ${count} rows exceeds the decoder buffer`);
-    this.w._getItaRows(this.id, issue_id, first, count, buf + 612, buf, buf + 204, buf + 408, 1);
+    this.w._getItaRows(this.id, issue_id, first, count, buf + 612, buf, buf + 204, buf + 408, closing ? 0 : 1);
     const u = new Uint32Array(this.w.HEAPU8.buffer, buf, 153 + 51 * count);
-    const row = b => [u[b], u64(u, b + 5), u64(u, b + 9), u64(u, b + 28), u64(u, b + 32)];
-    return { rows: Array.from({ length: count }, (_, k) => row(153 + 51 * k)),
-      over: { buy: u64(u, 56), sell: u64(u, 79) }, under: { buy: u64(u, 107), sell: u64(u, 130) } };
+    const groups = Object.values(GROUPS).filter(g => closing || !g.closing);
+    const row = b => Object.fromEntries([['price10', u[b]], ...groups.map(g => [g.name, [u64(u, b + g.quantity), u64(u, b + g.orders)]])]);
+    const sums = b => Object.fromEntries(groups.map(g => [g.name, u64(u, b + g.quantity)]));
+    return { rows: Array.from({ length: count }, (_, k) => row(153 + 51 * k)), over: sums(51), under: sums(102) };
   }
 }
 
@@ -643,7 +719,9 @@ async function replay({ cache, web = false, codes = [], speed = 1, limitFrames =
   await emit({ type: 'bootstrap', seq: seq++, source: 'historical_mock', trading_date: decoder.date, input_transport,
     source_timestamp_origin: 'brisk_decoder_unverified', exchange_delay_ms: null,
     source_time_us: decoder.time(), market_issue_count: decoder.master.length, master,
-    quotes: bootstrap.quotes, ...skippedIssues(bootstrap.skipped) });
+    quotes: bootstrap.quotes, trades: decoder.trades(ids), ...skippedIssues(bootstrap.skipped) });
+  // Trades the snapshot restored follow the bootstrap, at its clock.
+  for (const trades of decoder.history(ids)) await emit({ type: 'history', seq: seq++, source_time_us: decoder.time(), trades });
   const start = performance.now();
   let frameCount = 1, updateCount = 0;
   for (const frame of iter) {
@@ -660,11 +738,12 @@ async function replay({ cache, web = false, codes = [], speed = 1, limitFrames =
     const began = process.hrtime.bigint();
     decoder.feed(frame.data);
     const { quotes, skipped } = decoder.quotes(decoder.changed().filter(id => ids.has(id)));
+    const trades = decoder.trades(ids);
     const decode_ns = Number(process.hrtime.bigint() - began);
     // Include empty batches: sequence continuity and feed health differ from a
     // quiet security's last update. No fixed polling interval or dropped deltas.
     await emit({ type: 'quotes', seq: seq++, source_time_us: decoder.time(),
-      received_unix_ms, decode_ns, replay_lateness_ms, quotes, ...skippedIssues(skipped) });
+      received_unix_ms, decode_ns, replay_lateness_ms, quotes, trades, ...skippedIssues(skipped) });
     updateCount += quotes.length; frameCount++;
   }
   const summary = { type: 'end', seq, source_time_us: decoder.time(), frames: frameCount,

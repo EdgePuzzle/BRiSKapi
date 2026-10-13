@@ -128,6 +128,11 @@ impl State {
                 self.replay_running = true;
             }
             "quotes" | "end" => ensure!(self.replay_running, "No initialized running replay"),
+            // Trades a snapshot restored: no quotes, at the bootstrap's clock.
+            "history" => ensure!(
+                self.replay_running && batch.quotes.is_empty(),
+                "Invalid history batch"
+            ),
             other => bail!("Unknown batch type: {other}"),
         }
         // Validate the whole batch before mutating the latest state. A per-issue
@@ -271,5 +276,14 @@ mod tests {
             assert_eq!(s.quotes[&0].frame, 9);
         }
         assert!(State::default().apply(batch(0, "quotes", 1)).is_err());
+        // History batches carry restored trades only.
+        let mut s = State::default();
+        s.apply(batch(0, "bootstrap", 9)).unwrap();
+        assert!(s.apply(batch(1, "history", 9)).is_err());
+        let mut s = State::default();
+        s.apply(batch(0, "bootstrap", 9)).unwrap();
+        let mut history = batch(1, "history", 9);
+        history.quotes.clear();
+        s.apply(history).unwrap();
     }
 }

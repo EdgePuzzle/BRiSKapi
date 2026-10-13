@@ -1,8 +1,12 @@
 import copy
+import datetime as dt
 import hashlib
 import hmac
 import io
 import json
+import re
+import shutil
+import urllib.error
 from pathlib import Path
 import uuid
 import zipfile
@@ -42,10 +46,16 @@ def canon(bs):
 def reference(bs):
     return {bs[0]['source']: schema.build_reference(stream(bs))}
 
+SECRET = 'brisk-id-v1-' + 'a' * 26
+OTHER = 'brisk-id-v1-' + 'b' * 26
+OWNER = schema.owner(SECRET)
+API = 'https://api.test'
+
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
-    monkeypatch.delenv('BRISK_CONTRIBUTE', raising=False)
+    monkeypatch.setenv('BRISK_IDENTITY', SECRET)
+    monkeypatch.delenv('BRISK_UPLOAD', raising=False)
     monkeypatch.setattr(service, 'QUOTA_KEY', b'test-key')
     monkeypatch.setattr(cli, 'interactive', lambda: False)
 
@@ -54,14 +64,23 @@ def packaged(tmp_path):
     events = tmp_path / 'source.jsonl'
     events.write_bytes(raw(batches()))
     directory = tmp_path / 'package'
-    manifest = cli.package(events, directory, 'test', 'CC0-1.0')
+    manifest = cli.package(events, directory)
     return directory, manifest
 
+class Pages:
+    def __init__(self, pages): self.pages = pages
+    def paginate(self, **kw): return self.pages(**kw)
+
 class S3:
+    """A versioned bucket: staging uploads are addressed by version; deleting a current object without
+    a version leaves a delete marker and keeps the object as a noncurrent version ('kept', in `retained`
+    with the time of its deletion), which copy_object can restore."""
     def __init__(self):
         self.objects = {}
         self.versions = {}
+        self.retained = {}
         self.deleted = []
+        self.now = dt.datetime.now(dt.timezone.utc)
     def put_object(self, Bucket, Key, Body, **kw):
         if kw.get('IfNoneMatch') and Key in self.objects:
             raise ClientError({'Error': {'Code': 'PreconditionFailed'}}, 'PutObject')
@@ -69,22 +88,40 @@ class S3:
         return {}
     def get_object(self, Bucket, Key, VersionId=None):
         try:
-            data = self.versions[(Key, VersionId)] if VersionId else self.objects[Key]
+            data = (self.retained[Key][0] if VersionId == 'kept' else self.versions[(Key, VersionId)]) if VersionId \
+                else self.objects[Key]
         except KeyError:
             raise ClientError({'Error': {'Code': 'NoSuchVersion' if VersionId else 'NoSuchKey'}}, 'GetObject')
         return {'Body': io.BytesIO(data), 'ContentLength': len(data)}
-    def delete_object(self, Bucket, Key, VersionId):
+    def delete_object(self, Bucket, Key, VersionId=None):
         self.deleted.append((Key, VersionId))
-        if self.versions.pop((Key, VersionId), None) is None:
+        if VersionId is None:
+            if Key in self.objects:
+                self.retained[Key] = (self.objects.pop(Key), self.now)
+        elif self.versions.pop((Key, VersionId), None) is None:
             raise ClientError({'Error': {'Code': 'NoSuchVersion'}}, 'DeleteObject')
     def generate_presigned_post(self, **kw):
         self.post_args = kw
         return {'url': 'https://example.test', 'fields': {'key': kw['Key']}}
+    def generate_presigned_url(self, method, Params, ExpiresIn):
+        assert method == 'get_object' and ExpiresIn == service.URL_SECONDS
+        return 'https://s3.test/' + Params['Key']
+    def copy_object(self, Bucket, Key, CopySource):
+        source = CopySource['Key']
+        self.objects[Key] = self.retained[source][0] if CopySource.get('VersionId') == 'kept' else self.objects[source]
     def get_paginator(self, name):
-        return self
-    def paginate(self, Bucket, Prefix):
-        keys = [{'Key': k} for k in self.objects if k.startswith(Prefix)]
-        return [{'Contents': keys[:1]}, {'Contents': keys[1:]}]
+        def objects(Bucket, Prefix, StartAfter=''):
+            keys = sorted(k for k in self.objects if k.startswith(Prefix) and k > StartAfter)
+            return [{'Contents': [{'Key': k} for k in keys[:1]]}, {'Contents': [{'Key': k} for k in keys[1:]]}]
+        def versions(Bucket, Prefix):
+            older = dt.timedelta(seconds=1)
+            return [{'Versions': [{'Key': k, 'VersionId': 'current', 'IsLatest': True, 'LastModified': self.now}
+                                  for k in sorted(self.objects) if k.startswith(Prefix)]
+                                 + [{'Key': k, 'VersionId': 'kept', 'IsLatest': False, 'LastModified': when - older}
+                                    for k, (_, when) in sorted(self.retained.items()) if k.startswith(Prefix)],
+                     'DeleteMarkers': [{'Key': k, 'IsLatest': k not in self.objects, 'LastModified': when}
+                                       for k, (_, when) in sorted(self.retained.items()) if k.startswith(Prefix)]}]
+        return Pages({'list_objects_v2': objects, 'list_object_versions': versions}[name])
 
 class DB:
     def __init__(self):
@@ -101,9 +138,20 @@ class DB:
             raise ClientError({'Error': {'Code': 'ConditionalCheckFailedException'}}, 'UpdateItem')
         return {}
 
-def event(method='POST', body=None, query=''):
+def event(method='POST', body=None, query='', secret=SECRET):
     return {'requestContext': {'http': {'method': method, 'sourceIp': '127.0.0.1'}},
+            'headers': {'authorization': f'Bearer {secret}'} if secret else {},
             'body': json.dumps(body), 'rawQueryString': query}
+
+def call(s3, db, body, secret=SECRET):
+    """One API request; returns (status code, body)."""
+    try:
+        response = service.api(event(body=body, secret=secret), s3, db)
+    except service.NotFound:
+        return 404, {'error': 'Not found'}
+    except service.INVALID as e:
+        return 400, {'error': str(e)}
+    return response['statusCode'], json.loads(response['body'])
 
 def upload(s3, manifest, directory, ticket, version='v1', data=None):
     key = f'incoming/{ticket}/recording.zip'
@@ -113,38 +161,252 @@ def upload(s3, manifest, directory, ticket, version='v1', data=None):
 def jsonl(directory):
     return b''.join(Recording(directory).lines())
 
-def ticket_for(s3, db, m):
-    return json.loads(service.api(event(body=m), s3, db)['body'])['ticket']
+def ticket_for(s3, db, m, secret=SECRET, part=None):
+    return call(s3, db, {'action': 'upload', 'manifest': m, 'part': part}, secret)[1]['ticket']
 
-def test_automatic_publish_public_pull(packaged, tmp_path):
-    directory, m = packaged; s3 = S3(); db = DB()
+def part_of(directory):
+    """A package's timing table alone, as a demo replay sends it, and its part description."""
+    timing = _parquet.pack(directory, (_parquet.BATCHES,))
+    return timing, {'sha256': _parquet.digest(timing), 'bytes': len(timing)}
+
+def kept(s3, prefix):
+    """What the bucket holds below a recording's prefix, by path below it."""
+    return {k.removeprefix(prefix + '/'): v for k, v in s3.objects.items() if k.startswith(prefix + '/')}
+
+@pytest.fixture
+def online(monkeypatch):
+    """The client against the service in this process: API requests and the download URLs it signs."""
+    s3, db = S3(), DB()
+    def request_json(url, data=None, secret=None):
+        if data is None:
+            return json.loads(service.api(event('GET', query=url.split('?', 1)[1]), s3, db)['body'])
+        code, body = call(s3, db, data, secret)
+        if code == 409:
+            raise urllib.error.HTTPError(url, code, body['error'], {}, None)
+        if code >= 400:
+            raise ValueError(body['error'])
+        return body
+    monkeypatch.setattr(cli, 'request_json', request_json)
+    monkeypatch.setattr(cli.urllib.request, 'urlopen', lambda url, timeout: io.BytesIO(s3.objects[url.removeprefix('https://s3.test/')]))
+    return s3, db
+
+def stored(s3, db, directory, m):
+    ticket = ticket_for(s3, db, m)
+    service.ingest(upload(s3, m, directory, ticket), s3, db)
+    return service.json_get(s3, f'incoming/{ticket}/status.json')
+
+def test_upload_store_and_pull_your_own(packaged, tmp_path, online):
+    directory, m = packaged; s3, db = online
     ticket = ticket_for(s3, db, m)
     assert s3.post_args['Conditions'][-1] == ['content-length-range', m['bytes'], m['bytes']]
+    assert json.loads(s3.objects[f'incoming/{ticket}/owner.json']) == {'owner': OWNER}
     rec = upload(s3, m, directory, ticket)
     service.ingest(rec, s3, db)
     status = json.loads(service.api(event('GET', query='ticket=' + ticket), s3, db)['body'])
-    assert status['status'] == 'published'
-    # The validated staging upload is gone; the verified tables are public in the service's zip.
+    assert status['status'] == 'stored' and status['prefix'] == f'archive/{OWNER}/{schema.recording_name(m)}'
+    assert status['prefix'].startswith(f'archive/{OWNER}/20210927/000000-000000-')  # the source clocks, HHMMSS
+    # The validated staging upload is gone. The replay's market tables become the archive's one copy;
+    # the recording keeps its own timing table and where its other tables are.
     assert not s3.versions and s3.deleted == [(f'incoming/{ticket}/recording.zip', 'v1')]
-    published = s3.objects[status['prefix'] + '/recording.zip']
-    assert hashlib.sha256(published).hexdigest() == status['sha256'] == m['sha256']
-    entries = list(cli.manifests(s3, 'bucket'))
-    assert len(entries) == 1 and entries[0][1]['summary'] == m['summary']
-    result = cli.pull(s3, 'bucket', status['prefix'], tmp_path / 'download')
-    assert result['sha256'] == status['sha256'] and _parquet.pack(tmp_path / 'download') == published
+    shared = service.reference_prefix('synthetic_test')
+    assert sorted(kept(s3, status['prefix'])) == [_parquet.BATCHES, 'files.json', 'manifest.json']
+    assert json.loads(s3.objects[status['prefix'] + '/files.json']) == {
+        name: f"{shared if name in _parquet.MARKET else status['prefix']}/{name}" for name in _parquet.FILES}
+    assert sorted(kept(s3, shared)) == sorted([*_parquet.MARKET, 'complete.json'])
+    assert status['sha256'] == m['sha256']
+    entries = list(cli.manifests(API))
+    assert len(entries) == 1 and entries[0] == (status['prefix'], m)
+    result = cli.pull(API, status['prefix'], tmp_path / 'download')
+    assert result['sha256'] == status['sha256'] and _parquet.pack(tmp_path / 'download') == _parquet.pack(directory)
     assert sorted(p.name for p in (tmp_path / 'download').rglob('*') if p.is_file()) == \
-        ['BriskBatch.parquet', 'equity.parquet', 'manifest.json', 'order_book_depths.parquet']
+        ['BriskBatch.parquet', 'equity.parquet', 'manifest.json', 'order_book_depths.parquet', 'trades.parquet']
     assert jsonl(tmp_path / 'download') == canon(batches())
     # At-least-once delivery, and extra POSTs with the same upload form, cannot
-    # change a publication or leave data in staging.
+    # change a stored recording or leave data in staging.
     service.ingest(rec, s3, db)
     service.ingest(upload(s3, m, directory, ticket, 'v2', b'bad'), s3, db)
     assert not s3.versions
-    assert json.loads(service.api(event('GET', query='ticket=' + ticket), s3, db)['body'])['status'] == 'published'
+    assert json.loads(service.api(event('GET', query='ticket=' + ticket), s3, db)['body'])['status'] == 'stored'
     with pytest.raises(ValueError, match='already exists'):
-        cli.pull(s3, 'bucket', status['prefix'], tmp_path / 'download')
+        cli.pull(API, status['prefix'], tmp_path / 'download')
 
-def test_zip_container_never_published(packaged):
+def test_a_replays_market_data_is_stored_once(packaged, tmp_path, online, monkeypatch):
+    directory, m = packaged; s3, db = online
+    # Until the archive holds the market data, a timing-only upload is turned away (409: send it all).
+    assert call(s3, db, {'action': 'upload', 'manifest': m, 'part': part_of(directory)[1]})[0] == 409
+    stored(s3, db, directory, m)
+    # Another replay, with its own timing, by another owner: only its timing table is sent and kept.
+    replay = batches(); replay[1]['decode_ns'] = 2345
+    events = tmp_path / 'replay.jsonl'; events.write_bytes(raw(replay))
+    other = tmp_path / 'replay'
+    m2 = cli.package(events, other)
+    timing, part = part_of(other)
+    code, issued = call(s3, db, {'action': 'upload', 'manifest': m2, 'part': part}, OTHER)
+    assert code == 201 and s3.post_args['Conditions'][-1] == ['content-length-range', len(timing), len(timing)]
+    service.ingest(upload(s3, m2, other, issued['ticket'], data=timing), s3, db)
+    status = service.json_get(s3, f"incoming/{issued['ticket']}/status.json")
+    assert status['status'] == 'stored' and status['sha256'] == m2['sha256'] != m['sha256']
+    assert sorted(kept(s3, status['prefix'])) == [_parquet.BATCHES, 'files.json', 'manifest.json']
+    assert sum(key.endswith(_parquet.DEPTHS) for key in s3.objects) == 1
+    monkeypatch.setenv('BRISK_IDENTITY', OTHER)
+    cli.pull(API, status['prefix'], tmp_path / 'download')
+    assert jsonl(tmp_path / 'download') == jsonl(other) and _parquet.pack(tmp_path / 'download') == _parquet.pack(other)
+    # A timing table that is not this replay's (or a part for a source without one) is refused.
+    short = tmp_path / 'short'
+    rewrite_copy = lambda table: table.slice(0, 2)  # noqa: E731
+    shutil.copytree(other, short); rewrite(short, _parquet.BATCHES, rewrite_copy)
+    timing, part = part_of(short)
+    ticket = ticket_for(s3, db, m2, part=part)
+    service.ingest(upload(s3, m2, short, ticket, data=timing), s3, db)
+    assert service.json_get(s3, f'incoming/{ticket}/status.json')['status'] == 'rejected'
+    broker = {**m2, 'summary': {**m2['summary'], 'source': 'sbi_live'}}
+    assert call(s3, db, {'action': 'upload', 'manifest': broker, 'part': part}) == \
+        (400, {'error': 'Only a demo or synthetic replay can send its timing alone'})
+
+def test_owners_see_only_their_own(packaged, tmp_path, online, monkeypatch):
+    directory, m = packaged; s3, db = online
+    status = stored(s3, db, directory, m)
+    prefix = status['prefix']
+    for action in ({'action': 'download', 'prefix': prefix}, {'action': 'delete', 'prefix': prefix}):
+        assert call(s3, db, action, OTHER) == (400, {'error': 'Not your upload'})
+        assert call(s3, db, action, None)[0] == 400 and call(s3, db, action, 'brisk-id-v1-short')[0] == 400
+    listing = {'action': 'list', 'kind': 'recordings', 'date': None, 'after': None}
+    assert call(s3, db, listing, OTHER) == (200, {'items': [], 'next': None})
+    monkeypatch.setenv('BRISK_IDENTITY', OTHER)
+    assert list(cli.manifests(API)) == []
+    with pytest.raises(ValueError, match='Not your upload'):
+        cli.pull(API, prefix, tmp_path / 'other')
+    monkeypatch.setenv('BRISK_IDENTITY', SECRET)
+    # The same recording uploaded by another owner is kept apart.
+    ticket = ticket_for(s3, db, m, OTHER)
+    service.ingest(upload(s3, m, directory, ticket), s3, db)
+    assert service.json_get(s3, f'incoming/{ticket}/status.json')['prefix'] == prefix.replace(OWNER, schema.owner(OTHER))
+    assert [p for p, _ in cli.manifests(API)] == [prefix]
+    # Deleting removes it from the owner's archive, the manifest (the listing's marker) first; the
+    # operator's copy stays as a noncurrent version, and the replay's shared market tables stay.
+    assert cli.delete(API, prefix) == {'status': 'deleted', 'removed': 3,
+                                       'note': 'Removed from your archive; `brisk restore` brings it back within 30 days.'}
+    own = [prefix + '/manifest.json', f'{prefix}/{_parquet.BATCHES}', prefix + '/files.json']
+    assert s3.deleted[-3:] == [(key, None) for key in own] and set(s3.retained) == set(own)
+    assert f"{service.reference_prefix('synthetic_test')}/{_parquet.DEPTHS}" in s3.objects
+    assert list(cli.manifests(API)) == [] and call(s3, db, {'action': 'delete', 'prefix': prefix})[0] == 404
+    assert call(s3, db, {'action': 'download', 'prefix': prefix})[0] == 404
+    assert call(s3, db, {'action': 'download', 'prefix': '../x'})[0] == 400
+    assert call(s3, db, {'action': 'list', 'kind': 'everything', 'date': None, 'after': None})[0] == 400
+    assert call(s3, db, {'action': 'list', 'kind': 'recordings', 'date': 'today', 'after': None})[0] == 400
+    assert call(s3, db, {'action': 'list', 'kind': 'recordings', 'date': None, 'after': 'archive/x'})[0] == 400
+
+def test_prune_frees_disk_once_the_archive_holds_it(packaged, tmp_path, online, harness, capsys):
+    directory, m = packaged; s3, db = online
+    (directory / 'notes.txt').write_text('mine')
+    with pytest.raises(ValueError, match='does not hold'):
+        cli.prune(API, directory)
+    status = stored(s3, db, directory, m)
+    trades = directory / _parquet.TRADES
+    original = trades.read_bytes()
+    trades.write_bytes(original + b'x')
+    with pytest.raises(ValueError, match='differs from its manifest'):
+        cli.prune(API, directory)
+    trades.write_bytes(original)
+    size = sum((directory / name).stat().st_size for name in (*_parquet.FILES, 'manifest.json'))
+    harness('prune', str(directory))
+    assert json.loads(capsys.readouterr().out) == {'pruned': str(directory), 'bytes': size, 'prefix': status['prefix']}
+    # Only the package goes; anything else in the folder stays, and pull brings the recording back.
+    assert [p.name for p in directory.rglob('*')] == ['notes.txt']
+    with pytest.raises(ValueError, match='no manifest'):
+        cli.prune(API, directory)
+    cli.pull(API, status['prefix'], tmp_path / 'back')
+    assert (tmp_path / 'back' / _parquet.TRADES).read_bytes() == original
+    # A replay whose market tables differ from the archive's copy byte for byte (another writer), not in content,
+    # is found by its own timing table.
+    local = tmp_path / 'local'
+    shutil.copytree(tmp_path / 'back', local)
+    rewrite(local, _parquet.EQUITY, lambda table: table, use_dictionary=False)
+    blob = _parquet.pack(local)
+    assert _parquet.digest(blob) != status['sha256']
+    (local / 'manifest.json').write_text(json.dumps({**json.loads((local / 'manifest.json').read_text()),
+                                                     'sha256': _parquet.digest(blob), 'bytes': len(blob)}))
+    assert cli.prune(API, local)['prefix'] == status['prefix'] and not local.exists()
+    shutil.copytree(tmp_path / 'back', local)
+    # Another replay's timing (the same widths, so the same summary) is not this one.
+    rewrite(local, _parquet.BATCHES, lambda table: replace(table, 'decode_ns', pa.array(
+        [None if v is None else v + 1 for v in table.column('decode_ns').to_pylist()], table.schema.field('decode_ns').type)))
+    blob = _parquet.pack(local)
+    (local / 'manifest.json').write_text(json.dumps({**json.loads((local / 'manifest.json').read_text()),
+                                                     'sha256': _parquet.digest(blob), 'bytes': len(blob)}))
+    with pytest.raises(ValueError, match='does not hold'):
+        cli.prune(API, local)
+
+def test_samples_copy_only_the_legacy_wire_capture():
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location('deploy', root / 'infra/deploy.py')
+    deploy = importlib.util.module_from_spec(spec); spec.loader.exec_module(deploy)
+    wire = json.dumps({'schema': 'brisk-sbi-wire-jsonl-v1'}).encode()
+    class Bucket(S3):
+        def head_object(self, Bucket, Key):
+            if Key not in self.objects:
+                raise ClientError({'Error': {'Code': '404'}}, 'HeadObject')
+        def copy_object(self, Bucket, Key, CopySource):
+            self.objects[Key] = self.objects[CopySource['Key']]
+    bucket = Bucket()
+    bucket.objects.update({'archive/20260311/aaa/manifest.json': wire, 'archive/20260311/aaa/events.jsonl.gz': b'gz',
+                           'archive/20210927/bbb/manifest.json': json.dumps({'schema': schema.SCHEMA}).encode(),
+                           f'archive/{OWNER}/20260311/ccc/manifest.json': wire})
+    assert deploy.publish_samples(bucket, 'b') == ['samples/20260311/aaa/events.jsonl.gz', 'samples/20260311/aaa/manifest.json']
+    assert bucket.objects['samples/20260311/aaa/events.jsonl.gz'] == b'gz'
+    assert 'archive/20260311/aaa/events.jsonl.gz' in bucket.objects
+    assert deploy.publish_samples(bucket, 'b') == []
+
+def test_deleted_uploads_can_be_restored_for_30_days(packaged, tmp_path, online, monkeypatch, harness, capsys):
+    directory, m = packaged; s3, db = online
+    prefix = stored(s3, db, directory, m)['prefix']
+    from test_timing import report
+    timing = report()
+    key = f"timing/{OWNER}/{timing['trading_date']}/{hashlib.sha256(schema.encode(timing)).hexdigest()}.json"
+    service.json_put(s3, key, timing)
+    assert list(cli.deleted(API)) == []
+    cli.delete(API, prefix); cli.delete(API, key)
+    assert list(cli.manifests(API)) == [] and list(cli.timing_reports(API)) == []
+    gone = list(cli.deleted(API))
+    assert [item.get('prefix') or item['key'] for item in gone] == [prefix, key]
+    assert gone[0]['manifest'] == m and gone[1]['report'] == timing
+    until = dt.datetime.fromisoformat(gone[0]['restore_until']) - dt.datetime.fromisoformat(gone[0]['deleted_at'])
+    assert until == dt.timedelta(days=30)
+    # Only its owner can restore it; the manifest comes back last.
+    assert call(s3, db, {'action': 'restore', 'prefix': prefix}, OTHER) == (400, {'error': 'Not your upload'})
+    from briskapi import Archive
+    monkeypatch.setattr(cli, 'settings', lambda path=None: {'api_url': API})
+    assert len(Archive().deleted()) == 2
+    assert Archive().restore(prefix) == {'status': 'restored', 'restored': 3}
+    harness('restore', key)
+    assert json.loads(capsys.readouterr().out) == {'status': 'restored', 'restored': 1}
+    assert [p for p, _ in cli.manifests(API)] == [prefix] and [k for k, _ in cli.timing_reports(API)] == [key]
+    cli.pull(API, prefix, tmp_path / 'back')
+    assert _parquet.pack(tmp_path / 'back') == _parquet.pack(directory)
+    harness('list', '--deleted')
+    assert capsys.readouterr().out == ''
+    # After 30 days it can't come back (and the bucket's lifecycle drops it a day later).
+    cli.delete(API, prefix)
+    s3.retained = {k: (data, when - dt.timedelta(days=30, minutes=1)) for k, (data, when) in s3.retained.items()}
+    assert list(cli.deleted(API)) == []
+    assert call(s3, db, {'action': 'restore', 'prefix': prefix}) == (404, {'error': 'Not found'})
+
+def test_listing_pages(packaged, online, monkeypatch):
+    directory, m = packaged; s3, db = online
+    monkeypatch.setitem(service.PAGE, 'recordings', 2)
+    prefixes = []
+    for k in range(5):
+        sha = f'{k}' * 64
+        prefix = f"archive/{OWNER}/{schema.recording_name({**m, 'sha256': sha})}"
+        service.json_put(s3, prefix + '/manifest.json', {**m, 'sha256': sha})
+        prefixes.append(prefix)
+    first = call(s3, db, {'action': 'list', 'kind': 'recordings', 'date': None, 'after': None})[1]
+    assert [i['prefix'] for i in first['items']] == prefixes[:2] and first['next'] == prefixes[1] + '/manifest.json'
+    assert [p for p, _ in cli.manifests(API)] == prefixes == [p for p, _ in cli.manifests(API, '20210927')]
+    assert list(cli.manifests(API, '20210928')) == []
+
+def test_zip_container_never_stored(packaged):
     directory, m = packaged; s3 = S3(); db = DB()
     payload = b'ARBITRARY-PAYLOAD'
     stuffed = io.BytesIO()
@@ -157,9 +419,8 @@ def test_zip_container_never_published(packaged):
     ticket = ticket_for(s3, db, m)
     service.ingest(upload(s3, m, directory, ticket, data=data), s3, db)
     status = service.json_get(s3, f'incoming/{ticket}/status.json')
-    assert status['status'] == 'published' and status['sha256'] != m['sha256']
-    published = s3.objects[status['prefix'] + '/recording.zip']
-    assert payload not in published and published == _parquet.pack(directory)
+    assert status['status'] == 'stored' and status['sha256'] == _parquet.digest(_parquet.pack(directory)) != m['sha256']
+    assert not [key for key, value in s3.objects.items() if payload in value]
 
 
 def rewrite(directory, name, change, **options):
@@ -186,6 +447,10 @@ def replace(table, name, values):
     (_parquet.DEPTHS, lambda t: t.take([1, 0]), 'sorted'),
     (_parquet.BATCHES, lambda t: t.replace_schema_metadata({**t.schema.metadata, b'payload': b'1'}), 'schema'),
     (_parquet.DEPTHS, lambda t: replace(t, 'seq', pa.array([1] * len(t), pa.uint64())), 'sorted'),
+    (_parquet.TRADES, lambda t: replace(t, 'trade_id', pa.array(['payload'] * len(t))), 'Non-canonical'),
+    (_parquet.TRADES, lambda t: replace(t, 'aggressor_side', pa.array(['SELL'] * len(t)).dictionary_encode().cast(
+        pa.dictionary(pa.int8(), pa.string()))), 'Non-canonical'),
+    (_parquet.TRADES, lambda t: replace(t, 'ts_init', pa.array([10**18] * len(t), _parquet.TIME)), 'Non-canonical'),
 ])
 def test_uploaded_tables_must_be_canonical(packaged, name, change, error):
     directory, m = packaged
@@ -273,7 +538,7 @@ def paced(n=4):
     # A longer synthetic shape for clock checks, with its own reference.
     b = batches('historical_mock')
     quote = b[1]['quotes'][0]
-    middle = [dict(b[1], seq=i, source_time_us=110 + i, received_unix_ms=1632700800000 + i,
+    middle = [dict(b[1], seq=i, source_time_us=110 + i, received_unix_ms=1632700800000 + i, trades=b[1]['trades'] if i == 1 else [],
                    quotes=[dict(quote, frame=1 + i, max_frame=1 + i, source_time_us=110 + i)]) for i in range(1, n)]
     end = dict(b[2], seq=n, source_time_us=110 + n - 1, frames=n, quote_updates=n - 1)
     return [b[0], *middle, end]
@@ -357,8 +622,8 @@ def test_canonical_lines_and_transport():
     with pytest.raises(ValueError):
         list(schema.canonical_lines(io.BytesIO(b'{"quotes":[1]}\n')))
 
-@pytest.mark.parametrize('change', [{'sha256': 'bad'}, {'sha256': 1}, {'bytes': 0}, {'contributor': 'email@test'}, {'license': 'MIT'},
-    {'redistribution_permitted': False}, {'summary': {'source': 'live'}}, {'schema': 'raw'}, {'extra': 1}])
+@pytest.mark.parametrize('change', [{'sha256': 'bad'}, {'sha256': 1}, {'bytes': 0}, {'contributor': 'anon'},
+    {'summary': {'source': 'live'}}, {'schema': 'raw'}, {'extra': 1}])
 def test_manifest_permissions(packaged, change):
     directory, m = packaged; m.update(change)
     with pytest.raises(ValueError):
@@ -377,9 +642,7 @@ def test_hash_summary_and_corrupt_package(packaged, tmp_path):
     with pytest.raises(ValueError, match='Summary'):
         _parquet.inspect_package(directory, bad)
     with pytest.raises(ValueError, match='Summary'):
-        _parquet.repack(_parquet.pack(directory), {**bad, 'sha256': m['sha256']})
-    with pytest.raises(ValueError, match='mismatch'):
-        _parquet.repack(_parquet.pack(directory), {**m, 'bytes': 1})
+        _parquet.verify_directory(directory, bad)
     (directory / _parquet.EQUITY).write_bytes(b'not parquet')
     blob = _parquet.pack(directory); m.update(bytes=len(blob), sha256=_parquet.digest(blob))
     with pytest.raises(ValueError):
@@ -419,28 +682,36 @@ def test_rejection_stays_private(packaged, corrupt, tmp_path):
     service.ingest(upload(s3, m, directory, ticket, data=corrupt), s3, db)
     status = service.json_get(s3, f'incoming/{ticket}/status.json')
     assert status['status'] == 'rejected'
-    assert not list(cli.manifests(s3, 'bucket')) and not s3.versions
+    assert not [k for k in s3.objects if k.startswith('archive/')] and not s3.versions
 
 def test_api_errors_and_handler(packaged, monkeypatch):
     directory, m = packaged; s3 = S3(); db = DB()
     monkeypatch.setattr(service, 'clients', lambda: (s3, db))
+    ticket = {'action': 'upload', 'manifest': m, 'part': None}
     assert service.handler(event('DELETE'), None)['statusCode'] == 400
     assert service.handler(event('GET', query='ticket=' + str(uuid.uuid4())), None)['statusCode'] == 404
     assert service.handler(event('GET', query='ticket=wrong'), None)['statusCode'] == 400
     assert service.handler(event(body={'secret': 'bad'}), None)['statusCode'] == 400
+    assert service.handler(event(body={**ticket, 'extra': 1}), None)['statusCode'] == 400
+    assert service.handler(event(body=ticket, secret=None), None)['statusCode'] == 400
+    assert service.handler(event(body=ticket, secret='brisk-id-v1-' + 'g' * 64), None)['statusCode'] == 400
     nested = event(); nested['body'] = '[' * 200000
     assert service.handler(nested, None)['statusCode'] == 400
     db.reject = True
-    assert service.handler(event(body=m), None)['statusCode'] == 400
+    assert service.handler(event(body=ticket), None)['statusCode'] == 400
     db.reject = False
     monkeypatch.setattr(service, 'QUOTA_KEY', b'')
-    assert service.handler(event(body=m), None)['statusCode'] == 400
+    assert service.handler(event(body=ticket), None)['statusCode'] == 400
     monkeypatch.setattr(service, 'QUOTA_KEY', b'test-key')
-    request = event(body=m)
+    request = event(body=ticket)
     import base64
     request['isBase64Encoded'] = True; request['body'] = base64.b64encode(request['body'].encode()).decode()
-    ticket = json.loads(service.handler(request, None)['body'])['ticket']
-    assert service.handler({'Records': [upload(s3, m, directory, ticket)]}, None) == {'ok': True}
+    issued = json.loads(service.handler(request, None)['body'])['ticket']
+    assert service.handler({'Records': [upload(s3, m, directory, issued)]}, None) == {'ok': True}
+    missing = f'archive/{OWNER}/20210927/000000-000000-' + 'c' * 64
+    assert service.handler(event(body={'action': 'download', 'prefix': missing}), None)['statusCode'] == 404
+    for part in ({'sha256': 'x', 'bytes': 1}, {'sha256': 'a' * 64, 'bytes': 0}, {'sha256': 'a' * 64}, 'all'):
+        assert service.handler(event(body={**ticket, 'part': part}), None)['statusCode'] == 400
 
 def test_quota_key_is_keyed_hash(packaged):
     directory, m = packaged; s3 = S3(); db = DB()
@@ -448,6 +719,7 @@ def test_quota_key_is_keyed_hash(packaged):
     key = db.calls[0]['Key']['id']['S']
     assert key.split(':')[0] == 'ip-' + hmac.new(b'test-key', b'127.0.0.1', hashlib.sha256).hexdigest()
     assert '127.0.0.1' not in json.dumps(db.calls) and hashlib.sha256(b'127.0.0.1').hexdigest() not in key
+    assert db.calls[1]['Key']['id']['S'].startswith(f'owner-{OWNER}:') and SECRET not in json.dumps(db.calls)
 
 @pytest.mark.parametrize('error', ['AccessDenied', 'InternalError'])
 def test_cloud_errors_retry(error):
@@ -465,24 +737,26 @@ def test_cloud_errors_retry(error):
     with pytest.raises(ClientError):
         service.discard(Fail(), 'x', 'v1')
 
-def test_pull_tampered_atomic(packaged, tmp_path):
-    directory, m = packaged; s3 = S3()
-    prefix = f"archive/20210927/{m['sha256']}"
+def test_pull_tampered_atomic(packaged, tmp_path, online):
+    directory, m = packaged; s3, db = online
+    prefix = f"archive/{OWNER}/{schema.recording_name(m)}"
     service.json_put(s3, prefix + '/manifest.json', m)
-    s3.objects[prefix + '/recording.zip'] = b'bad'
+    service.json_put(s3, prefix + '/files.json', {name: f'{prefix}/{name}' for name in _parquet.FILES})
+    for name in _parquet.FILES:
+        s3.objects[f'{prefix}/{name}'] = b'bad'
     with pytest.raises(ValueError, match='mismatch'):
-        cli.pull(s3, 'bucket', prefix, tmp_path / 'bad')
+        cli.pull(API, prefix, tmp_path / 'bad')
     assert not (tmp_path / 'bad').exists()
     with pytest.raises(ValueError):
-        list(cli.manifests(s3, 'bucket', '../'))
+        list(cli.manifests(API, '../'))
     with pytest.raises(ValueError):
-        cli.pull(s3, 'bucket', 'incoming/secret', tmp_path / 'bad')
+        cli.pull(API, 'incoming/secret', tmp_path / 'bad')
 
 
-@pytest.mark.parametrize('invalid', ['schema', 'source', 'sample', 'legacy_probe', 'json', 'oversize', 'identity', 'types'])
-def test_listing_skips_invalid_entries_and_keeps_valid_ones(packaged, invalid, monkeypatch, capsys):
+@pytest.mark.parametrize('invalid', ['schema', 'source', 'sample', 'legacy_probe', 'identity', 'types'])
+def test_listing_skips_invalid_entries_and_keeps_valid_ones(packaged, invalid, monkeypatch, capsys, online):
     _, m = packaged
-    s3 = S3()
+    s3, db = online
     bad = copy.deepcopy(m)
     bad['sha256'] = 'a' * 64
     if invalid == 'schema':
@@ -498,20 +772,14 @@ def test_listing_skips_invalid_entries_and_keeps_valid_ones(packaged, invalid, m
         bad['sha256'] = 'b' * 64
     elif invalid == 'types':
         bad['summary']['source'] = []
-    bad_prefix = 'archive/20210927/' + 'a' * 64
-    data = json.dumps(bad).encode()
-    if invalid == 'json':
-        data = b'{'
-    elif invalid == 'oversize':
-        data += b' ' * 65537
-    s3.objects[bad_prefix + '/manifest.json'] = data
-    prefix = f"archive/20210927/{m['sha256']}"
+    service.json_put(s3, f"archive/{OWNER}/{schema.recording_name({**m, 'sha256': 'a' * 64})}/manifest.json", bad)
+    prefix = f"archive/{OWNER}/{schema.recording_name(m)}"
     service.json_put(s3, prefix + '/manifest.json', m)
     with pytest.warns(UserWarning, match='Skipping invalid or unsupported archive manifest'):
-        assert list(cli.manifests(s3, 'bucket')) == [(prefix, m)]
+        assert list(cli.manifests(API)) == [(prefix, m)]
     # Both user-facing catalogs use the same tolerant listing path.
-    monkeypatch.setattr(cli, 'client', lambda config: s3)
     from briskapi import Archive
+    monkeypatch.setattr(cli, 'settings', lambda path=None: {'api_url': API})
     with pytest.warns(UserWarning):
         assert Archive().recordings()[0]['prefix'] == prefix
     with pytest.warns(UserWarning):
@@ -521,17 +789,17 @@ def test_listing_skips_invalid_entries_and_keeps_valid_ones(packaged, invalid, m
 
 @pytest.mark.parametrize('change', [{'schema': 'brisk-sbi-wire-jsonl-v1'}, {'source': 'sbi_legacy_capture'},
                                   {'batches': 2}, {'sha256': 'b' * 64}])
-def test_pull_rejects_manifest_before_fetching_payload(packaged, tmp_path, change):
+def test_pull_rejects_manifest_before_fetching_payload(packaged, tmp_path, change, online):
     _, m = packaged
+    s3, db = online
     bad = copy.deepcopy(m)
-    prefix = f"archive/20210927/{m['sha256']}"
+    prefix = f"archive/{OWNER}/{schema.recording_name(m)}"
     for key, value in change.items():
         (bad if key in {'schema', 'sha256'} else bad['summary'])[key] = value
-    s3 = S3()
     service.json_put(s3, prefix + '/manifest.json', bad)
-    # No payload object exists: requesting one would raise ClientError.
+    # No payload object exists: requesting one would raise KeyError.
     with pytest.raises(ValueError):
-        cli.pull(s3, 'bucket', prefix, tmp_path / 'download')
+        cli.pull(API, prefix, tmp_path / 'download')
     assert not (tmp_path / 'download').exists()
 
 
@@ -545,31 +813,27 @@ def sbi_batches(source='sbi_live'):
 
 
 @pytest.mark.parametrize('source', ['sbi_live', 'eshiten_live'])
-def test_broker_market_recording_publish_and_pull(tmp_path, source):
+def test_broker_market_recording_upload_and_pull(tmp_path, source, online):
     events = tmp_path / 'sbi.jsonl'
     events.write_bytes(stream(sbi_batches(source)).read())
     directory = tmp_path / 'package'
-    m = cli.package(events, directory, 'sbi-contributor', 'CC-BY-4.0')
-    assert m['summary']['source'] == source and m['redistribution_permitted']
-    s3, db = S3(), DB()
-    ticket = ticket_for(s3, db, m)
-    service.ingest(upload(s3, m, directory, ticket), s3, db)
-    status = service.json_get(s3, f'incoming/{ticket}/status.json')
-    assert status['status'] == 'published'
-    cli.pull(s3, 'bucket', status['prefix'], tmp_path / 'download')
-    data = jsonl(tmp_path / 'download') + s3.objects[status['prefix'] + '/recording.zip']
+    m = cli.package(events, directory)
+    assert m['summary']['source'] == source
+    s3, db = online
+    status = stored(s3, db, directory, m)
+    assert status['status'] == 'stored'
+    cli.pull(API, status['prefix'], tmp_path / 'download')
+    assert sorted(kept(s3, status['prefix'])) == sorted([*_parquet.FILES, 'files.json', 'manifest.json'])  # no shared copy
+    data = jsonl(tmp_path / 'download') + b''.join(kept(s3, status['prefix']).values())
     assert b'secret' not in data and b'/private/' not in data
     assert json.loads(data.splitlines()[0])['input_transport'] == schema.BROKER_TRANSPORT[source]
-    assert list(cli.manifests(s3, 'bucket'))[0][1]['summary']['source'] == source
+    assert list(cli.manifests(API))[0][1]['summary']['source'] == source
     # A recording labelled with one site but the other's transport is refused.
     other = sbi_batches(source)
     other[0]['input_transport'] = dict(schema.BROKER_TRANSPORT['eshiten_live' if source == 'sbi_live' else 'sbi_live'])
     events.write_bytes(stream(other).read())
     with pytest.raises(ValueError, match='broker transport'):
-        cli.package(events, tmp_path / 'mixed', 'sbi-contributor', 'CC-BY-4.0')
-    m['redistribution_permitted'] = False
-    with pytest.raises(ValueError, match='Redistribution'):
-        ticket_for(s3, db, m)
+        cli.package(events, tmp_path / 'mixed')
 
 
 @pytest.mark.parametrize('change', [
@@ -589,6 +853,22 @@ def test_broker_market_recording_publish_and_pull(tmp_path, source):
     lambda b: b[1].update(replay_lateness_ms=0),
     lambda b: b[-1].update(frames=0),
     lambda b: b[-1].update(quote_updates=0),
+    # Trades: exact fields, identity, bounds, and they account for every volume/turnover change.
+    lambda b: b[1]['trades'][0].update(quantity=50),
+    lambda b: b[1]['trades'][0].update(price10=1250),
+    lambda b: b[1]['quotes'][0].update(volume=200),
+    lambda b: b[1]['trades'][0].update(code='1111'),
+    lambda b: b[1]['trades'][0].update(time_us=111),
+    lambda b: b[1]['trades'][0].update(token='secret'),
+    lambda b: b[1]['trades'][0].pop('side'),
+    lambda b: b[1]['trades'][0].update(side=256),
+    lambda b: b[1]['trades'].append(dict(b[1]['trades'][0], quantity=0)),
+    lambda b: b[1]['trades'].append(dict(b[1]['trades'][0], time_us=104)),
+    lambda b: b[1]['trades'].append(dict(b[1]['trades'][0], frame=1)),
+    lambda b: b[0].pop('trades'),
+    lambda b: b[-1].update(trades=[]),
+    lambda b: b[1]['quotes'][0].update(bid_closing_levels=[[1000, 1, 1], [1010, 1, 1]]),
+    lambda b: b[1]['quotes'][0].update(ask_closing_levels=[[1000, 1]]),
 ])
 def test_sbi_market_recording_rejects_unknown_fields_and_bad_continuity(change):
     records = sbi_batches()
@@ -596,6 +876,35 @@ def test_sbi_market_recording_rejects_unknown_fields_and_bad_continuity(change):
     change(records)
     with pytest.raises(ValueError):
         schema.validate_stream(stream(records))
+
+
+def test_restored_trades_follow_the_bootstrap():
+    # Trades a snapshot restored come in history batches right after the bootstrap, at its clock; the
+    # bootstrap's volumes already count them, so they don't enter the volume/turnover check.
+    records = sbi_batches()
+    records[0]['input_transport'] = dict(schema.SBI_TRANSPORT)
+    old = dict(issue_id=0, code='0000', frame=1, time_us=50, price10=1200, quantity=300, side=2)
+    history = [dict(type='history', seq=1, source_time_us=100, trades=[old, dict(old, time_us=60)]),
+               dict(type='history', seq=2, source_time_us=100, trades=[dict(old, time_us=70)])]
+    shifted = [records[0], *history, *[dict(b, seq=b['seq'] + 2) for b in records[1:]]]
+    shifted[-1]['frames'] += 2
+    summary = schema.validate_stream(stream(shifted))
+    assert summary['batches'] == 5 and summary['quote_updates'] == 2
+    directory = Path(__import__('tempfile').mkdtemp())
+    _parquet.write(shifted, directory / 'rec')
+    assert list(Recording(directory / 'rec').batches()) == shifted
+    assert [f['trade_count'] for f in Recording(directory / 'rec').frames()] == [0, 2, 1, 1, 0]
+    for change in (lambda b: b.insert(3, dict(b[1], seq=3)),                    # after a quote batch
+                   lambda b: b[1].update(source_time_us=101),                    # not at the bootstrap's clock
+                   lambda b: b[1].update(trades=[]),
+                   lambda b: b[1].update(skipped_issues=[0]),
+                   lambda b: b[1].update(trades=[dict(old, time_us=60), old]),   # out of order
+                   lambda b: b[1]['trades'][0].update(time_us=101)):             # after the bootstrap
+        bad = copy.deepcopy(shifted); change(bad)
+        for k, x in enumerate(bad):
+            x['seq'] = k
+        with pytest.raises(ValueError):
+            schema.validate_stream(stream(bad))
 
 
 def test_books_and_skipped_issues_validate():
@@ -616,34 +925,62 @@ class HTTP:
     def __exit__(self, *a): pass
     def read(self, *a): return self.value
 
-@pytest.mark.parametrize('status', ['published', 'rejected', 'timeout'])
-def test_contribute_auto_poll(packaged, monkeypatch, status):
+@pytest.mark.parametrize('status', ['stored', 'rejected', 'timeout'])
+def test_upload_auto_poll(packaged, monkeypatch, status):
     directory, m = packaged
     responses = [{'ticket': str(uuid.uuid4()), 'upload': {'url': 'https://example.test', 'fields': {'key': 'k'}}},
                  {'status': 'awaiting_upload'}, {'status': status}]
-    monkeypatch.setattr(cli, 'request_json', lambda *a: responses.pop(0))
+    sent = []
+    monkeypatch.setattr(cli, 'request_json', lambda url, data=None, secret=None: sent.append((data, secret)) or responses.pop(0))
     monkeypatch.setattr(cli.urllib.request, 'urlopen', lambda *a, **k: HTTP())
     monkeypatch.setattr(cli.time, 'sleep', lambda *a: None)
     if status == 'timeout':
         monkeypatch.setattr(cli.time, 'monotonic', iter([0, 999]).__next__)
-        with pytest.raises(TimeoutError): cli.contribute(directory, 'https://api.test', 1)
+        with pytest.raises(TimeoutError): cli.upload(directory, 'https://api.test', 1)
     elif status == 'rejected':
-        with pytest.raises(ValueError): cli.contribute(directory, 'https://api.test')
+        with pytest.raises(ValueError): cli.upload(directory, 'https://api.test')
     else:
-        assert cli.contribute(directory, 'https://api.test', verify=False)['status'] == 'published'
+        assert cli.upload(directory, 'https://api.test', verify=False)['status'] == 'stored'
+    # The ticket request names its owner; status polls (by ticket) don't. A replay offers its timing alone.
+    assert sent[0] == ({'action': 'upload', 'manifest': m, 'part': part_of(directory)[1]}, SECRET)
+    assert all(polled == (None, None) for polled in sent[1:])
     (directory / _parquet.BATCHES).write_bytes(b'changed')
     with pytest.raises(ValueError, match='mismatch'):
-        cli.contribute(directory, 'https://api.test', verify=False)
+        cli.upload(directory, 'https://api.test', verify=False)
+
+@pytest.mark.parametrize('market', [None, True])
+def test_upload_sends_the_whole_replay_until_the_archive_holds_its_market_data(packaged, monkeypatch, market):
+    directory, m = packaged
+    asked, bodies = [], []
+    def request_json(url, data=None, secret=None):
+        if data is None:
+            return {'status': 'stored'}
+        asked.append(data['part'])
+        if data['part']:
+            raise urllib.error.HTTPError(url, 409, 'no copy yet', {}, None)
+        return {'ticket': str(uuid.uuid4()), 'upload': {'url': 'https://example.test', 'fields': {'key': 'k'}}}
+    monkeypatch.setattr(cli, 'request_json', request_json)
+    monkeypatch.setattr(cli.urllib.request, 'urlopen', lambda request, **k: bodies.append(request.data) or HTTP())
+    assert cli.upload(directory, API, verify=False, market=market)['status'] == 'stored'
+    assert asked == ([None] if market else [part_of(directory)[1], None]) and _parquet.pack(directory) in bodies[0]
+    def refuse(url, data=None, secret=None):
+        raise urllib.error.HTTPError(url, 503, 'down', {}, None)
+    monkeypatch.setattr(cli, 'request_json', refuse)
+    with pytest.raises(urllib.error.HTTPError):
+        cli.upload(directory, API, verify=False)
 
 def test_request_json(monkeypatch):
-    monkeypatch.setattr(cli.urllib.request, 'urlopen', lambda *a, **kw: HTTP(b'{"ok":true}'))
+    seen = []
+    monkeypatch.setattr(cli.urllib.request, 'urlopen', lambda request, **kw: seen.append(request) or HTTP(b'{"ok":true}'))
     assert cli.request_json('https://example.test', {'a': 1}) == {'ok': True}
+    assert cli.request_json('https://example.test', {'a': 1}, SECRET) == {'ok': True}
+    assert seen[0].get_header('Authorization') is None and seen[1].get_header('Authorization') == f'Bearer {SECRET}'
 
 def test_package_failure_leaves_nothing(tmp_path):
     events = tmp_path / 'partial.jsonl'
     events.write_bytes(raw(batches()[:-1]))
     with pytest.raises(ValueError, match='clean end'):
-        cli.package(events, tmp_path / 'out', 'test', 'CC0-1.0')
+        cli.package(events, tmp_path / 'out')
     assert not [p for p in (tmp_path / 'out').rglob('*') if p.is_file()]
 
 def test_package_over_the_archive_limit_leaves_nothing(tmp_path, monkeypatch):
@@ -651,7 +988,7 @@ def test_package_over_the_archive_limit_leaves_nothing(tmp_path, monkeypatch):
     events.write_bytes(raw(batches()))
     monkeypatch.setattr(cli, 'MAX_COMPRESSED', 1000)
     with pytest.raises(ValueError, match='accepts up to'):
-        cli.package(events, tmp_path / 'out', 'test', 'CC0-1.0')
+        cli.package(events, tmp_path / 'out')
     assert not [p for p in (tmp_path / 'out').rglob('*') if p.is_file()]
 
 @pytest.fixture
@@ -659,8 +996,7 @@ def harness(tmp_path, monkeypatch):
     config = tmp_path / 'config.json'
     config.write_text(json.dumps(dict(bucket='b', region='ap-northeast-1', api_url='https://api.test')))
     uploads = []
-    monkeypatch.setattr(cli, 'contribute', lambda *a, **k: uploads.append(a) or {'status': 'published'})
-    monkeypatch.setattr(cli, 'client', lambda *a: None)
+    monkeypatch.setattr(cli, 'upload', lambda *a, **k: uploads.append(a) or {'status': 'stored'})
     def run(cmd, check, stdout=None):
         # Node decoder writes to stdout; the optional Rust collector writes --events.
         if stdout:
@@ -675,64 +1011,118 @@ def harness(tmp_path, monkeypatch):
         return uploads
     return main
 
-@pytest.mark.parametrize('command', ['package', 'record', 'upload', 'list', 'pull'])
+@pytest.mark.parametrize('command', ['package', 'record', 'upload', 'list', 'timing', 'pull', 'delete'])
 def test_cli(command, packaged, tmp_path, monkeypatch, capsys, harness):
     directory, m = packaged
+    cli.save_consent(True)
     monkeypatch.setattr(cli, 'manifests', lambda *a: [('archive/p', m)])
+    monkeypatch.setattr(cli, 'timing_reports', lambda *a: [('timing/p', {'frames': 1})])
     monkeypatch.setattr(cli, 'pull', lambda *a: m)
+    monkeypatch.setattr(cli, 'delete', lambda *a: {'status': 'deleted'})
     args = [command]
     if command in {'package', 'record'}:
-        args += ['--output', str(tmp_path / 'out'), '--contributor', 'test', '--license', 'CC0-1.0', '--redistribution-permitted', '--upload']
+        args += ['--output', str(tmp_path / 'out'), '--upload']
         if command == 'package': args += ['--events', str(tmp_path / 'source.jsonl')]
         else: args += ['--web', '--codes', '0000', '--speed', '0']
     elif command == 'upload': args += [str(directory)]
     elif command == 'list': args += ['--source', 'synthetic_test']
+    elif command == 'timing': args = ['list', '--timing']
+    elif command == 'delete': args += ['archive/p']
     else: args += ['archive/p', '--output', str(tmp_path / 'out')]
     harness(*args)
     assert capsys.readouterr().out
 
-def test_record_without_consent_stays_local(tmp_path, harness, capsys):
-    assert harness('record', '--cache', str(tmp_path), '--output', str(tmp_path / 'local')) == []
+def test_identity(tmp_path, monkeypatch, harness, capsys):
+    from briskapi import identity
+    monkeypatch.delenv('BRISK_IDENTITY')
+    assert identity.secret(create=False) is None and not identity.path().exists()
+    # Made on first use, kept owner-only, the same afterwards.
+    first = identity.secret()
+    assert schema.IDENTITY.fullmatch(first) and identity.secret() == first
+    assert identity.path().stat().st_mode & 0o777 == 0o600
+    assert json.loads(identity.path().read_text())['owner'] == schema.owner(first) == identity.owner_id()
+    harness('identity')
+    assert json.loads(capsys.readouterr().out) == {'owner': schema.owner(first), 'kept_in': [str(identity.path())]}
+    harness('identity', '--export')
+    assert capsys.readouterr().out.strip() == first
+    # The recovery code reads back forgivingly (case, spacing, 0/1/8 for O/I/B) and refuses a typo.
+    harness('identity', '--recovery-code')
+    code = capsys.readouterr().out.strip()
+    assert re.fullmatch(r'([A-Z2-7]{4}-){6}[A-Z2-7]{4}', code) and identity.from_recovery_code(code) == first
+    assert identity.from_recovery_code(' ' + code.lower().replace('-', ' ').replace('o', '0') + ' ') == first
+    assert identity.from_recovery_code(first) == first
+    typo = code[:-1] + ('A' if code[-1] != 'A' else 'B')
+    with pytest.raises(ValueError, match='mistyped'):
+        identity.from_recovery_code(typo)
+    # Another computer's identity: refused over a different one unless replaced.
+    with pytest.raises(ValueError, match='another identity'):
+        harness('identity', '--recover', identity.recovery_code(SECRET))
+    monkeypatch.setattr(cli.sys, 'stdin', io.StringIO(identity.recovery_code(SECRET) + '\n'))
+    harness('identity', '--recover', '-', '--replace')
+    assert json.loads(capsys.readouterr().out)['owner'] == OWNER and identity.secret() == SECRET
+    with pytest.raises(ValueError, match='Invalid identity'):
+        identity.save('brisk-id-v1-nope')
+    monkeypatch.setenv('BRISK_IDENTITY', OTHER)
+    assert identity.owner_id() == schema.owner(OTHER)
+    monkeypatch.delenv('BRISK_IDENTITY')
+    identity.path().write_text('garbage')
+    with pytest.raises(ValueError, match='Unreadable identity'):
+        identity.secret()
+    # A copy elsewhere (here: a second store) repairs the file, keeping the unreadable one aside.
+    class Store:
+        description = 'store'
+        def load(self): return {'secret': SECRET}
+        def save(self, record): pass
+    monkeypatch.setattr(identity, 'copies', lambda: [identity.SystemCopy(Store()), identity.FileCopy()])
+    assert identity.secret() == SECRET and identity.FileCopy().load() == SECRET
+    assert identity.path().with_name('identity.json.unreadable').read_text() == 'garbage'
+    assert identity.where() == ['store', str(identity.path())]
+
+def test_record_without_a_terminal_uploads_by_default(tmp_path, harness, capsys):
+    assert len(harness('record', '--cache', str(tmp_path), '--output', str(tmp_path / 'first'))) == 1
+    err = capsys.readouterr().err
+    assert (tmp_path / 'first/manifest.json').exists() and 'on by default' in err and 'Only you can' in err
+    assert f'owner {OWNER}' in err and cli.load_consent() is None
+    # Revoked: recordings stay local.
+    harness('consent', '--revoke')
+    assert len(harness('record', '--cache', str(tmp_path), '--output', str(tmp_path / 'local'))) == 1
     assert (tmp_path / 'local' / _parquet.DEPTHS).exists() and not (tmp_path / 'local/manifest.json').exists()
-    assert 'not contributed' in capsys.readouterr().err
+    assert 'not uploaded' in capsys.readouterr().err
     with pytest.raises(ValueError, match='already exists'):
         harness('record', '--cache', str(tmp_path), '--output', str(tmp_path / 'local'))
-    with pytest.raises(ValueError, match='consent'):
-        harness('package', '--events', str(tmp_path / 'source.jsonl'), '--output', str(tmp_path / 'p'))
+    # Packaging is local; only uploading needs consent.
+    assert len(harness('package', '--events', str(tmp_path / 'source.jsonl'), '--output', str(tmp_path / 'p'))) == 1
+    assert (tmp_path / 'p/manifest.json').exists()
     with pytest.raises(ValueError, match='consent'):
         harness('record', '--cache', str(tmp_path), '--output', str(tmp_path / 'x'), '--upload')
-    with pytest.raises(ValueError, match='together'):
-        harness('package', '--events', str(tmp_path / 'source.jsonl'), '--output', str(tmp_path / 'p'), '--contributor', 'a')
 
-@pytest.mark.parametrize('answer,uploaded', [('\n', True), ('y\n', True), ('n\n', False)])
+@pytest.mark.parametrize('answer,uploaded', [('\n', True), ('y\n', True), ('n\n', False), ('', False)])
 def test_first_run_prompt(tmp_path, monkeypatch, harness, capsys, answer, uploaded):
     monkeypatch.setattr(cli, 'interactive', lambda: True)
     monkeypatch.setattr(cli.sys, 'stdin', io.StringIO(answer))
     uploads = harness('record', '--web', '--output', str(tmp_path / 'r'))
     out = capsys.readouterr()
-    assert 'public and permanent' in out.err and 'Contribute automatically' not in out.out
+    assert 'Only you can' in out.err and 'Upload automatically to your private archive?' in out.err
+    assert 'Upload automatically' not in out.out
     assert bool(uploads) == uploaded and (tmp_path / 'r/manifest.json').exists() == uploaded
     choice = cli.load_consent()
     assert choice['enabled'] == uploaded and choice['policy_version'] == cli.POLICY_VERSION
-    if uploaded:
-        assert choice['contributor'].startswith('anon-') and choice['license'] == 'CC0-1.0'
-        assert json.loads((tmp_path / 'r/manifest.json').read_text())['contributor'] == choice['contributor']
+    assert set(choice) == {'policy_version', 'enabled', 'decided_at'}
     # The question is asked once; later runs follow the saved choice silently.
     monkeypatch.setattr(cli.sys, 'stdin', io.StringIO(''))
     assert bool(harness('record', '--web', '--output', str(tmp_path / 'again'))) == uploaded
 
 def test_consent_controls(tmp_path, monkeypatch, harness, capsys):
     harness('consent')
-    assert json.loads(capsys.readouterr().out)['enabled'] is None
-    harness('consent', '--accept', '--contributor', 'alice', '--license', 'CC-BY-4.0')
-    assert json.loads(capsys.readouterr().out)['contributor'] == 'alice'
-    assert harness('record', '--web', '--output', str(tmp_path / 'a')) and \
-        json.loads((tmp_path / 'a/manifest.json').read_text())['license'] == 'CC-BY-4.0'
+    assert json.loads(capsys.readouterr().out) == {'policy_version': cli.POLICY_VERSION, 'enabled': True, 'default': True}
+    harness('consent', '--accept')
+    assert json.loads(capsys.readouterr().out)['enabled'] is True
+    assert harness('record', '--web', '--output', str(tmp_path / 'a')) and (tmp_path / 'a/manifest.json').exists()
     assert len(harness('record', '--web', '--no-upload', '--output', str(tmp_path / 'b'))) == 1
     assert (tmp_path / 'b/manifest.json').exists()
-    monkeypatch.setenv('BRISK_CONTRIBUTE', '0')
+    monkeypatch.setenv('BRISK_UPLOAD', '0')
     assert len(harness('package', '--events', str(tmp_path / 'source.jsonl'), '--output', str(tmp_path / 'c'))) == 1
-    monkeypatch.delenv('BRISK_CONTRIBUTE')
+    monkeypatch.delenv('BRISK_UPLOAD')
     assert len(harness('record', '--web', '--limit-frames', '2', '--output', str(tmp_path / 'd'))) == 1
     assert (tmp_path / 'd' / _parquet.DEPTHS).exists()
     with pytest.raises(ValueError, match='complete'):
@@ -740,8 +1130,7 @@ def test_consent_controls(tmp_path, monkeypatch, harness, capsys):
     harness('consent', '--revoke')
     assert json.loads(capsys.readouterr().out.splitlines()[-1])['enabled'] is False
     assert len(harness('record', '--web', '--output', str(tmp_path / 'f'))) == 1
-    with pytest.raises(ValueError, match='Alias'):
-        cli.save_consent(True, 'not an alias!')
+    assert cli.consent_path().name == 'uploads.json'
     cli.consent_path().write_text('{"policy_version": 0, "enabled": true}')
     assert cli.load_consent() is None
     cli.consent_path().write_text('garbage')
@@ -809,7 +1198,7 @@ def test_export(packaged, tmp_path, capsys):
     cli.main(['export', str(directory), '--jsonl', str(tmp_path / 'events.jsonl')])
     assert (tmp_path / 'events.jsonl').read_bytes() == canon(batches())
     cli.main(['export', str(directory), '--nautilus', str(tmp_path / 'catalog')])
-    assert json.loads(capsys.readouterr().out.splitlines()[-1])['files'] == 3
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])['files'] == 4
     depths = list((tmp_path / 'catalog/data/order_book_depths/0000.XTKS').glob('*.parquet'))
     table = pq.read_table(depths[0])
     assert table.schema.names == list(_parquet.V2_DEPTH) and table.schema.metadata[b'instrument_id'] == b'0000.XTKS'
@@ -817,6 +1206,10 @@ def test_export(packaged, tmp_path, capsys):
     assert equity.schema.field('info').type == pa.json_(pa.string()) and equity.column('currency')[0].as_py() == 'JPY'
     custom = pq.read_table(next((tmp_path / 'catalog/data/custom/BriskQuote/0000.XTKS').glob('*.parquet')))
     assert custom.column('indicative_price10').to_pylist() == [1230, 1240] and custom.schema.metadata[b'type_name'] == b'BriskQuote'
+    assert custom.column('closing_bids').to_pylist() == ['[]', '[]']
+    trades = pq.read_table(next((tmp_path / 'catalog/data/trades/0000.XTKS').glob('*.parquet')))
+    assert trades.schema.names == list(_parquet.V2_TRADE) and trades.schema.metadata[b'type_name'] == b'TradeTick'
+    assert trades.column('aggressor_side').to_pylist() == ['BUY'] and trades.column('trade_id').to_pylist() == ['2-0']
     with pytest.raises(ValueError, match='already exists'):
         cli.export(directory, nautilus=tmp_path / 'catalog')
     with pytest.raises(ValueError, match='already exists'):

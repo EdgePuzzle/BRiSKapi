@@ -1,10 +1,12 @@
 """Recordings as Parquet: NautilusTrader v2's market data tables, extended with BRiSK's own fields.
 
-A recording directory holds three tables:
+A recording directory holds four tables:
 
 data/order_book_depths.parquet  One row per quote update: v2's OrderBookDepth (each side's best levels, the
                                 frame number as `sequence`, the source time as `ts_event`), then the rest of
                                 BRiSK's quote. Sorted by issue, then batch.
+data/trades.parquet             One row per execution: v2's TradeTick, then the decoder's raw side, frame and
+                                batch. Sorted by issue, then in the decoder's order.
 data/equity.parquet             The securities master: v2's Equity, then BRiSK's master fields.
 data/custom/BriskBatch.parquet  One row per decoded batch, laid out as v2 custom data: local timing, skipped
                                 issues and, on the bootstrap row, the session's provenance.
@@ -32,16 +34,19 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from briskapi.schema import (BATCH_KEYS, LEVELS, MASTER_KEYS, MAX_COMPRESSED, QUOTE_KEYS, SCHEMA, SKIPPED, canonical,
-                             require, validate_batches, validate_manifest)
+from briskapi.schema import (BATCH_KEYS, LEVELS, MASTER_KEYS, MAX_COMPRESSED, QUOTE_KEYS, SCHEMA, SKIPPED, TRADE_KEYS,
+                             canonical, require, validate_batches, validate_manifest)
 
 VENUE = 'XTKS'
-EQUITY, DEPTHS, BATCHES = 'data/equity.parquet', 'data/order_book_depths.parquet', 'data/custom/BriskBatch.parquet'
-FILES = (EQUITY, DEPTHS, BATCHES)
+EQUITY, DEPTHS, TRADES, BATCHES = ('data/equity.parquet', 'data/order_book_depths.parquet', 'data/trades.parquet',
+                                   'data/custom/BriskBatch.parquet')
+FILES = (EQUITY, DEPTHS, TRADES, BATCHES)
+# The market data; a demo replay's is the same for everyone, so the archive keeps it once.
+MARKET = (EQUITY, DEPTHS, TRADES)
 ROW_GROUP = 65_536
 ZSTD_LEVEL = 3
 F_MBP, F_SNAPSHOT = 16, 32  # NautilusTrader record flags: market by price; the session's opening snapshot
-MAX_ROWS = {EQUITY: 20_000, DEPTHS: 4_000_000, BATCHES: 4_000_000}
+MAX_ROWS = {EQUITY: 20_000, DEPTHS: 4_000_000, TRADES: 20_000_000, BATCHES: 4_000_000}
 MAX_DECODED = 2 * 1024**3
 JST = dt.timezone(dt.timedelta(hours=9))
 
@@ -59,14 +64,20 @@ QUOTE_ORDER = ('issue_id', 'code', 'frame', 'max_frame', 'source_time_us', 'last
                'quote_flag', 'quote_side', 'special_quote_time_us', 'indicative_open_price10', 'reference_price10',
                'volume', 'turnover10', 'issue_status', 'market_buy_quantity', 'market_sell_quantity',
                'closing_market_buy_quantity', 'closing_market_sell_quantity', 'bid_quantity', 'bid_orders',
-               'ask_quantity', 'ask_orders', 'bid_levels', 'ask_levels')
-SIDES = ('bid_levels', 'ask_levels')
+               'ask_quantity', 'ask_orders', 'bid_levels', 'ask_levels', 'bid_closing_levels', 'ask_closing_levels',
+               'bid_total_quantity', 'bid_total_orders', 'bid_closing_total_quantity', 'bid_closing_total_orders',
+               'ask_total_quantity', 'ask_total_orders', 'ask_closing_total_quantity', 'ask_closing_total_orders')
+# Book sides and their columns: v2's bids and asks, and the closing-condition orders' books.
+BOOKS = {'bid_levels': 'bids', 'ask_levels': 'asks', 'bid_closing_levels': 'closing_bids', 'ask_closing_levels': 'closing_asks'}
 PRICES = tuple(k for k in QUOTE_ORDER if k.endswith('_price10'))
 COUNTS = tuple(k for k in QUOTE_ORDER if k not in {'issue_id', 'code', 'frame', 'source_time_us', 'special_quote_time_us',
-                                                   'turnover10', *PRICES, *SIDES})
+                                                   'turnover10', *PRICES, *BOOKS})
 # Integer columns held in memory: the quote's, plus the batch each update arrived in.
-INTS = ('seq', *(k for k in QUOTE_ORDER if k not in {'code', *SIDES}))
-assert set(QUOTE_ORDER) == QUOTE_KEYS
+INTS = ('seq', *(k for k in QUOTE_ORDER if k not in {'code', *BOOKS}))
+TRADE_INTS = ('seq', 'issue_id', 'frame', 'time_us', 'price10', 'quantity', 'side')
+# The decoder's trade types as v2's AggressorSide.
+AGGRESSOR = {1: 'BUY', 2: 'SELL'}
+assert set(QUOTE_ORDER) == QUOTE_KEYS and set(TRADE_INTS[1:]) | {'code'} == TRADE_KEYS
 
 DEPTH_SCHEMA = pa.schema([
     # NautilusTrader v2 OrderBookDepth, plus the identifier of its multi-instrument queries
@@ -78,8 +89,20 @@ DEPTH_SCHEMA = pa.schema([
     *[pa.field(k[:-2], DECIMAL) for k in PRICES],
     *[pa.field(k, pa.uint64(), False) for k in COUNTS],
     pa.field('special_quote_time', TIME), pa.field('turnover', DECIMAL, False),
+    pa.field('closing_bids', BOOK, False), pa.field('closing_asks', BOOK, False),
 ], metadata={'type_name': 'OrderBookDepth', 'price_precision': '1', 'size_precision': '0', 'brisk_format': SCHEMA})
 V2_DEPTH = DEPTH_SCHEMA.names[:6]
+
+TRADE_SCHEMA = pa.schema([
+    # NautilusTrader v2 TradeTick, plus the identifier of its multi-instrument queries
+    pa.field('price', DECIMAL, False), pa.field('size', DECIMAL, False),
+    pa.field('aggressor_side', pa.dictionary(pa.int8(), pa.string()), False), pa.field('trade_id', pa.string(), False),
+    pa.field('ts_event', TIME, False), pa.field('ts_init', TIME, False), pa.field('identifier', pa.string(), False),
+    # The decoder's own: its trade type, the issue's frame number and the batch
+    pa.field('issue_id', pa.uint64(), False), pa.field('seq', pa.uint64(), False), pa.field('frame', pa.uint64(), False),
+    pa.field('side', pa.uint8(), False),
+], metadata={'type_name': 'TradeTick', 'price_precision': '1', 'size_precision': '0', 'brisk_format': SCHEMA})
+V2_TRADE = TRADE_SCHEMA.names[:6]
 
 EQUITY_SCHEMA = pa.schema([
     # NautilusTrader v2 Equity (`info`, JSON in v2, is a plain string here and always null)
@@ -96,7 +119,7 @@ EQUITY_SCHEMA = pa.schema([
 V2_EQUITY = EQUITY_SCHEMA.names[:17]
 
 # Batch fields by kind (beyond type, seq and source_time_us): columns are null where a kind has none.
-BATCH_FIELDS = {kind: sorted(keys - {'type', 'seq', 'source_time_us', 'master', 'quotes'}) for kind, keys in BATCH_KEYS.items()}
+BATCH_FIELDS = {kind: sorted(keys - {'type', 'seq', 'source_time_us', 'master', 'quotes', 'trades'}) for kind, keys in BATCH_KEYS.items()}
 BATCH_TYPES = {'received_unix_ms': pa.uint64(), 'decode_ns': pa.uint64(), 'replay_lateness_ms': pa.float64(),
                SKIPPED: pa.list_(pa.field('item', pa.uint64(), False)), 'frames': pa.uint64(), 'quote_updates': pa.uint64(),
                'replay_wall_ms': pa.float64(), 'source': pa.string(), 'trading_date': pa.string(),
@@ -110,7 +133,7 @@ BATCH_SCHEMA = pa.schema([
 ], metadata={'type_name': 'BriskBatch', 'brisk_format': SCHEMA})
 assert {k for keys in BATCH_FIELDS.values() for k in keys} | {SKIPPED} == set(BATCH_TYPES)
 
-SCHEMAS = {EQUITY: EQUITY_SCHEMA, DEPTHS: DEPTH_SCHEMA, BATCHES: BATCH_SCHEMA}
+SCHEMAS = {EQUITY: EQUITY_SCHEMA, DEPTHS: DEPTH_SCHEMA, TRADES: TRADE_SCHEMA, BATCHES: BATCH_SCHEMA}
 WRITE = dict(compression='zstd', compression_level=ZSTD_LEVEL, use_dictionary=True, write_statistics=True,
              version='2.6', data_page_version='1.0', use_compliant_nested_type=False)  # list items named 'item', as v2 writes them
 
@@ -177,10 +200,12 @@ class Columns:
     `q` maps each integer quote field (and `seq`, the batch) to an int64 array; `code` holds the codes;
     `books` holds each side as (offsets, levels) with levels an (n, 3) array of [price10, quantity, orders].
     Columns built from batches keep arrival order with `order` sorting them, applied as they are written.
+    `t` holds the trades (TRADE_INTS, `t_code` their codes), sorted by issue then the decoder's order.
     """
 
-    def __init__(self, q, code, books, master, batches, order=None):
+    def __init__(self, q, code, books, master, batches, t, t_code, order=None):
         self.q, self.code, self.books, self.master, self.batches, self.order = q, code, books, master, batches, order
+        self.t, self.t_code = t, t_code
 
     def __len__(self):
         return len(self.code)
@@ -191,7 +216,8 @@ class Columns:
     def from_batches(cls, batches):
         """Columns from decoder batches, refusing unknown or missing fields."""
         ints = {k: array('q') for k in INTS}
-        code, books = [], {side: (array('q'), array('q')) for side in SIDES}
+        code, books = [], {side: (array('q'), array('q')) for side in BOOKS}
+        trades, t_code = {k: array('q') for k in TRADE_INTS}, []
         rows, master = [], None
         try:
             for b in batches:
@@ -209,17 +235,27 @@ class Columns:
                         ints[k].append(q[k])
                     require(isinstance(q['code'], str), 'Invalid security code')
                     code.append(sys.intern(q['code']))
-                    for side in SIDES:
+                    for side in BOOKS:
                         counts, levels = books[side]
                         require(isinstance(q[side], list), 'Invalid book side')
                         counts.append(len(q[side]))
                         for level in q[side]:
                             require(isinstance(level, list) and len(level) == 3, 'Invalid book level')
                             levels.extend(level)
+                for t in b.get('trades', ()):
+                    require(isinstance(t, dict) and set(t) == TRADE_KEYS, 'Unknown or missing trade fields')
+                    trades['seq'].append(b['seq'])
+                    for k in TRADE_INTS[1:]:
+                        trades[k].append(t[k])
+                    require(isinstance(t['code'], str), 'Invalid security code')
+                    t_code.append(sys.intern(t['code']))
         except (TypeError, OverflowError) as error:
             raise ValueError(f'Invalid recording value: {error}') from None
         require(rows and rows[0]['type'] == 'bootstrap' and master is not None, 'Recording has no bootstrap')
         q = {k: np.frombuffer(v, np.int64) if len(v) else np.zeros(0, np.int64) for k, v in ints.items()}
+        t = {k: np.frombuffer(v, np.int64) if len(v) else np.zeros(0, np.int64) for k, v in trades.items()}
+        t_order = np.lexsort((np.arange(len(t_code)), t['seq'], t['issue_id']))
+        t, t_code = {k: v[t_order] for k, v in t.items()}, np.array(t_code, dtype=object)[t_order]
         code = np.array(code, dtype=object)
         sides = {}
         for side, (counts, levels) in books.items():
@@ -227,7 +263,7 @@ class Columns:
             sides[side] = (np.concatenate([[0], np.cumsum(counts)]), (np.frombuffer(levels, np.int64) if len(levels)
                                                                          else np.zeros(0, np.int64)).reshape(-1, 3))
         master = sorted(master, key=lambda m: m['issue_id'] if type(m['issue_id']) is int else -1)
-        return cls(q, code, sides, master, rows, order=np.lexsort((q['seq'], q['issue_id'])))
+        return cls(q, code, sides, master, rows, t, t_code, order=np.lexsort((q['seq'], q['issue_id'])))
 
     def sorted(self):
         return self if self.order is None else self.take(self.order)
@@ -240,7 +276,8 @@ class Columns:
             new = np.concatenate([[0], np.cumsum(counts)])
             gather = np.arange(new[-1]) + np.repeat(offsets[:-1][idx] - new[:-1], counts)
             books[side] = (new, levels[gather])
-        return Columns({k: v[idx] for k, v in self.q.items()}, self.code[idx], books, self.master, self.batches)
+        return Columns({k: v[idx] for k, v in self.q.items()}, self.code[idx], books, self.master, self.batches,
+                       self.t, self.t_code)
 
     # Writing
 
@@ -261,13 +298,41 @@ class Columns:
             with pq.ParquetWriter(directory / DEPTHS, DEPTH_SCHEMA, **WRITE) as writer:
                 for start in range(0, len(self), ROW_GROUP):
                     writer.write_table(self.take(order[start:start + ROW_GROUP])._depths(midnight), row_group_size=ROW_GROUP)
+            with pq.ParquetWriter(directory / TRADES, TRADE_SCHEMA, **WRITE) as writer:
+                for start in range(0, len(self.t_code), ROW_GROUP):
+                    writer.write_table(self._trades(midnight, slice(start, start + ROW_GROUP)), row_group_size=ROW_GROUP)
         except (TypeError, OverflowError) as error:  # Arrow's own type errors are TypeErrors
             raise ValueError(f'Invalid recording value: {error}') from None
+
+    def trade_ids(self):
+        """v2 trade IDs: the issue's frame number and the trade's place among that frame's trades."""
+        if getattr(self, '_trade_ids', None) is None:
+            ids, key, place = [], None, 0
+            for issue, frame in zip(self.t['issue_id'].tolist(), self.t['frame'].tolist()):
+                place = place + 1 if (issue, frame) == key else 0
+                key = (issue, frame)
+                ids.append(f'{frame}-{place}')
+            self._trade_ids = np.array(ids, dtype=object)
+        return self._trade_ids
+
+    def _trades(self, midnight, rows):
+        t = {k: v[rows] for k, v in self.t.items()}
+        codes, ids = self.t_code[rows], self.trade_ids()[rows]
+        require(not len(codes) or t['side'].max() < 256, 'Invalid trade side')
+        ts = midnight + t['time_us'] * 1000
+        aggressor = pa.DictionaryArray.from_arrays(
+            pa.array(np.select([t['side'] == 1, t['side'] == 2], [1, 2], 0).astype(np.int8)),
+            pa.array(['NO_AGGRESSOR', 'BUY', 'SELL']))
+        columns = [_decimal(t['price10'], 1), _decimal(t['quantity'], 0), aggressor, pa.array(ids.tolist(), pa.string()),
+                   pa.array(ts, TIME), pa.array(ts, TIME), pa.array([c + '.' + VENUE for c in codes], pa.string()),
+                   pa.array(t['issue_id'], pa.uint64()), pa.array(t['seq'], pa.uint64()), pa.array(t['frame'], pa.uint64()),
+                   pa.array(t['side'], pa.uint8())]
+        return pa.Table.from_arrays(columns, schema=TRADE_SCHEMA)
 
     def _depths(self, midnight):
         q = self.q
         books = []
-        for side in SIDES:
+        for side in BOOKS:
             offsets, levels = self.books[side]
             require(not len(levels) or levels[:, 2].max() < 2**32, 'Invalid book level')
             items = pa.StructArray.from_arrays(
@@ -276,13 +341,13 @@ class Columns:
             books.append(pa.ListArray.from_arrays(pa.array(offsets, pa.int32()), items, type=BOOK))
         ts = midnight + q['source_time_us'] * 1000
         special = q['special_quote_time_us']
-        columns = [*books, pa.array(np.where(q['seq'] == 0, F_MBP | F_SNAPSHOT, F_MBP).astype(np.uint8)),
+        columns = [*books[:2], pa.array(np.where(q['seq'] == 0, F_MBP | F_SNAPSHOT, F_MBP).astype(np.uint8)),
                    pa.array(q['frame'], pa.uint64()), pa.array(ts, TIME), pa.array(ts, TIME),
                    pa.array([c + '.' + VENUE for c in self.code], pa.string()),
                    pa.array(q['issue_id'], pa.uint64()), pa.array(q['seq'], pa.uint64()),
                    *[_decimal(q[k], 1, nulls=True) for k in PRICES],
                    *[pa.array(q[k], pa.uint64()) for k in COUNTS],
-                   pa.array(midnight + special * 1000, TIME, mask=special == 0), _decimal(q['turnover10'], 1)]
+                   pa.array(midnight + special * 1000, TIME, mask=special == 0), _decimal(q['turnover10'], 1), *books[2:]]
         return pa.Table.from_arrays(columns, schema=DEPTH_SCHEMA)
 
     def _equity(self, midnight):
@@ -334,19 +399,21 @@ class Columns:
         for table in groups:
             for name, values in _decode_depths(table, midnight).items():
                 parts.setdefault(name, []).append(values)
-        empty = {'code': np.zeros(0, object), **{f'{side}.levels': np.zeros((0, 3), np.int64) for side in SIDES}}
+        empty = {'code': np.zeros(0, object), **{f'{side}.levels': np.zeros((0, 3), np.int64) for side in BOOKS}}
         merged = {name: np.concatenate(parts.pop(name)) if name in parts else empty.get(name, np.zeros(0, np.int64))
-                  for name in (*INTS, 'code', *(f'{side}.{part}' for side in SIDES for part in ('counts', 'levels')))}
+                  for name in (*INTS, 'code', *(f'{side}.{part}' for side in BOOKS for part in ('counts', 'levels')))}
         books = {side: (np.concatenate([[0], np.cumsum(merged.pop(f'{side}.counts'))]), merged.pop(f'{side}.levels'))
-                 for side in SIDES}
-        return cls({k: merged[k] for k in INTS}, merged['code'], books, master, batches)
+                 for side in BOOKS}
+        filters = None if issue_id is None else [('issue_id', '=', issue_id)]
+        t, t_code = _decode_trades(pq.read_table(directory / TRADES, filters=filters), midnight)
+        return cls({k: merged[k] for k in INTS}, merged['code'], books, master, batches, t, t_code)
 
     def quotes(self, idx) -> list[dict]:
         """Quote dicts (as the decoder emits them) for these rows."""
         idx = np.asarray(idx, dtype=np.int64)
         values = {k: self.q[k][idx].tolist() for k in INTS[1:]}
         values['code'] = self.code[idx].tolist()
-        for side, (offsets, levels) in self.books.items():
+        for side, (offsets, levels) in self.books.items():  # noqa: B007
             counts = offsets[1:][idx] - offsets[:-1][idx]
             bounds = np.concatenate([[0], np.cumsum(counts)])
             flat = levels[np.arange(bounds[-1]) + np.repeat(offsets[:-1][idx] - bounds[:-1], counts)].tolist()
@@ -355,22 +422,45 @@ class Columns:
         return [dict(zip(QUOTE_ORDER, row)) for row in zip(*(values[k] for k in QUOTE_ORDER))]
 
     def iter_batches(self):
-        """The decoder's batches in order, quotes sorted by issue as in the canonical stream."""
-        seq = self.q['seq']
-        order = np.argsort(seq, kind='stable')
-        seqs = seq[order]
-        at = 0
+        """The decoder's batches in order: quotes sorted by issue, and trades by issue then in the decoder's
+        order, as in the canonical stream."""
+        order, t_order = np.argsort(self.q['seq'], kind='stable'), np.argsort(self.t['seq'], kind='stable')
+        seqs, t_seqs = self.q['seq'][order], self.t['seq'][t_order]
+        at = t_at = 0
         for b in self.batches:
-            end = int(np.searchsorted(seqs, b['seq'], 'right'))
-            require(int(np.searchsorted(seqs, b['seq'], 'left')) == at, 'Quotes outside their batches')
+            end, t_end = int(np.searchsorted(seqs, b['seq'], 'right')), int(np.searchsorted(t_seqs, b['seq'], 'right'))
+            require(int(np.searchsorted(seqs, b['seq'], 'left')) == at
+                    and int(np.searchsorted(t_seqs, b['seq'], 'left')) == t_at, 'Quotes or trades outside their batches')
             batch = dict(b)
             if b['type'] == 'bootstrap':
                 batch['master'] = self.master
-            if b['type'] != 'end' or end > at:
+            if b['type'] in ('bootstrap', 'quotes') or end > at:
                 batch['quotes'] = self.quotes(order[at:end])
-            at = end
+            if b['type'] != 'end' or t_end > t_at:
+                batch['trades'] = self.trades_at(t_order[t_at:t_end])
+            at, t_at = end, t_end
             yield batch
-        require(at == len(seqs), 'Quotes outside their batches')
+        require(at == len(seqs) and t_at == len(t_seqs), 'Quotes or trades outside their batches')
+
+    def trades_at(self, idx) -> list[dict]:
+        """Trade dicts (as the decoder emits them) for these trade rows."""
+        values = {k: self.t[k][idx].tolist() for k in TRADE_INTS[1:]}
+        values['code'] = self.t_code[idx].tolist()
+        keys = ('issue_id', 'code', 'frame', 'time_us', 'price10', 'quantity', 'side')
+        return [dict(zip(keys, row)) for row in zip(*(values[k] for k in keys))]
+
+    def trades(self, issue_id=None, low=None, high=None) -> list[dict]:
+        """Trades in order (one issue's, or every issue's by issue), within source times [low, high]."""
+        ids = self.t['issue_id']
+        rows = (np.arange(len(ids)) if issue_id is None else
+                np.arange(np.searchsorted(ids, issue_id, 'left'), np.searchsorted(ids, issue_id, 'right')))
+        times = self.t['time_us'][rows]
+        keep = np.ones(len(rows), bool)
+        if low is not None:
+            keep &= times >= low
+        if high is not None:
+            keep &= times <= high
+        return self.trades_at(rows[keep])
 
     def state(self, limit=None) -> dict[int, dict]:
         """Latest quote per issue at or before a source time (microseconds)."""
@@ -434,7 +524,7 @@ def _decode_depths(table, midnight):
     require(all(name.endswith(suffix) for name in names), 'Invalid identifier')
     out['code'] = np.array([name[:-len(suffix)] for name in names] + [None], dtype=object)[
         identifiers.indices.fill_null(len(names)).to_numpy(zero_copy_only=False)]
-    for side, name in zip(SIDES, ('bids', 'asks')):
+    for side, name in BOOKS.items():
         column = table.column(name).combine_chunks()
         bounds = column.offsets.to_numpy().astype(np.int64)
         items = column.flatten()
@@ -443,6 +533,24 @@ def _decode_depths(table, midnight):
         out[f'{side}.levels'] = (np.stack([_integers(items.field('price'), 1), _integers(items.field('size'), 0),
                                            _numbers(items.field('count'))], axis=1) if len(items) else np.zeros((0, 3), np.int64))
     return out
+
+
+def _decode_trades(table, midnight):
+    """Trade columns (vendor units) and codes from rows of the trades table."""
+    t = {'seq': _numbers(table.column('seq')), 'issue_id': _numbers(table.column('issue_id')),
+         'frame': _numbers(table.column('frame')), 'side': _numbers(table.column('side'))}
+    ts = _numbers(table.column('ts_event')) - midnight
+    require(not len(ts) or (ts.min() >= 0 and not (ts % 1000).any()), 'Invalid trade time')
+    t['time_us'] = ts // 1000
+    t['price10'] = _integers(table.column('price'), 1)
+    t['quantity'] = _integers(table.column('size'), 0)
+    identifiers = table.column('identifier').combine_chunks().dictionary_encode()
+    names = identifiers.dictionary.to_pylist()
+    suffix = '.' + VENUE
+    require(all(name.endswith(suffix) for name in names), 'Invalid identifier')
+    code = np.array([name[:-len(suffix)] for name in names] + [None], dtype=object)[
+        identifiers.indices.fill_null(len(names)).to_numpy(zero_copy_only=False)]
+    return {k: t[k] for k in TRADE_INTS}, code
 
 
 def _decode_equity(table):
@@ -516,26 +624,35 @@ def header(directory):
     return bootstrap, batches[-1]['source_time_us']
 
 
-def pack(directory) -> bytes:
-    """The package: a stored zip of the tables, byte-identical for identical tables."""
+def frames(directory):
+    """Every batch without master, quotes and trades, with how many quotes and trades it held."""
+    directory = Path(directory)
+    batches = _decode_batches(pq.read_table(directory / BATCHES))
+    counts = {name: np.bincount(_numbers(pq.read_table(directory / table, columns=['seq']).column('seq')),
+                                minlength=len(batches)) for name, table in (('quote_count', DEPTHS), ('trade_count', TRADES))}
+    return [{**b, **{name: int(c[i]) if i < len(c) else 0 for name, c in counts.items()}} for i, b in enumerate(batches)]
+
+
+def pack(directory, names=FILES) -> bytes:
+    """The package: a stored zip of the tables (`names`, all by default), byte-identical for identical tables."""
     directory = Path(directory)
     out = io.BytesIO()
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_STORED) as z:
-        for name in FILES:
+        for name in names:
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
             info.create_system, info.external_attr = 3, 0o644 << 16
             z.writestr(info, (directory / name).read_bytes())
     return out.getvalue()
 
 
-def unpack(data: bytes, directory):
-    """Extract a package's tables, refusing anything but exactly the stored tables."""
+def unpack(data: bytes, directory, names=FILES):
+    """Extract a package's tables, refusing anything but exactly the stored tables (`names`)."""
     directory = Path(directory)
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         infos = z.infolist()
-        require([i.filename for i in infos] == list(FILES) and all(i.compress_type == zipfile.ZIP_STORED for i in infos)
+        require([i.filename for i in infos] == list(names) and all(i.compress_type == zipfile.ZIP_STORED for i in infos)
                 and sum(i.file_size for i in infos) <= MAX_COMPRESSED, 'Unexpected package contents')
-        for name, info in zip(FILES, infos):
+        for name, info in zip(names, infos):
             (directory / name).parent.mkdir(parents=True, exist_ok=True)
             (directory / name).write_bytes(z.read(info))
 
@@ -558,6 +675,9 @@ def verify_tables(directory, columns):
     keys = np.stack([columns.q['issue_id'], columns.q['seq']], axis=1)
     require(not len(keys) or ((keys[1:, 0] > keys[:-1, 0]) | ((keys[1:, 0] == keys[:-1, 0]) & (keys[1:, 1] > keys[:-1, 1]))).all(),
             'Quotes not sorted by issue, then batch')
+    keys = np.stack([columns.t['issue_id'], columns.t['seq']], axis=1)
+    require(not len(keys) or ((keys[1:, 0] > keys[:-1, 0]) | ((keys[1:, 0] == keys[:-1, 0]) & (keys[1:, 1] >= keys[:-1, 1]))).all(),
+            'Trades not sorted by issue, then batch')
     for name, expected in ((EQUITY, columns._equity(midnight)), (BATCHES, columns._batches(midnight))):
         require(pq.read_table(directory / name).equals(expected), f'Non-canonical {name}')
     source = pq.ParquetFile(directory / DEPTHS)
@@ -568,6 +688,15 @@ def verify_tables(directory, columns):
         require(group.equals(rows._depths(midnight)), f'Non-canonical {DEPTHS}')
         at += len(group)
     require(at == len(columns), f'Non-canonical {DEPTHS}')
+    # Parquet rebuilds dictionaries from its pages, so aggressor sides compare as their strings.
+    plain = lambda table: table.set_column(2, 'aggressor_side', table.column(2).cast(pa.string()))  # noqa: E731
+    source = pq.ParquetFile(directory / TRADES)
+    at = 0
+    for i in range(source.num_row_groups):
+        group = source.read_row_group(i)
+        require(plain(group).equals(plain(columns._trades(midnight, slice(at, at + len(group))))), f'Non-canonical {TRADES}')
+        at += len(group)
+    require(at == len(columns.t_code), f'Non-canonical {TRADES}')
 
 
 def digest(data: bytes) -> str:
@@ -584,24 +713,16 @@ def inspect_package(directory, manifest, references=None):
     return summary
 
 
-def repack(data: bytes, manifest, references=None):
-    """Verify an upload and return (published manifest, the package to publish).
-
-    The published tables are the uploaded ones once their content validates and every value is its
-    canonical encoding (see check and verify_tables); the zip around them is the service's own.
-    """
+def verify_directory(directory, manifest, references=None):
+    """Verify an upload's tables (all four, in `directory`) against its manifest's summary: their content
+    validates, and every value is its canonical encoding (see check and verify_tables). Nothing is written."""
     validate_manifest(manifest)
-    require(len(data) == manifest['bytes'] and digest(data) == manifest['sha256'], 'Size/hash mismatch')
-    with tempfile.TemporaryDirectory() as tmp:
-        upload = Path(tmp)
-        unpack(data, upload)
-        check(upload)
-        columns = Columns.load(upload)
-        summary = validate_batches(columns.iter_batches(), references)
-        require(summary == manifest['summary'], 'Summary mismatch')
-        verify_tables(upload, columns)
-        blob = pack(upload)
-    return validate_manifest({**manifest, 'sha256': digest(blob), 'bytes': len(blob)}), blob
+    check(directory)
+    columns = Columns.load(directory)
+    summary = validate_batches(columns.iter_batches(), references)
+    require(summary == manifest['summary'], 'Summary mismatch')
+    verify_tables(directory, columns)
+    return summary
 
 
 # NautilusTrader v2 catalog
@@ -612,10 +733,12 @@ def _stamp(ns: int) -> str:
 
 
 def export_nautilus(directory, output) -> list[Path]:
-    """Write a NautilusTrader v2 catalog: Equity and OrderBookDepth per instrument, BriskQuote as custom data.
+    """Write a NautilusTrader v2 catalog: Equity, OrderBookDepth and TradeTick per instrument, and BriskQuote
+    as custom data.
 
     BriskQuote holds the rest of each quote in vendor units (prices in tenths of a yen, times in
-    microseconds after JST midnight, zero for none), as int64 columns a v2 `customdataclass` can declare.
+    microseconds after JST midnight, zero for none), as int64 columns a v2 `customdataclass` can declare,
+    and the closing-condition books as JSON text ([[price10, quantity, orders], ...], best first).
     """
     directory, output = Path(directory), Path(output)
     check(directory)
@@ -648,9 +771,23 @@ def export_nautilus(directory, output) -> list[Path]:
         n = end - start
         fields = {'instrument_id': pa.array([ident] * n)}
         fields |= {k: pa.array(columns.q[k][start:end], pa.int64()) for k in INTS}
+        quotes = columns.quotes(np.arange(start, end))
+        fields |= {name: pa.array([json.dumps(q[side], separators=(',', ':')) for q in quotes])
+                   for side, name in BOOKS.items() if side.endswith('closing_levels')}
         fields |= {'type': pa.array(['BriskQuote'] * n), 'ts_event': rows.column('ts_event'), 'ts_init': rows.column('ts_init'),
                    'data_type': pa.array([json.dumps({'type_name': 'BriskQuote', 'metadata': None, 'identifier': ident},
                                                      separators=(',', ':'))] * n)}
         put(output / 'data' / 'custom' / 'BriskQuote' / ident / span,
             pa.table(fields).replace_schema_metadata({'type_name': 'BriskQuote'}))
+    trades = pq.read_table(directory / TRADES)
+    trades = trades.set_column(2, 'aggressor_side', trades.column(2).cast(pa.string()).dictionary_encode().cast(
+        pa.dictionary(pa.int8(), pa.string())))
+    ids = trades.column('identifier').to_pylist()
+    starts = [i for i in range(len(ids)) if i == 0 or ids[i] != ids[i - 1]]
+    for start, end in zip(starts, starts[1:] + [len(ids)]):
+        ident, rows = ids[start], trades.slice(start, end - start)
+        ts = rows.column('ts_init').cast(pa.int64())
+        put(output / 'data' / 'trades' / ident / f'{_stamp(ts[0].as_py())}_{_stamp(ts[-1].as_py())}.parquet',
+            rows.select(V2_TRADE).replace_schema_metadata(
+                {'instrument_id': ident, 'price_precision': '1', 'size_precision': '0', 'type_name': 'TradeTick'}))
     return written

@@ -1,11 +1,11 @@
 'use strict';
-// SBI live host against a fake sbi.brisk.jp and WebSocket, driven by the demo's
-// real decoder and frames (no SBI account or network needed).
+// The BRiSK live host against a fake sbi.brisk.jp (and e-shiten) and WebSocket, driven by the
+// demo's real decoder and frames (no broker account or network needed).
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { Session, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, main, fetchCatchUp } = require('../../briskapi/decoder/sbi.cjs');
+const { Session, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, fetchCatchUp } = require('../../briskapi/decoder/brisk.cjs');
 const { frames, Decoder } = require('../../briskapi/decoder/decoder.cjs');
 const cache = process.env.BRISK_MOCK_CACHE;
 
@@ -80,7 +80,7 @@ test('session sends cookies, refuses redirects and reports expiry', async () => 
   assert.throws(() => checkAbi({ _initialize() {} }), /missing _push/);
 });
 
-test('SBI host bootstraps from boot, master and snapshot, then streams frames', { skip: !cache }, async () => {
+test('the BRiSK host bootstraps from boot, master and snapshot, then streams frames', { skip: !cache }, async () => {
   const { files, chunks } = demo();
   const { fetchImpl, requests } = server(files);
   const batches = [];
@@ -105,6 +105,50 @@ test('SBI host bootstraps from boot, master and snapshot, then streams frames', 
   assert.deepEqual(rest.map(b => b.seq), [1, 2, 3, 4, 5, 6]);
   assert.equal(rest.at(-1).type, 'end');
   assert.equal(summary.frames, 6);
+});
+
+// A socket that delivers the chunks and stays open until the host closes it.
+function heldSocket(chunks) {
+  return class extends EventTarget {
+    constructor(url, init) {
+      super();
+      setImmediate(() => {
+        for (const chunk of chunks) {
+          this.dispatchEvent(new MessageEvent('message', { data: chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.length) }));
+        }
+      });
+    }
+    close() {
+      if (this.closed) return;
+      this.closed = true;
+      this.dispatchEvent(Object.assign(new Event('close'), { code: 1005, reason: '' }));
+    }
+  };
+}
+
+test('the host records one day after another, each its own bootstrap ... end, rolling when the site serves a new date',
+  { skip: !cache }, async () => {
+  const { files, chunks } = demo();
+  let served = '2021-09-27';
+  const { fetchImpl } = server(files, { '/api/app/boot': () => JSON.stringify({ date: served, series: 0, master: 'm1',
+    snapshot: 's1', ws_url: '/realtime/0?session=abc' }) });
+  const batches = [], waits = [];
+  // Day one ends when the server closes the stream; day two stays open until the day check sees a new date.
+  let sockets = 0;
+  const WebSocketImpl = class { constructor(...a) { return new (sockets++ ? heldSocket(chunks) : socketFrom(chunks))(...a); } };
+  const emit = async b => {
+    batches.push(b);
+    if (b.type === 'bootstrap' && b.trading_date === '20210928') served = '2021-09-29';
+  };
+  await record({ days: 2, cookies: { s: 'v' }, codes: ['7203'], emit, fetchImpl, WebSocketImpl, protocolVersion: 16000,
+    dayCheckMs: 20, sleep: async ms => { waits.push(ms); served = '2021-09-28'; } });
+  assert.deepEqual(batches.filter(b => b.type === 'bootstrap').map(b => b.trading_date), ['20210927', '20210928']);
+  assert.deepEqual(waits, [20], 'day two waited for the site to serve the next date');
+  // Each day runs bootstrap ... end, numbered from its own bootstrap.
+  const second = batches.findIndex((b, i) => i && b.type === 'bootstrap');
+  assert.equal(batches[second].seq, 0);
+  assert.equal(batches[second - 1].type, 'end');
+  assert.equal(batches.at(-1).type, 'end');
 });
 
 test('e-shiten: its own address, a relative bundle, a templated decoder and the stream on the API host',
@@ -161,7 +205,7 @@ test('bundles on other hosts are never fetched, and a session is never streamed 
   }
 });
 
-test('SBI host fails loudly on changed sites, unknown codes and abnormal closes', { skip: !cache }, async () => {
+test('the BRiSK host fails loudly on changed sites, unknown codes and abnormal closes', { skip: !cache }, async () => {
   const { files, chunks } = demo();
   const run = (overrides, options = {}) => live({ cookies: { s: 'v' }, emit: async () => {}, protocolVersion: 16000,
     fetchImpl: server(files, overrides).fetchImpl, WebSocketImpl: socketFrom(chunks), ...options });
@@ -171,6 +215,7 @@ test('SBI host fails loudly on changed sites, unknown codes and abnormal closes'
   await assert.rejects(run({}, { WebSocketImpl: socketFrom([]) }), /closed/);
   await assert.rejects(main(['--bad']), /Usage/);
   await assert.rejects(main([], {}), /BRISK_SBI_COOKIES/);
+  await assert.rejects(main([], { BRISK_SITE: 'e-shiten', BRISK_SBI_COOKIES: '{"a":"b"}' }), /Set BRISK_ESHITEN_COOKIES to your e-shiten/);
 });
 
 // ---------------------------------------------------------------------------------------
@@ -216,7 +261,7 @@ const withHost = files => server(files, {
     ws_url: `/realtime/0?session=${WS_SESSION}` }),
 });
 
-test('SBI host speaks Engine.IO/Socket.IO when the server does, with secrets kept out of the trace',
+test('the BRiSK host speaks Engine.IO/Socket.IO when the server does, with secrets kept out of the trace',
   { skip: !cache }, async () => {
     const { files, chunks } = demo();
     const { fetchImpl, requests } = withHost(files);
@@ -263,7 +308,7 @@ test('a refused market token or namespace is a clear error, not a hang', { skip:
     }
   };
   await assert.rejects(run({}, refusing), /Socket\.IO connect error on \/v2\/user: \{"message":"bad api_key"\}/);
-  await assert.rejects(run({}, engineSocket(chunks), { profile: { startLiv: {} } }), /Unknown SBI profile keys/);
+  await assert.rejects(run({}, engineSocket(chunks), { profile: { startLiv: {} } }), /Unknown BRiSK profile keys/);
 });
 
 test('profile overrides reach the connect query and the startLive payload', { skip: !cache }, async () => {
@@ -467,8 +512,8 @@ test('arguments and profile are validated before anything is fetched', async () 
   await assert.rejects(main(['--codes', '7203', '--codes', '6758'], { BRISK_SBI_COOKIES: cookies }), /Usage/);
   await assert.rejects(main(['--trace-protocol', '--trace-protocol'], { BRISK_SBI_COOKIES: cookies }), /Usage/);
   await assert.rejects(main(['--codes'], { BRISK_SBI_COOKIES: cookies }), /Usage/);
-  await assert.rejects(main([], { BRISK_SBI_COOKIES: cookies, BRISK_SBI_PROFILE: '{nope' }), /BRISK_SBI_PROFILE is not valid JSON/);
-  await assert.rejects(main([], { BRISK_SBI_COOKIES: cookies, BRISK_SBI_PROFILE: '{"nope":1}' }), /Unknown SBI profile keys: nope/);
+  await assert.rejects(main([], { BRISK_SBI_COOKIES: cookies, BRISK_PROFILE: '{nope' }), /BRISK_PROFILE is not valid JSON/);
+  await assert.rejects(main([], { BRISK_SBI_COOKIES: cookies, BRISK_PROFILE: '{"nope":1}' }), /Unknown BRiSK profile keys: nope/);
 });
 
 test('fetchCatchUp sends the vendor client\'s issue lists unless told otherwise, and names an unknown format', async () => {
@@ -640,5 +685,5 @@ test('the ping loop runs through the real decoder: pings are forwarded, echoes b
 });
 
 test('a live session allows the SBI app\'s 10 s between server heartbeats', () => {
-  assert.equal(require('../../briskapi/decoder/sbi.cjs').HEARTBEAT_MS, 10000);
+  assert.equal(require('../../briskapi/decoder/brisk.cjs').HEARTBEAT_MS, 10000);
 });

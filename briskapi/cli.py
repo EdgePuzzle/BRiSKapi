@@ -1,56 +1,55 @@
 #!/usr/bin/env python3
-"""Consume BRiSK auction data live, record and automatically contribute it, and use the shared archive."""
+"""Consume BRiSK auction data live, record it, upload it to your private archive and use that archive."""
 import argparse
 import datetime as dt
 import json
 import os
 from pathlib import Path
 import re
-import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import uuid
 import warnings
 
-import boto3
-from botocore import UNSIGNED
-from botocore.config import Config
-from briskapi import _parquet
+from briskapi import _parquet, identity
 from briskapi._recording import BriskError, Recording
-from briskapi.schema import (SCHEMA, MAX_COMPRESSED, MAX_TIMING_BYTES, canonical_batches, encode, validate_manifest,
-                             validate_timing, require)
+from briskapi.schema import (RECORDING_PREFIX, REFERENCES, SCHEMA, MAX_COMPRESSED, TIMING_KEY, canonical_batches, encode,
+                             local_name, owner, recording_name, validate_manifest, validate_timing, require)
 
 PACKAGE = Path(__file__).resolve().parent
 # BRiSK's own WASM decoder runs under Node; the package ships only this host and SHA-256 pins.
 DECODER = PACKAGE / 'decoder' / 'decoder.cjs'
 MIN_NODE = 22
-LICENSES = ('CC0-1.0', 'CC-BY-4.0')
 # Bump with any PRIVACY.md change to what is collected; saved choices then lapse.
-POLICY_VERSION = 5
+POLICY_VERSION = 6
 NOTICE = '''\
-Sessions are contributed to the shared public BRiSK archive automatically.
-After each clean, complete demo replay the contribution contains:
-  - the decoded market data you recorded (checked against the reference replay);
-  - local timing measurements: decode durations, replay lateness, asset download
-    time and your computer's receipt clock, which shows when you recorded;
-  - your public alias and data license, in the published manifest.
-Broker BRiSK sessions (SBI, Tachibana e-shiten) contribute a timing summary: decode
-time, data age and frame spacing percentiles, stalls, frame count, date and start/end
-minute. At the start of each interactive broker capture, a separate question asks
-whether to publish its decoded market recording too; Enter accepts for that session
-only. Scripts can opt in with --share-market-data or sbi.connect(share_market_data=True). This
-publishes its securities master, prices, quantities, the ten best order-book levels on
-each side, codes and per-frame timing.
-Cookies, tokens and connection diagnostics are never published.
-Contributions are public and permanent. Your IP address is used only for
-upload rate limiting. No account, file, hostname or system details are sent.
-Accepting declares that you may redistribute these recordings under that license.
+briskapi uploads your sessions to your private BRiSK archive: a free, off-computer copy
+of every complete session, reachable from any computer with your identity and checked on
+arrival (a complete demo replay must match the reference). Keep recordings there and free
+your disk with `brisk prune`; `brisk pull` brings them back.
+Only you can list, download or delete your uploads. They are filed under your identity, a
+random key made on this computer and never registered, kept in your system's credential
+store and in ~/.config/brisk/identity.json. The archive's operator can access what it
+stores. What you delete can be restored for 30 days and is then removed.
+Every clean, complete session uploads automatically (the default; you can decline):
+  - demo sessions: the decoded market data and local timing measurements (decode
+    durations, replay lateness, asset download time and your computer's receipt clock,
+    which shows when you recorded);
+  - broker BRiSK sessions (SBI, Tachibana e-shiten): a timing summary (decode time, data
+    age and frame spacing percentiles, stalls, frame count, date and start/end minute)
+    and the decoded market recording: securities master, prices, quantities, the ten best
+    order-book levels on each side (and of the closing-condition orders), the board's
+    order totals, every trade (time, price, shares and side), codes and per-frame timing.
+Cookies, tokens and connection diagnostics are never uploaded. Your IP address is used
+only for upload rate limiting. No account, file, hostname or system details are sent.
 Policy: https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md
-Opt out at any time: `brisk consent --revoke` or BRISK_CONTRIBUTE=0.
+Opt out for one run with --no-upload (or --no-upload-market-data to keep a broker
+capture's market data local), and for good with `brisk consent --revoke` or BRISK_UPLOAD=0.
 '''
 
 def check_node(node='node'):
@@ -71,23 +70,19 @@ def settings(path=None):
     return json.loads((path or PACKAGE / 'archive.json').read_text())
 
 def consent_path():
-    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'brisk' / 'contribution.json'
+    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'brisk' / 'uploads.json'
 
 def load_consent():
-    """The saved contribution choice under the current policy, or None if undecided."""
+    """The saved upload choice under the current policy, or None if none is saved yet."""
     try:
         choice = json.loads(consent_path().read_text())
     except (OSError, ValueError):
         return None
     return choice if isinstance(choice, dict) and choice.get('policy_version') == POLICY_VERSION else None
 
-def save_consent(enabled, contributor=None, license=None):
+def save_consent(enabled):
     choice = dict(policy_version=POLICY_VERSION, enabled=bool(enabled),
                   decided_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'))
-    if enabled:
-        choice.update(contributor=contributor or f'anon-{secrets.token_hex(4)}', license=license or 'CC0-1.0')
-        require(re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', choice['contributor']), 'Alias: 1-64 letters, digits, _ . -')
-        require(choice['license'] in LICENSES, 'Unsupported data license')
     path = consent_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(choice, indent=2) + '\n')
@@ -97,33 +92,62 @@ def interactive():
     return sys.stdin.isatty() and sys.stderr.isatty()
 
 def ask_consent():
-    """One-time first-run question; Enter accepts. Prompts go to stderr, never stdout."""
-    alias = f'anon-{secrets.token_hex(4)}'
-    sys.stderr.write(NOTICE + f"Contribute automatically as '{alias}' under CC0-1.0? [Y/n] ")
+    """One-time first-run question; Enter accepts. Prompts go to stderr, never stdout. Accepting makes the
+    identity (if there is none) and shows it."""
+    sys.stderr.write(NOTICE + 'Upload automatically to your private archive? [Y/n] ')
     sys.stderr.flush()
-    accepted = sys.stdin.readline().strip().lower() in {'', 'y', 'yes'}
-    return save_consent(accepted, alias)
+    answer = sys.stdin.readline()  # end of input is no answer, not Enter
+    return accept(bool(answer) and answer.strip().lower() in {'', 'y', 'yes'})
 
-def ask_market_sharing(choice, site='SBI'):
-    """An explicit choice at the beginning of each broker capture; never saved."""
-    sys.stderr.write(f'Share this {site} capture publicly? This publishes the securities master, codes, prices, '
-                     'quantities and local per-frame timing, after a clean session end. Cookies, tokens and '
-                     'connection diagnostics are excluded. '
-                     f"Publish as '{choice['contributor']}' under {choice['license']}? [Y/n] ")
+def accept(enabled=True):
+    """Save the upload choice; turning uploads on makes the identity if needed and shows it on stderr."""
+    choice = save_consent(enabled)
+    if enabled:
+        show_identity(*identity.ensure())
+    return choice
+
+def show_identity(value, created):
+    sys.stderr.write(f'Your archive identity: owner {owner(value)}.\n')
+    if created and interactive():
+        sys.stderr.write(f'Recovery code (write it down; `brisk identity --recover CODE` restores your archive on any '
+                         f'computer): {identity.recovery_code(value)}\n')
+    elif created:
+        sys.stderr.write('Write down its recovery code (`brisk identity --recovery-code`): it restores your archive on '
+                         'any computer.\n')
     sys.stderr.flush()
-    answer = sys.stdin.readline()
-    return bool(answer) and answer.strip().lower() in {'', 'y', 'yes'}
+
+def opted_out(upload=None):
+    """True when this process or run opts out of uploads (BRISK_UPLOAD=0, --no-upload, upload=False)."""
+    return upload is False or os.environ.get('BRISK_UPLOAD') == '0'
+
+DEFAULT = {'policy_version': POLICY_VERSION, 'enabled': True, 'default': True}
+_told = False
+
+def consented(upload=None, ask=True, notify=None):
+    """The choice for a run: the saved one; with none, the CLI asks once on a terminal (`ask`), and a run that
+    can't ask (the Python API, a CLI without a terminal) uploads by default, saying so once per process."""
+    choice = load_consent()
+    if choice is not None:
+        return choice
+    if opted_out(upload):
+        return dict(DEFAULT)  # packaged as usual, not uploaded
+    if ask and interactive():
+        return ask_consent()
+    global _told
+    if not _told:
+        _told = True
+        (notify or tell_default)(*identity.ensure())
+    return dict(DEFAULT)
+
+def tell_default(value, created):
+    sys.stderr.write(NOTICE + 'Nothing here can ask, so uploads are on by default until you decide '
+                     '(`brisk consent --accept` or `--revoke`).\n')
+    show_identity(value, created)
 
 def declaration(args):
-    """Alias and license for this run, or None to keep the recording local."""
-    if args.contributor or args.license or args.redistribution_permitted:
-        require(args.contributor and args.license and args.redistribution_permitted,
-                'Use --contributor, --license and --redistribution-permitted together')
-        return dict(contributor=args.contributor, license=args.license)
-    choice = load_consent()
-    if choice is None and args.upload is not False and os.environ.get('BRISK_CONTRIBUTE') != '0' and interactive():
-        choice = ask_consent()
-    return {k: choice[k] for k in ('contributor', 'license')} if choice and choice['enabled'] else None
+    """Whether this run's recording is packaged for upload: the saved choice (asked once, interactively)."""
+    choice = consented(args.upload)
+    return bool(choice and choice['enabled'])
 
 def save_recording(events, output):
     """Keep decoder JSONL locally as a recording directory (Parquet tables, no manifest)."""
@@ -137,7 +161,7 @@ def save_recording(events, output):
             (output / name).unlink(missing_ok=True)
         raise
 
-def package(events, output, contributor, license):
+def package(events, output):
     """Encode decoder JSONL as a package: the recording's tables plus a manifest of their zip."""
     output.mkdir(parents=True, exist_ok=True)
     require(not any((output / name).exists() for name in (*_parquet.FILES, 'manifest.json')), 'Package output already exists')
@@ -147,8 +171,7 @@ def package(events, output, contributor, license):
         blob = _parquet.pack(output)
         require(len(blob) <= MAX_COMPRESSED, f'The package is {len(blob) / 2**20:.0f} MiB; '
                                              f'the archive accepts up to {MAX_COMPRESSED // 2**20} MiB')
-        m = validate_manifest(dict(schema=SCHEMA, sha256=_parquet.digest(blob), bytes=len(blob), summary=summary,
-                                   contributor=contributor, license=license, redistribution_permitted=True))
+        m = validate_manifest(dict(schema=SCHEMA, sha256=_parquet.digest(blob), bytes=len(blob), summary=summary))
     except BaseException:
         for name in _parquet.FILES:
             (output / name).unlink(missing_ok=True)
@@ -156,19 +179,39 @@ def package(events, output, contributor, license):
     (output / 'manifest.json').write_text(json.dumps(m, indent=2) + '\n')
     return m
 
-def request_json(url, data=None):
-    request = urllib.request.Request(url, data=None if data is None else json.dumps(data).encode(),
-                                     headers={'Content-Type': 'application/json'})
+def request_json(url, data=None, secret=None):
+    headers = {'Content-Type': 'application/json', **({'Authorization': f'Bearer {secret}'} if secret else {})}
+    request = urllib.request.Request(url, data=None if data is None else json.dumps(data).encode(), headers=headers)
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.load(response)
 
-def contribute(directory, api_url, timeout=660, verify=True, out=None):
+def api(api_url, action, **fields):
+    """One archive request as this computer's identity (made on first use)."""
+    return request_json(api_url, {'action': action, **fields}, identity.secret())
+
+def upload(directory, api_url, timeout=660, verify=True, out=None, market=None):
+    """Upload a package to your private archive and wait for its validation.
+
+    A demo (or synthetic) replay's market data is the same for everyone and the archive keeps it once,
+    so such a package sends only its timing table once the archive holds that copy; `market=True`
+    sends the whole recording anyway.
+    """
     m = json.loads((directory / 'manifest.json').read_text())
     if verify:
         _parquet.inspect_package(directory, m)
     blob = _parquet.pack(directory)
     require(len(blob) == m['bytes'] and _parquet.digest(blob) == m['sha256'], 'Size/hash mismatch')
-    ticket = request_json(api_url, m)
+    ticket = None
+    if not market and REFERENCES.get(m['summary']['source']):
+        timing = _parquet.pack(directory, (_parquet.BATCHES,))
+        try:
+            ticket = api(api_url, 'upload', manifest=m, part={'sha256': _parquet.digest(timing), 'bytes': len(timing)})
+            blob = timing
+        except urllib.error.HTTPError as error:
+            if error.code != 409:  # 409: the archive has no copy of the market data yet
+                raise
+    if ticket is None:
+        ticket = api(api_url, 'upload', manifest=m, part=None)
     # S3 browser POST policies bind key, encryption, content type and exact size.
     # The archive's 64 MiB cap bounds the multipart body below 65 MiB.
     boundary = uuid.uuid4().hex
@@ -186,76 +229,123 @@ def contribute(directory, api_url, timeout=660, verify=True, out=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         status = request_json(status_url)
-        if status['status'] == 'published':
+        if status['status'] == 'stored':
             return status
         require(status['status'] != 'rejected', 'Automatic validation rejected recording: ' + status.get('reason', 'unknown'))
         time.sleep(3)
-    raise TimeoutError(f'Publication still pending; check {status_url}')
+    raise TimeoutError(f'Upload still being validated; check {status_url}')
 
-def client(config):
-    return boto3.client('s3', region_name=config['region'], config=Config(signature_version=UNSIGNED))
+def upload_timing(report, api_url):
+    """Keep a timing-only report (no market data) in your archive; returns the service's response."""
+    return api(api_url, 'timing', report=report)
 
-def contribute_timing(report, api_url):
-    """Publish a timing-only report (no market data); returns the service's response."""
-    return request_json(api_url, {'timing': report})
+def _listing(api_url, kind, date):
+    require(date is None or (len(date) == 8 and date.isdigit()), 'Date must be YYYYMMDD')
+    after = None
+    while True:
+        page = api(api_url, 'list', kind=kind, date=date, after=after)
+        yield from page['items']
+        if not (after := page['next']):
+            return
 
-def timing_reports(s3, bucket, date=None):
-    """Published timing reports, newest dates last."""
-    prefix = 'timing/'
-    if date:
-        require(len(date) == 8 and date.isdigit(), 'Date must be YYYYMMDD')
-        prefix += date + '/'
-    for page in s3.get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=prefix):
-        for item in page.get('Contents', []):
-            body = s3.get_object(Bucket=bucket, Key=item['Key'])['Body']
-            with body:
-                yield item['Key'], validate_timing(json.loads(body.read(MAX_TIMING_BYTES + 1)))
+def timing_reports(api_url, date=None):
+    """Your timing reports, oldest dates first."""
+    who = identity.owner_id()
+    for item in _listing(api_url, 'timing', date):
+        found = TIMING_KEY.fullmatch(item['key'])
+        require(found and found[1] == who, 'Archive identity mismatch')
+        yield item['key'], validate_timing(item['report'])
 
-def manifests(s3, bucket, date=None):
-    prefix = 'archive/'
-    if date:
-        require(len(date) == 8 and date.isdigit(), 'Date must be YYYYMMDD')
-        prefix += date + '/'
-    for page in s3.get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=prefix):
-        for item in page.get('Contents', []):
-            if item['Key'].endswith('/manifest.json'):
-                entry_prefix = item['Key'].rsplit('/', 1)[0]
-                try:
-                    m = _read_manifest(s3, bucket, entry_prefix)
-                except (ValueError, TypeError, KeyError, RecursionError):
-                    warnings.warn(f'Skipping invalid or unsupported archive manifest: {item["Key"]}', stacklevel=2)
-                    continue
-                yield entry_prefix, m
+def manifests(api_url, date=None):
+    """Your recordings, as (prefix, manifest); invalid or unsupported ones are skipped with a warning."""
+    who = identity.owner_id()
+    for item in _listing(api_url, 'recordings', date):
+        try:
+            yield item['prefix'], _check_manifest(item['prefix'], item['manifest'], who)
+        except (ValueError, TypeError, KeyError, RecursionError):
+            warnings.warn(f'Skipping invalid or unsupported archive manifest: {item.get("prefix")}', stacklevel=2)
 
-def _read_manifest(s3, bucket, prefix):
-    obj = s3.get_object(Bucket=bucket, Key=f'{prefix}/manifest.json')
-    with obj['Body'] as body:
-        require(obj['ContentLength'] <= 65536, 'Remote manifest exceeds limit')
-        data = body.read(65537)
-        require(len(data) <= 65536, 'Remote manifest exceeds limit')
-    m = validate_manifest(json.loads(data))
-    require(prefix == f"archive/{m['summary']['trading_date']}/{m['sha256']}", 'Archive identity mismatch')
+def _check_manifest(prefix, manifest, who):
+    m = validate_manifest(manifest)
+    require(isinstance(prefix, str) and RECORDING_PREFIX.fullmatch(prefix) and prefix == f'archive/{who}/{recording_name(m)}',
+            'Archive identity mismatch')
     return m
 
-def pull(s3, bucket, prefix, output):
-    require(re.fullmatch(r'archive/\d{8}/[0-9a-f]{64}', prefix), 'Invalid archive prefix')
+def pull(api_url, prefix, output):
+    """Download one of your recordings, verify it and keep its tables and manifest in `output`."""
+    require(isinstance(prefix, str) and RECORDING_PREFIX.fullmatch(prefix), 'Invalid archive prefix')
     require(not output.exists(), 'Download output already exists')
+    found = api(api_url, 'download', prefix=prefix)
+    # Refuse unsupported sources and identities before downloading payloads.
+    m = _check_manifest(prefix, found['manifest'], identity.owner_id())
+    urls = found['files']
+    require(isinstance(urls, dict) and set(urls) == set(_parquet.FILES)
+            and all(isinstance(url, str) and url.startswith('https://') for url in urls.values()), 'Invalid download URLs')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent) as tmp:
-        directory = Path(tmp)
-        # Refuse unsupported sources and identities before downloading payloads.
-        m = _read_manifest(s3, bucket, prefix)
-        obj = s3.get_object(Bucket=bucket, Key=f'{prefix}/recording.zip')
-        with obj['Body'] as body:
-            require(obj['ContentLength'] <= MAX_COMPRESSED, 'Remote object exceeds limit')
-            data = body.read(MAX_COMPRESSED + 1)
-        require(len(data) == m['bytes'] and _parquet.digest(data) == m['sha256'], 'Size/hash mismatch')
-        # Only the tables are kept: they re-pack to the published zip byte for byte.
-        _parquet.unpack(data, directory)
+        directory, total = Path(tmp), 0
+        for name in _parquet.FILES:
+            with urllib.request.urlopen(urls[name], timeout=120) as body:
+                data = body.read(MAX_COMPRESSED + 1 - total)
+            total += len(data)
+            require(total <= m['bytes'], 'Size/hash mismatch')
+            (directory / name).parent.mkdir(parents=True, exist_ok=True)
+            (directory / name).write_bytes(data)
+        # The tables pack to the zip the manifest hashes, byte for byte.
+        blob = _parquet.pack(directory)
+        require(len(blob) == m['bytes'] and _parquet.digest(blob) == m['sha256'], 'Size/hash mismatch')
         _parquet.inspect_package(directory, m)
         (directory / 'manifest.json').write_text(json.dumps(m, indent=2) + '\n')
         shutil.move(str(directory), str(output))
     return m
+
+def delete(api_url, prefix):
+    """Remove one of your recordings (or timing reports) from your archive; `restore` brings it back within
+    30 days; after that it is removed."""
+    return api(api_url, 'delete', prefix=prefix)
+
+def deleted(api_url, date=None):
+    """What you deleted and can still restore: recordings (prefix, manifest) and timing reports (key, report),
+    each with deleted_at and restore_until."""
+    who = identity.owner_id()
+    for item in _listing(api_url, 'deleted', date):
+        found = RECORDING_PREFIX.fullmatch(item.get('prefix', '')) or TIMING_KEY.fullmatch(item.get('key', ''))
+        require(found and found[1] == who, 'Archive identity mismatch')
+        yield item
+
+def restore(api_url, prefix):
+    """Bring back one of your recordings (or timing reports) deleted in the last 30 days."""
+    return api(api_url, 'restore', prefix=prefix)
+
+def prune(api_url, directory):
+    """Free disk space: remove a local package (tables and manifest) once your archive holds it, verified by its
+    SHA-256. `brisk pull` brings it back. Anything else in the folder is left alone."""
+    directory = Path(directory)
+    require((directory / 'manifest.json').exists(), f'{directory} has no manifest: only an uploaded package can be pruned')
+    m = validate_manifest(json.loads((directory / 'manifest.json').read_text()))
+    require(_parquet.digest(_parquet.pack(directory)) == m['sha256'], f'{directory} differs from its manifest; not pruned')
+    listed = list(manifests(api_url, m['summary']['trading_date']))
+    held = [prefix for prefix, stored in listed if stored['sha256'] == m['sha256']]
+    if not held and REFERENCES.get(m['summary']['source']):
+        # The archive keeps a demo replay's market tables once, so they may differ from these byte for byte (not in
+        # content: both are verified); what is this recording's own is its timing table.
+        timing = (directory / _parquet.BATCHES).read_bytes()
+        held = [prefix for prefix, stored in listed if stored['summary'] == m['summary'] and _stored_table(api_url, prefix) == timing]
+    require(held, f'Your archive does not hold {directory} yet: upload it first (`brisk upload {directory}`)')
+    files = [directory / name for name in (*_parquet.FILES, 'manifest.json')]
+    freed = sum(f.stat().st_size for f in files)
+    for f in files:
+        f.unlink()
+    for folder in (directory / 'data' / 'custom', directory / 'data', directory):
+        if folder.is_dir() and not any(folder.iterdir()):
+            folder.rmdir()
+    return {'pruned': str(directory), 'bytes': freed, 'prefix': held[0]}
+
+def _stored_table(api_url, prefix, name=_parquet.BATCHES):
+    url = api(api_url, 'download', prefix=prefix)['files'][name]
+    require(isinstance(url, str) and url.startswith('https://'), 'Invalid download URL')
+    with urllib.request.urlopen(url, timeout=120) as body:
+        return body.read(MAX_COMPRESSED + 1)
 
 def export(source, nautilus=None, jsonl=None):
     """Write a recording as a NautilusTrader v2 catalog or as canonical JSONL (for brisk_recording)."""
@@ -292,24 +382,21 @@ def record_events(events, web=False, cache=None, codes=None, limit_frames=None, 
         subprocess.run([node, str(DECODER), *options], check=True, stdout=out)
 
 def live(args):
-    """Print each quote update as one JSON line; a complete session is contributed per consent."""
-    from briskapi import connect, sbi  # The API package builds on this module.
+    """Print each quote update as one JSON line; a complete session is uploaded per consent."""
+    from briskapi import brisk, connect  # The API package builds on this module.
     codes = args.codes.split(',') if args.codes else None
     if args.site:
-        sbi.login(site=args.site)  # Missing cookies fail before consent prompts or decoder startup.
-    if load_consent() is None and os.environ.get('BRISK_CONTRIBUTE') != '0' and interactive():
-        ask_consent()
-    share_market_data = args.share_market_data
-    choice = load_consent()
-    if (args.site and share_market_data is None and choice and choice['enabled']
-            and os.environ.get('BRISK_CONTRIBUTE') != '0' and interactive()):
-        share_market_data = ask_market_sharing(choice, 'SBI' if args.site == 'sbi' else 'e-shiten')
+        brisk.login(site=args.site)  # Missing cookies fail before the notice, questions or decoder startup.
+    consented(args.upload)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
+        report = lambda day: print(json.dumps({'day': day}), file=sys.stderr, flush=True)  # noqa: E731
         if args.site:
-            feed = sbi.connect(codes=codes, trace_protocol=args.trace_protocol, share_market_data=bool(share_market_data))
+            feed = brisk.connect(codes=codes, trace_protocol=args.trace_protocol, upload=args.upload,
+                                 upload_market_data=args.upload_market_data, output=args.output, on_day=report)
         else:
-            feed = connect(web=args.web, cache=args.cache, codes=codes, speed=args.speed, limit_frames=args.limit_frames)
+            feed = connect(web=args.web, cache=args.cache, codes=codes, speed=args.speed, limit_frames=args.limit_frames,
+                           upload=args.upload, output=args.output, on_day=report)
     for warning in caught:
         print(warning.message, file=sys.stderr)
     try:
@@ -318,10 +405,9 @@ def live(args):
         feed.wait()
     finally:
         feed.close()
-    if feed.contribution:
-        print(json.dumps({'contribution': feed.contribution}), file=sys.stderr)
-    if feed.timing_contribution:
-        print(json.dumps({'timing_contribution': feed.timing_contribution}), file=sys.stderr)
+    # A day closed before its end uploads only its timing summary.
+    if feed.timing_uploaded and not (feed.recordings and feed.recordings[-1]['timing_uploaded'] is feed.timing_uploaded):
+        print(json.dumps({'timing_uploaded': feed.timing_uploaded}), file=sys.stderr)
 
 def passkey_command(args):
     """`brisk sites|enroll|login|forget`: sign in to your broker's BRiSK with a passkey held in a Chrome virtual authenticator."""
@@ -362,12 +448,8 @@ def _main(argv):
     for name in ('record', 'package'):
         p = sub.add_parser(name, help='Record a demo replay' if name == 'record' else 'Package a recording')
         p.add_argument('--output', type=Path, required=True)
-        p.add_argument('--contributor', help='Public alias (defaults to the saved consent choice)')
-        p.add_argument('--license', choices=LICENSES)
-        p.add_argument('--redistribution-permitted', action='store_true',
-                       help='Declare permission to redistribute this recording under the selected data license')
         p.add_argument('--upload', action=argparse.BooleanOptionalAction, default=None,
-                       help='Contribute after packaging (default: yes once contribution consent is saved)')
+                       help='Upload to your private archive after packaging (default: yes once upload consent is saved)')
         if name == 'record':
             group = p.add_mutually_exclusive_group(required=True)
             group.add_argument('--web', action='store_true')
@@ -386,15 +468,19 @@ def _main(argv):
     p.add_argument('--speed', type=float, default=1)
     p.add_argument('--limit-frames', type=int)
     p.add_argument('--raw', action='store_true', help='Vendor fields (price10, microseconds) instead of yen/ISO times')
+    p.add_argument('--output', type=Path, metavar='DIR',
+                   help='Keep each finished day here as SOURCE_YYYYMMDD_FROM-TO (its first and last clock, JST HHMMSS)')
     group.add_argument('--sbi', action='store_const', dest='site', const='sbi',
-                       help='Live SBI BRiSK (experimental); cookies from BRISK_SBI_COOKIES, saved with sbi.login(remember=True) or by `brisk login`')
+                       help='Live SBI BRiSK (experimental); cookies from BRISK_SBI_COOKIES, saved with brisk.login(remember=True) or by `brisk login`')
     group.add_argument('--site', choices=('sbi', 'e-shiten'),
                        help='Live BRiSK of this broker (experimental); --site e-shiten for Tachibana e-shiten BRiSK Next, '
-                            "cookies from BRISK_ESHITEN_COOKIES, saved with sbi.login(site='e-shiten', remember=True) or by `brisk login`")
+                            "cookies from BRISK_ESHITEN_COOKIES, saved with brisk.login(site='e-shiten', remember=True) or by `brisk login`")
     p.add_argument('--trace-protocol', action='store_true',
-                   help='With --sbi or --site: print the connection steps to stderr, every token redacted (wire details in BRISK_SBI_PROFILE)')
-    p.add_argument('--share-market-data', action=argparse.BooleanOptionalAction, default=None,
-                   help='With --sbi or --site and consent: share this decoded market session (interactive default: ask, Enter accepts)')
+                   help='With --sbi or --site: print the connection steps to stderr, every token redacted (wire details in BRISK_PROFILE)')
+    p.add_argument('--upload', action=argparse.BooleanOptionalAction, default=None,
+                   help='Upload this session to your private archive (default: yes once you agreed); --no-upload keeps all of it local, timing summary included')
+    p.add_argument('--upload-market-data', action=argparse.BooleanOptionalAction, default=None,
+                   help='With --sbi or --site: upload the decoded market recording too (default: yes unless you opt out); --no-upload-market-data keeps it local')
     sub.add_parser('sites', help='List the brokers you can sign in to (built in, plus your own in sites.json)')
     for name, text in (('enroll', 'Once: pick your broker, sign in by hand and register a passkey; it is saved to the Keychain'),
                        ('login', 'Sign in with the saved passkey in Chrome and keep the BRiSK session cookies')):
@@ -412,63 +498,100 @@ def _main(argv):
             p.add_argument('--remember', action=argparse.BooleanOptionalAction, default=True,
                            help='Save the cookies (default: yes; owner-only file); `brisk live --sbi` and `--site e-shiten` read them')
     sub.add_parser('forget', help='Delete the saved passkey (it stays registered at your broker until you remove it there)')
-    p = sub.add_parser('upload', help='Contribute a prepared package'); p.add_argument('directory', type=Path)
-    p = sub.add_parser('list', help='List published recordings'); p.add_argument('--date'); p.add_argument('--source', choices=['historical_mock','synthetic_test','sbi_live','eshiten_live'])
-    p = sub.add_parser('pull', help='Download and verify a recording'); p.add_argument('prefix'); p.add_argument('--output', type=Path, required=True)
+    p = sub.add_parser('upload', help='Upload a prepared package to your private archive'); p.add_argument('directory', type=Path)
+    p = sub.add_parser('list', help='List your archived recordings (or timing reports)')
+    p.add_argument('--date'); p.add_argument('--source', choices=['historical_mock','synthetic_test','sbi_live','eshiten_live'])
+    p.add_argument('--timing', action='store_true', help='Your timing reports instead')
+    p.add_argument('--deleted', action='store_true', help='What you deleted and can still restore (30 days)')
+    p = sub.add_parser('pull', help='Download and verify one of your recordings'); p.add_argument('prefix'); p.add_argument('--output', type=Path, required=True)
+    p = sub.add_parser('delete', help='Remove one of your recordings (or timing reports) from your archive; restorable for 30 days')
+    p.add_argument('prefix')
+    p = sub.add_parser('restore', help='Bring back a recording (or timing report) you deleted in the last 30 days')
+    p.add_argument('prefix')
+    p = sub.add_parser('prune', help='Free disk space: remove local packages your archive holds (brisk pull brings them back)')
+    p.add_argument('directories', type=Path, nargs='+')
+    p = sub.add_parser('identity', help='Show your archive identity, its recovery code, or restore it on this computer')
+    group = p.add_mutually_exclusive_group()
+    group.add_argument('--recovery-code', action='store_true', help='Print the recovery code (whoever holds it is you to the archive)')
+    group.add_argument('--export', action='store_true', help='Print the identity secret itself')
+    group.add_argument('--recover', metavar='CODE', help='Use this recovery code (or secret) here (- reads it from stdin)')
+    p.add_argument('--replace', action='store_true', help='With --recover: replace a different identity already here')
     p = sub.add_parser('export', help='Write a recording as a NautilusTrader v2 catalog or as JSONL')
     p.add_argument('recording', type=Path)
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument('--nautilus', type=Path, metavar='DIR', help='Catalog directory (data/<type>/<CODE>.XTKS/...)')
     group.add_argument('--jsonl', type=Path, metavar='FILE', help='Canonical decoded batches, one per line')
-    p = sub.add_parser('consent', help='Show or change automatic contribution')
+    p = sub.add_parser('consent', help='Show or change automatic uploads to your private archive')
     group = p.add_mutually_exclusive_group()
     group.add_argument('--accept', action='store_true')
     group.add_argument('--revoke', action='store_true')
-    p.add_argument('--contributor'); p.add_argument('--license', choices=LICENSES)
     args = parser.parse_args(argv)
-    if args.command == 'live' and args.share_market_data and not args.site:
-        parser.error('--share-market-data requires --sbi or --site')
+    if args.command == 'live' and args.upload_market_data and not args.site:
+        parser.error('--upload-market-data requires --sbi or --site')
     config = settings(args.config)
     if args.command == 'consent':
         if args.accept:
             sys.stderr.write(NOTICE)
-            choice = save_consent(True, args.contributor, args.license)
+            choice = accept()
         else:
-            choice = save_consent(False) if args.revoke else load_consent() or {'policy_version': POLICY_VERSION, 'enabled': None}
+            choice = save_consent(False) if args.revoke else load_consent() or DEFAULT
         print(json.dumps(choice))
     elif args.command in {'record', 'package'}:
         partial = args.command == 'record' and args.limit_frames is not None
-        require(not (partial and args.upload), 'Only complete replays can be contributed; omit --limit-frames')
-        found = None if partial else declaration(args)
-        require(found or not args.upload, f'Uploading needs `{parser.prog} consent --accept` or --contributor/--license/--redistribution-permitted')
+        require(not (partial and args.upload), 'Only complete replays can be uploaded; omit --limit-frames')
+        uploading = False if partial else declaration(args)
+        require(uploading or not args.upload, f'Uploading needs `{parser.prog} consent --accept`')
         if args.command == 'record':
             with tempfile.TemporaryDirectory() as tmp:
                 events = Path(tmp) / 'events.jsonl'
                 record_events(events, args.web, args.cache, args.codes, args.limit_frames, args.speed, args.binary)
-                if found is None:
+                if not uploading:
                     save_recording(events, args.output)
-                    why = 'partial replays stay local' if partial else f'contribution is off (`{parser.prog} consent`)'
-                    print(f'Saved {args.output}; not contributed: {why}.', file=sys.stderr)
+                    why = 'partial replays stay local' if partial else f'uploads are off (`{parser.prog} consent`)'
+                    print(f'Saved {args.output}; not uploaded: {why}.', file=sys.stderr)
                     return
-                m = package(events, args.output, **found)
+                m = package(events, args.output)
         else:
-            require(found, f'Packaging needs `{parser.prog} consent --accept` or --contributor/--license/--redistribution-permitted')
-            m = package(args.events, args.output, **found)
+            m = package(args.events, args.output)
         print(json.dumps(m))
-        if args.upload is not False and os.environ.get('BRISK_CONTRIBUTE') != '0':
-            print(json.dumps(contribute(args.output, config['api_url'], verify=False)))
+        if uploading and args.upload is not False and os.environ.get('BRISK_UPLOAD') != '0':
+            print(json.dumps(upload(args.output, config['api_url'], verify=False)))
     elif args.command == 'live':
         live(args)
     elif args.command in {'sites', 'enroll', 'login', 'forget'}:
         passkey_command(args)
     elif args.command == 'upload':
-        print(json.dumps(contribute(args.directory, config['api_url'])))
+        print(json.dumps(upload(args.directory, config['api_url'])))
+    elif args.command == 'list' and args.deleted:
+        for item in deleted(config['api_url'], args.date):
+            print(json.dumps(item))
+    elif args.command == 'list' and args.timing:
+        for key, report in timing_reports(config['api_url'], args.date):
+            print(json.dumps({'key': key, **report}))
     elif args.command == 'list':
-        for prefix, m in manifests(client(config), config['bucket'], args.date):
+        for prefix, m in manifests(config['api_url'], args.date):
             if args.source is None or m['summary']['source'] == args.source:
                 print(json.dumps({'prefix': prefix, **m}))
     elif args.command == 'pull':
-        print(json.dumps(pull(client(config), config['bucket'], args.prefix, args.output)))
+        print(json.dumps(pull(config['api_url'], args.prefix, args.output)))
+    elif args.command == 'delete':
+        print(json.dumps(delete(config['api_url'], args.prefix)))
+    elif args.command == 'restore':
+        print(json.dumps(restore(config['api_url'], args.prefix)))
+    elif args.command == 'prune':
+        for directory in args.directories:
+            print(json.dumps(prune(config['api_url'], directory)))
+    elif args.command == 'identity':
+        if args.recover:
+            code = sys.stdin.readline() if args.recover == '-' else args.recover
+            identity.save(identity.from_recovery_code(code), replace=args.replace)
+        value, created = identity.ensure()
+        if args.export or args.recovery_code:
+            print(value if args.export else identity.recovery_code(value))
+            return
+        if created:
+            show_identity(value, created)
+        print(json.dumps({'owner': owner(value), 'kept_in': identity.where()}))
     elif args.command == 'export':
         print(json.dumps(export(args.recording, args.nautilus, args.jsonl)))
 

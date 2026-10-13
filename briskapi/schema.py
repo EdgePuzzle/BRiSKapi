@@ -16,27 +16,34 @@ import re
 
 MAX_COMPRESSED = 64 * 1024 * 1024
 # Bounds on the canonical JSON form of a recording and of each batch.
-MAX_EXPANDED = 1024 * 1024 * 1024
+MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_LINE = 16 * 1024 * 1024
-SCHEMA = 'brisk-nautilus-parquet-v1'
+SCHEMA = 'brisk-nautilus-parquet-v2'
 SOURCES = {'historical_mock', 'synthetic_test', 'sbi_live', 'eshiten_live'}
-QUOTE_KEYS = set('issue_id code frame source_time_us max_frame last_price10 open_price10 bid_price10 ask_price10 indicative_price10 indicative_volume indicative_imbalance_side closing_indicative_price10 closing_indicative_volume closing_indicative_imbalance_side quote_flag quote_side special_quote_time_us indicative_open_price10 reference_price10 volume turnover10 issue_status market_buy_quantity market_sell_quantity closing_market_buy_quantity closing_market_sell_quantity bid_quantity bid_orders ask_quantity ask_orders bid_levels ask_levels'.split())
-# A side of the book: up to LEVELS [price10, quantity, orders], best price first.
-BOOK_KEYS = {'bid_levels', 'ask_levels'}
+QUOTE_KEYS = set('issue_id code frame source_time_us max_frame last_price10 open_price10 bid_price10 ask_price10 indicative_price10 indicative_volume indicative_imbalance_side closing_indicative_price10 closing_indicative_volume closing_indicative_imbalance_side quote_flag quote_side special_quote_time_us indicative_open_price10 reference_price10 volume turnover10 issue_status market_buy_quantity market_sell_quantity closing_market_buy_quantity closing_market_sell_quantity bid_quantity bid_orders ask_quantity ask_orders bid_levels ask_levels bid_closing_levels ask_closing_levels bid_total_quantity bid_total_orders bid_closing_total_quantity bid_closing_total_orders ask_total_quantity ask_total_orders ask_closing_total_quantity ask_closing_total_orders'.split())
+# A side of the book (or of its closing-condition orders): up to LEVELS [price10, quantity, orders], best price first.
+BOOK_KEYS = {'bid_levels', 'ask_levels', 'bid_closing_levels', 'ask_closing_levels'}
+# One execution, as the decoder records it: `side` is its raw type (1 buyer-initiated, 2 seller-initiated,
+# 0 most opening auction prints), `quantity` shares and `frame` the issue's frame number.
+TRADE_KEYS = set('issue_id code frame time_us price10 quantity side'.split())
 LEVELS = 10
 MASTER_KEYS = set('issue_id code tick_type base_price10 limit_up10 limit_down10 lot_size issue_type name'.split())
 BATCH_KEYS = {
-    'bootstrap': set('type seq source trading_date input_transport source_timestamp_origin exchange_delay_ms source_time_us market_issue_count master quotes'.split()),
-    'quotes': set('type seq source_time_us received_unix_ms decode_ns replay_lateness_ms quotes'.split()),
+    'bootstrap': set('type seq source trading_date input_transport source_timestamp_origin exchange_delay_ms source_time_us market_issue_count master quotes trades'.split()),
+    'quotes': set('type seq source_time_us received_unix_ms decode_ns replay_lateness_ms quotes trades'.split()),
     'end': set('type seq source_time_us frames quote_updates replay_wall_ms'.split()),
+    # Trades the snapshot restored (from before the stream), right after the bootstrap and at its clock.
+    'history': set('type seq source_time_us trades'.split()),
 }
 # Issues whose quote could not be read (the decoder's state for them was inconsistent) are listed
 # instead, on the batches that would have carried them.
 SKIPPED = 'skipped_issues'
+# Trades per history batch, at most.
+MAX_HISTORY = 50_000
 SUMMARY_KEYS = {'source', 'trading_date', 'first_source_time_us', 'last_source_time_us', 'codes', 'batches', 'quote_updates', 'expanded_bytes'}
 DEMO_ORIGIN = 'https://next-demo.brisk.jp/'
 # Broker-hosted BRiSK (SBI, Tachibana e-shiten): the same app and decoder, so the same rules; each
-# keeps only its fixed public transport provenance.
+# keeps only its fixed transport provenance.
 BROKER_TRANSPORT = {'sbi_live': {'kind': 'sbi_websocket', 'origin': 'https://sbi.brisk.jp/'},
                     'eshiten_live': {'kind': 'eshiten_websocket', 'origin': 'https://next.e-shiten.brisk.jp/'}}
 SBI_TRANSPORT = BROKER_TRANSPORT['sbi_live']
@@ -90,21 +97,21 @@ def _issue(item):
     return item['issue_id']
 
 def canonical_batches(source):
-    """Decoder JSONL as canonical batches: issues sorted, timings in microseconds, public transport only."""
+    """Decoder JSONL as canonical batches: issues sorted, timings in microseconds, fixed transport provenance only."""
     while line := source.readline(MAX_LINE + 1):
         require(len(line) <= MAX_LINE, 'Recording exceeds decode limit')
         b = json.loads(line, parse_constant=_nonfinite)
         require(isinstance(b, dict), 'Invalid batch')
-        public = BROKER_TRANSPORT.get(b.get('source')) if b.get('type') == 'bootstrap' else None
-        if public:
+        fixed = BROKER_TRANSPORT.get(b.get('source')) if b.get('type') == 'bootstrap' else None
+        if fixed:
             transport = b.get('input_transport')
-            if isinstance(transport, dict) and all(transport.get(k) == v for k, v in public.items()):
-                # Keep only public transport provenance, never session/profile or
+            if isinstance(transport, dict) and all(transport.get(k) == v for k, v in fixed.items()):
+                # Keep only the fixed transport provenance, never session/profile or
                 # decoder paths and connection diagnostics from the local host.
-                b['input_transport'] = dict(public)
-        for key in ('master', 'quotes'):
+                b['input_transport'] = dict(fixed)
+        for key in ('master', 'quotes', 'trades'):
             if isinstance(b.get(key), list):
-                b[key].sort(key=_issue)
+                b[key].sort(key=_issue)  # stable: trades keep the decoder's order within an issue
         if isinstance(b.get(SKIPPED), list) and all(type(issue) is int for issue in b[SKIPPED]):
             b[SKIPPED].sort()
         for holder, key in ((b, 'replay_lateness_ms'), (b, 'replay_wall_ms'), (b.get('input_transport'), 'asset_fetch_ms')):
@@ -131,6 +138,9 @@ class Fingerprint:
     def quote(self, seq, quote):
         self.issues[quote['issue_id']].update(b'%d:' % seq + canonical(quote).encode() + b'\n')
 
+    def trade(self, seq, trade):
+        self.issues[trade['issue_id']].update(b'T%d:' % seq + canonical(trade).encode() + b'\n')
+
     def digest(self, issue):
         return self.issues[issue].hexdigest()[:32]
 
@@ -155,10 +165,10 @@ def _scan(entries):
     `entries` yields (batch, line): a JSONL line must be the batch's canonical encoding, and
     batches decoded from another format pass None.
     """
-    identities, clocks = {}, {}
+    identities, clocks, executed, offsets, executions, restored = {}, {}, {}, {}, {}, {}
     fingerprint = Fingerprint()
     seq = last = count = expanded = updates = market = 0
-    first = source = date = paced = received = previous_stamp = None
+    first = source = date = paced = received = previous_stamp = previous_kind = None
     ended = False
     for b, line in entries:
         require(isinstance(b, dict), 'Invalid batch')
@@ -171,7 +181,7 @@ def _scan(entries):
         require(not ended, 'Data after end batch')
         kind = b.get('type')
         require(kind in BATCH_KEYS and set(b) - {SKIPPED} == BATCH_KEYS[kind]
-                and (SKIPPED not in b or kind != 'end'), 'Unknown or missing batch fields')
+                and (SKIPPED not in b or kind in ('bootstrap', 'quotes')), 'Unknown or missing batch fields')
         require(integer(b['seq']) == seq, 'Sequence gap')
         now = integer(b['source_time_us'], 86_400_000_000 - 1)
         require(now >= last, 'Market clock regression')
@@ -202,6 +212,8 @@ def _scan(entries):
             _transport(b['input_transport'], source)
             require(b['source_timestamp_origin'] == 'brisk_decoder_unverified', 'Invalid clock provenance')
             require(b['exchange_delay_ms'] is None, 'Unverified exchange delay')
+        elif kind == 'history':
+            require(previous_kind in {'bootstrap', 'history'} and now == last, 'History out of place')
         else:
             require(kind in {'quotes', 'end'}, 'Expected delta/end')
         if kind == 'quotes':
@@ -220,6 +232,27 @@ def _scan(entries):
             # A replay is paced (measured) or unpaced (null) throughout.
             paced = (lateness is not None) if paced is None else paced
             require(paced == (lateness is not None), 'Inconsistent replay pacing')
+        # Trades: the batch's executions, by issue, each issue's in the decoder's order. Restored ones
+        # (history) are already in the bootstrap's volumes, and in an order of their own.
+        trades = b.get('trades', [])
+        require(isinstance(trades, list) and (kind != 'history' or 0 < len(trades) <= MAX_HISTORY), 'Invalid trades')
+        order = restored if kind == 'history' else executions
+        previous_issue = -1
+        for t in trades:
+            require(isinstance(t, dict) and set(t) == TRADE_KEYS, 'Unknown or missing trade fields')
+            issue = integer(t['issue_id'], 2**32-1)
+            require(issue >= previous_issue and identities.get(issue) == code(t['code']), 'Trade identity mismatch/order')
+            previous_issue = issue
+            frame, at = integer(t['frame'], 2**32-1), integer(t['time_us'], now)
+            previous = order.get(issue, (0, 0))
+            require(frame >= previous[0] and at >= previous[1], 'Trade frame/time regression')
+            order[issue] = (frame, at)
+            price, quantity = integer(t['price10']), integer(t['quantity'])
+            integer(t['side'], 255)
+            require(price > 0 and quantity > 0, 'Invalid trade')
+            if kind != 'history':
+                volume, turnover = executed.get(issue, (0, 0))
+                executed[issue] = (volume + quantity, turnover + price * quantity)
         quotes = b.get('quotes', [])
         require(isinstance(quotes, list) and len(quotes) <= len(identities), 'Invalid quote count')
         previous_issue = -1
@@ -234,10 +267,16 @@ def _scan(entries):
             clocks[issue] = (frame, clock)
             for key, value in q.items():
                 if key in BOOK_KEYS:
-                    book(value, descending=key == 'bid_levels')
+                    book(value, descending=key.startswith('bid'))
                 elif key != 'code':
                     integer(value)
+            # The trades so far account for every change in an issue's volume and turnover.
+            volume, turnover = executed.get(issue, (0, 0))
+            offset = (q['volume'] - volume, q['turnover10'] - turnover)
+            require(offsets.setdefault(issue, offset) == offset, 'Trades do not add up to the volume/turnover')
             fingerprint.quote(seq, q)
+        for t in trades:
+            fingerprint.trade(seq, t)
         skipped = b.get(SKIPPED, [])
         require(isinstance(skipped, list) and skipped and all(issue in identities for issue in skipped)
                 and skipped == sorted(set(skipped)) and not set(skipped) & {q['issue_id'] for q in quotes}
@@ -253,7 +292,7 @@ def _scan(entries):
         elif kind == 'quotes':
             updates += len(quotes)
         seq += 1
-        last, count = now, count + len(quotes)
+        last, count, previous_kind = now, count + len(quotes), kind
     require(ended, 'Recording has no clean end')
     summary = dict(source=source, trading_date=date, first_source_time_us=first,
                    last_source_time_us=last, codes=sorted(identities.values()), batches=seq,
@@ -269,16 +308,19 @@ def build_reference(stream):
                 issues=[fingerprint.digest(i) for i in range(market)])
 
 def synthetic_recording():
-    """The only accepted synthetic_test recording: a one-issue publication probe."""
+    """The only accepted synthetic_test recording: a one-issue upload probe."""
     master = {**dict.fromkeys(MASTER_KEYS, 0), 'issue_id': 0, 'code': '0000', 'lot_size': 100, 'name': 'Synthetic fixture'}
     quote = {**dict.fromkeys(QUOTE_KEYS, 0), 'issue_id': 0, 'code': '0000', 'frame': 1, 'max_frame': 1,
-             'source_time_us': 100, 'indicative_price10': 1230, 'indicative_volume': 100, 'bid_levels': [], 'ask_levels': []}
+             'source_time_us': 100, 'indicative_price10': 1230, 'indicative_volume': 100,
+             **{key: [] for key in BOOK_KEYS}}
+    trade = dict(issue_id=0, code='0000', frame=2, time_us=105, price10=1240, quantity=100, side=1)
     return [dict(type='bootstrap', seq=0, source='synthetic_test', trading_date='20210927', source_time_us=100,
                  input_transport={'kind': 'local_cache'}, source_timestamp_origin='brisk_decoder_unverified',
-                 exchange_delay_ms=None, market_issue_count=1, master=[master], quotes=[quote]),
+                 exchange_delay_ms=None, market_issue_count=1, master=[master], quotes=[quote], trades=[]),
             dict(type='quotes', seq=1, source_time_us=110, received_unix_ms=1632700800000, decode_ns=1000,
                  replay_lateness_ms=0, quotes=[{**quote, 'frame': 2, 'max_frame': 2, 'source_time_us': 110,
-                                                'indicative_price10': 1240}]),
+                                                'indicative_price10': 1240, 'last_price10': 1240, 'volume': 100,
+                                                'turnover10': 124000}], trades=[trade]),
             dict(type='end', seq=2, source_time_us=110, frames=2, quote_updates=1, replay_wall_ms=0.5)]
 
 def load_references():
@@ -297,7 +339,7 @@ def validate_stream(stream, references=None):
 def validate_batches(batches, references=None):
     """Validate canonical fields/continuity, plus reference content for demo/synthetic data.
 
-    Broker live content (SBI, e-shiten) is contributor-declared and has no reference
+    Broker live content (SBI, e-shiten) is uploader-declared and has no reference
     replay. Its transport is exactly its BROKER_TRANSPORT, and replay_lateness_ms must
     be null. End frames include pre-bootstrap catch-up frames as well as the emitted
     quote batches. A batch lists in skipped_issues the issues whose quote could not be
@@ -318,14 +360,39 @@ def _verify(summary, fingerprint, market, references):
             'Market data differs from the reference replay')
     return summary
 
+# An uploader's identity: a random secret made on its own computer, never registered. The archive
+# files uploads under the owner ID, a one-way hash of it, and shows each owner only its own.
+IDENTITY = re.compile(r'brisk-id-v1-[a-z2-7]{26}')
+OWNER = re.compile(r'[0-9a-f]{32}')
+# A stored recording: archive/OWNER/YYYYMMDD/FROM-TO-SHA256, its first and last source clock (JST,
+# HHMMSS) in the name so that a day's recordings sort by time.
+RECORDING_PREFIX = re.compile(r'archive/([0-9a-f]{32})/(\d{8})/(\d{6})-(\d{6})-([0-9a-f]{64})')
+TIMING_KEY = re.compile(r'timing/([0-9a-f]{32})/(\d{8})/([0-9a-f]{64})\.json')
+
+def hhmmss(us: int) -> str:
+    """A source clock (microseconds after JST midnight) as HHMMSS."""
+    seconds = us // 1_000_000
+    return f'{seconds // 3600:02d}{seconds // 60 % 60:02d}{seconds % 60:02d}'
+
+def recording_name(m) -> str:
+    """A manifest's archive name below its owner: YYYYMMDD/FROM-TO-SHA256."""
+    s = m['summary']
+    return f"{s['trading_date']}/{hhmmss(s['first_source_time_us'])}-{hhmmss(s['last_source_time_us'])}-{m['sha256']}"
+
+def local_name(summary) -> str:
+    """A folder name for a recording kept on this computer: SOURCE_YYYYMMDD_FROM-TO."""
+    return (f"{summary['source']}_{summary['trading_date']}_{hhmmss(summary['first_source_time_us'])}-"
+            f"{hhmmss(summary['last_source_time_us'])}")
+
+def owner(secret):
+    """The owner ID of an identity secret."""
+    require(isinstance(secret, str) and IDENTITY.fullmatch(secret), 'Invalid identity')
+    return hashlib.sha256(b'brisk-owner-v1:' + secret.encode()).hexdigest()[:32]
+
 def validate_manifest(m):
-    fields = {'schema', 'sha256', 'bytes', 'summary', 'contributor', 'license', 'redistribution_permitted'}
-    require(isinstance(m, dict) and set(m) == fields, 'Invalid manifest fields')
+    require(isinstance(m, dict) and set(m) == {'schema', 'sha256', 'bytes', 'summary'}, 'Invalid manifest fields')
     require(m['schema'] == SCHEMA and isinstance(m['sha256'], str) and re.fullmatch('[0-9a-f]{64}', m['sha256']), 'Invalid schema/hash')
     require(0 < integer(m['bytes'], MAX_COMPRESSED), 'Empty upload')
-    require(isinstance(m['contributor'], str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', m['contributor']), 'Invalid contributor alias')
-    require(isinstance(m['license'], str) and m['license'] in {'CC0-1.0', 'CC-BY-4.0'}
-            and m['redistribution_permitted'] is True, 'Redistribution declaration required')
     summary = m['summary']
     require(isinstance(summary, dict) and set(summary) == SUMMARY_KEYS and isinstance(summary['source'], str)
             and summary['source'] in SOURCES, 'Invalid summary')
@@ -347,11 +414,11 @@ def validate_manifest(m):
                 'Summary is not a complete reference replay')
     return m
 
-# Timing reports: what a broker session (SBI, e-shiten) contributes besides any opted-in market data.
-TIMING_SCHEMA = 'brisk-timing-v1'
+# Timing reports: what a broker session (SBI, e-shiten) uploads besides its market recording.
+TIMING_SCHEMA = 'brisk-timing-v2'
 TIMING_SOURCES = set(BROKER_TRANSPORT)
 TIMING_KEYS = {'schema', 'source', 'trading_date', 'first_minute', 'last_minute', 'frames', 'stalls',
-               'client_version', 'decode_ms', 'source_age_ms', 'interarrival_ms', 'contributor', 'license'}
+               'client_version', 'decode_ms', 'source_age_ms', 'interarrival_ms'}
 QUANTILES = ('p50', 'p90', 'p99', 'max')
 # Bounds per distribution (ms). Source age can be negative when local and feed clocks disagree.
 TIMING_BOUNDS = {'decode_ms': (0, 10_000), 'source_age_ms': (-600_000, 600_000), 'interarrival_ms': (0, 3_600_000)}
@@ -377,9 +444,6 @@ def validate_timing(report, today=None):
     require(frames >= MIN_TIMING_FRAMES and integer(report['stalls']) <= frames, 'Invalid frame counts')
     require(isinstance(report['client_version'], str) and re.fullmatch(r'\d{1,4}\.\d{1,4}\.\d{1,4}', report['client_version']),
             'Invalid client version')
-    require(isinstance(report['contributor'], str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', report['contributor']),
-            'Invalid contributor alias')
-    require(report['license'] in {'CC0-1.0', 'CC-BY-4.0'}, 'Invalid license')
     for name, (low, high) in TIMING_BOUNDS.items():
         values = report[name]
         require(isinstance(values, dict) and set(values) == set(QUANTILES), f'Invalid {name}')

@@ -1,10 +1,12 @@
-"""Live consumption of the pinned public demo, plus recording and automatic contribution."""
+"""Live consumption of the pinned public demo, plus recording and automatic upload to your private archive."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -55,18 +57,23 @@ def stream(web=False, cache=None, codes=None, speed=1, limit_frames=None, node='
         raise BriskError(f'Decoder exited with {process.returncode}')
 
 
-def _consent(contribute, limit_frames):
-    """(saved alias/license or None, whether to upload) for a session under saved consent."""
-    choice = cli.load_consent()
-    declared = bool(choice and choice['enabled']) and limit_frames is None
-    if contribute and not declared:
-        raise BriskError('contribute=True needs briskapi.consent(accept=True) and a complete replay')
-    if contribute is None and choice is None:
-        warnings.warn('Contribution is undecided, so this session stays local. Decide once with '
-                      '`brisk consent --accept|--revoke` or briskapi.consent(accept=True|revoke=True); see https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md',
-                      stacklevel=3)
-    upload = declared and contribute is not False and os.environ.get('BRISK_CONTRIBUTE') != '0'
-    return (choice if declared else None), upload
+def _notice(value, created):
+    from briskapi import identity
+    warnings.warn('Complete sessions upload to your private BRiSK archive by default: a free off-computer copy only '
+                  f'your identity can reach (owner {cli.owner(value)}, kept in {" and ".join(identity.where())}). '
+                  + ('Keep its recovery code: `brisk identity --recovery-code`. ' if created else '')
+                  + 'Opt out with upload=False, briskapi.consent(revoke=True) or BRISK_UPLOAD=0; see '
+                  'https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md', stacklevel=6)
+
+
+def _consent(upload, limit_frames):
+    """(whether to package for upload, whether to upload) for a session: complete sessions upload by default
+    (said once per process) or as you chose with briskapi.consent, unless this run opts out."""
+    choice = cli.consented(upload, ask=False, notify=_notice)
+    allowed = bool(choice and choice['enabled']) and limit_frames is None
+    if upload and not allowed:
+        raise BriskError('upload=True needs uploads on (briskapi.consent(accept=True)) and a complete replay')
+    return allowed, allowed and not cli.opted_out(upload)
 
 
 class Feed:
@@ -79,37 +86,49 @@ class Feed:
             briskapi.Ticker("7203").quote()         # current state, any time
 
     Consumers apply backpressure: a slow `quotes()` iterator or callback slows the
-    feed instead of dropping updates. A complete session is contributed to the
-    archive when saved consent allows (see PRIVACY.md); pass contribute=False to
-    keep it local.
+    feed instead of dropping updates. A complete session is uploaded to your private
+    archive automatically, by default or as you chose with briskapi.consent (see
+    PRIVACY.md); pass upload=False to keep it local.
     """
 
     manifest = None
 
-    def __init__(self, web=False, cache=None, codes=None, speed=1, limit_frames=None, contribute=None,
-                 history=False, node='node', *, command=None, env=None, timing=None, share_market_data=False):
-        # Broker market recordings (SBI, e-shiten) require a separate opt-in for this session.
-        if share_market_data and (command is None or timing not in schema.BROKER_TRANSPORT):
-            raise BriskError('share_market_data requires a broker live session (SBI or e-shiten)')
+    def __init__(self, web=False, cache=None, codes=None, speed=1, limit_frames=None, upload=None,
+                 history=False, node='node', *, command=None, env=None, timing=None, upload_market_data=None, output=None,
+                 on_day=None):
+        # A broker session (SBI, e-shiten) uploads its timing summary and its market recording;
+        # upload_market_data=False keeps the market recording local.
+        if upload_market_data is not None and (command is None or timing not in schema.BROKER_TRANSPORT):
+            raise BriskError('upload_market_data applies to a broker live session (SBI or e-shiten)')
+        if upload is False and upload_market_data:
+            raise BriskError('upload=False keeps the whole session local; drop upload_market_data=True')
         cli.check_node(command[0] if command else node)
         if command is None:
-            choice, upload = _consent(contribute, limit_frames)
-            self._choice, self._timing = (choice if upload else None), None
+            self._package, self._timing = _consent(upload, limit_frames)[1], None
         else:
-            choice, upload = _consent(True if share_market_data else contribute, None) if timing else (None, False)
-            upload = upload and contribute is not False
-            self._choice = choice if share_market_data and upload else None
-            self._timing = (TimingStats(timing), choice) if upload else None
-        self.timing_contribution = None
+            wanted = upload if upload is not None else (True if upload_market_data else None)
+            uploads = _consent(wanted, None)[1] if timing else False
+            self._package = uploads and upload_market_data is not False
+            self._timing = timing if uploads else None  # the source whose timing summaries are uploaded
+        # Each finished day (bootstrap ... end) is packaged, kept in `output` as SOURCE_YYYYMMDD_FROM-TO
+        # and uploaded, on a worker thread while the feed goes on.
+        self._output = Path(output) if output else None
+        if self._output and limit_frames is not None:
+            raise BriskError('A partial replay (limit_frames) is not a recording to keep; drop output')
+        self._stats, self._on_day = None, on_day
+        self.recordings: list[dict] = []  # one per finished day: trading_date, name, path, uploaded, timing_uploaded
+        self.timing_uploaded = None
         self._history = {} if history else None
+        self._trade_history = []
         self._quotes: dict[int, dict] = {}
         self._bootstrap = None
         self._last_source_time_us = None
         self._listeners: list = []
         self._changed = threading.Condition()
         self._closing = False
-        self.status, self.error, self.seq, self.contribution = 'starting', None, -1, None
-        self._tmp = tempfile.TemporaryDirectory() if self._choice else None
+        self.status, self.error, self.seq, self.uploaded = 'starting', None, -1, None
+        self._tmp = tempfile.TemporaryDirectory() if self._package or self._output else None
+        self._worker = ThreadPoolExecutor(1, thread_name_prefix='brisk-day')
         self._process = (subprocess.Popen(command, stdout=subprocess.PIPE, env=env) if command
                          else _decoder(web, cache, codes, speed, limit_frames, node))
         self._thread = threading.Thread(target=self._run, name='brisk-feed', daemon=True)
@@ -162,6 +181,21 @@ class Feed:
         self.ready()
         with self._changed:
             return dict(self._quotes)
+
+    def trades(self, code=None, start=None, end=None) -> list[dict]:
+        """Raw trades received so far, of one security or all, in source-time order (needs history=True)."""
+        if self._history is None:
+            raise BriskError('Pass history=True to briskapi.connect() to retain trades')
+        issue = None if code is None else self.issue(code)['issue_id']
+        low, high = micros(self.trading_date, start), micros(self.trading_date, end)
+        with self._changed:
+            retained = list(self._trade_history)
+        return sorted((t for t in retained if (issue is None or t['issue_id'] == issue)
+                       and (low is None or t['time_us'] >= low) and (high is None or t['time_us'] <= high)),
+                      key=lambda t: t['time_us'])
+
+    def frames(self):
+        raise BriskError('A live feed keeps no frames; record the session or load a recording')
 
     def updates(self, code, start=None, end=None) -> Iterator[dict]:
         """Raw updates received so far for one security (needs history=True)."""
@@ -222,7 +256,7 @@ class Feed:
         return Table(state[i] if raw else quote_view(state[i], date) for i in sorted(state))
 
     def wait(self, timeout=None) -> Feed:
-        """Block until the replay ends (and any contribution finishes); raise if it failed."""
+        """Block until the replay ends (and any upload finishes); raise if it failed."""
         self._thread.join(timeout)
         if self._thread.is_alive():
             raise TimeoutError('Feed still running')
@@ -230,7 +264,7 @@ class Feed:
         return self
 
     def close(self):
-        """Stop the decoder. A session closed before its end is never contributed."""
+        """Stop the decoder. A session closed before its end is never uploaded."""
         self._closing = True
         if self._process.poll() is None:
             self._process.kill()
@@ -263,21 +297,32 @@ class Feed:
         return current, remove
 
     def _run(self):
-        recorder = None
+        day, days, ended = None, 0, False
         try:
-            if self._tmp:
-                recorder = open(Path(self._tmp.name) / 'events.jsonl', 'wb')
-            ended = False
             for line in self._process.stdout:
                 batch = json.loads(line)
-                if batch.get('seq') != self.seq + 1 or (self.seq < 0) != (batch.get('type') == 'bootstrap'):
+                # Each day runs bootstrap ... end, numbered from its own bootstrap; a new day follows an end.
+                first = batch.get('type') == 'bootstrap'
+                if batch.get('seq') != (0 if first else self.seq + 1) or first != (self.seq < 0 or ended):
                     raise BriskError(f'Stream sequence error at {batch.get("seq")}')
-                if recorder:
-                    recorder.write(line)
+                if first:
+                    days += 1
+                    if self._tmp:
+                        day = Path(self._tmp.name) / f'day-{days}'
+                        day.mkdir()
+                        day = (day, open(day / 'events.jsonl', 'wb'))
+                    self._stats = TimingStats(self._timing) if self._timing else None
+                if day:
+                    day[1].write(line)
                 ended = batch['type'] == 'end'
-                if self._timing:
-                    self._timing[0].add(batch)
-                self._apply(batch)
+                if self._stats:
+                    self._stats.add(batch)
+                self._apply(batch, new_day=first and days > 1)
+                if ended:
+                    if day:
+                        day[1].close()
+                    self._worker.submit(self._finish_day, day and day[0], self._stats)
+                    day, self._stats = None, None
             if self._closing:
                 raise BriskError('closed')
             if self._process.wait():
@@ -288,9 +333,6 @@ class Feed:
                 self.status = 'completed'
                 self._changed.notify_all()
             self._finish()
-            if recorder:
-                recorder.close()
-                self._contribute()
         except Exception as error:  # noqa: BLE001 - every failure ends the feed visibly
             with self._changed:
                 self.status, self.error = ('closed', None) if self._closing else ('failed', error)
@@ -298,16 +340,22 @@ class Feed:
             self._finish()
         finally:
             _stop(self._process)
-            if self._timing and self.status in {'completed', 'closed'}:
-                self._contribute_timing()
-            if recorder:
-                recorder.close()
+            if day:
+                day[1].close()  # an unfinished day's market data is never kept or uploaded
+            if self._stats and self.status in {'completed', 'closed'}:
+                self.timing_uploaded = self._upload_timing(self._stats)
+            self._worker.shutdown(wait=True)  # finished days are still kept and uploaded
             if self._tmp:
                 self._tmp.cleanup()
 
-    def _apply(self, batch):
+    def _apply(self, batch, new_day=False):
         quotes = batch.get('quotes', ())
         with self._changed:
+            if new_day:  # the next trading day's state replaces the last one's
+                self._quotes.clear()
+                self._trade_history.clear()
+                if self._history is not None:
+                    self._history.clear()
             if batch['type'] == 'bootstrap':
                 self._bootstrap = {k: v for k, v in batch.items() if k != 'quotes'}
                 self.status = 'running'
@@ -315,6 +363,7 @@ class Feed:
             if self._history is not None:
                 for q in quotes:
                     self._history.setdefault(q['issue_id'], []).append(q)
+                self._trade_history.extend(batch.get('trades', ()))
             self.seq = batch['seq']
             self._last_source_time_us = batch['source_time_us']
             listeners = list(self._listeners)
@@ -331,30 +380,55 @@ class Feed:
             if end:
                 end()
 
-    def _contribute_timing(self):
-        stats, choice = self._timing
+    def _finish_day(self, directory, stats):
+        """Package a finished day, keep it in `output` and upload it and its timing summary, as chosen."""
+        result = {'trading_date': self.trading_date, 'name': None, 'path': None, 'uploaded': None, 'timing_uploaded': None}
         try:
-            report = stats.report(choice['contributor'], choice['license'])
-            if report:
-                self.timing_contribution = cli.contribute_timing(report, cli.settings()['api_url'])
+            if directory:
+                package = directory / 'package'
+                try:
+                    m = cli.package(directory / 'events.jsonl', package)
+                    result['name'] = m and schema.local_name(m['summary'])
+                    if self._output:
+                        target = self._output / result['name']
+                        if target.exists():
+                            warnings.warn(f'{target} already exists; this day was not kept')
+                        else:
+                            self._output.mkdir(parents=True, exist_ok=True)
+                            shutil.copytree(package, target)
+                            result['path'] = str(target)
+                    if self._package:
+                        result['uploaded'] = cli.upload(package, cli.settings()['api_url'], verify=False, out=sys.stderr)
+                except Exception as error:  # noqa: BLE001 - market data was delivered; report, do not fail
+                    result['uploaded'] = {'status': 'failed', 'error': str(error)}
+                    warnings.warn(f'Automatic upload failed: {error}')
+            if stats:
+                result['timing_uploaded'] = self._upload_timing(stats)
+        finally:
+            if directory:
+                shutil.rmtree(directory, ignore_errors=True)
+        self.uploaded, self.timing_uploaded = result['uploaded'], result['timing_uploaded']
+        self.recordings.append(result)
+        if self._on_day:
+            try:
+                self._on_day(result)
+            except Exception as error:  # noqa: BLE001 - a reporting callback must not stop the recording
+                warnings.warn(f'on_day callback failed: {error}')
+
+    def _upload_timing(self, stats):
+        try:
+            report = stats.report()
+            return cli.upload_timing(report, cli.settings()['api_url']) if report else None
         except Exception as error:  # noqa: BLE001 - the session itself succeeded; report, do not fail
-            self.timing_contribution = {'status': 'failed', 'error': str(error)}
-            warnings.warn(f'Timing contribution failed: {error}')
-
-    def _contribute(self):
-        package = Path(self._tmp.name) / 'package'
-        try:
-            cli.package(Path(self._tmp.name) / 'events.jsonl', package, self._choice['contributor'], self._choice['license'])
-            self.contribution = cli.contribute(package, cli.settings()['api_url'], verify=False, out=sys.stderr)
-        except Exception as error:  # noqa: BLE001 - market data was delivered; report, do not fail
-            self.contribution = {'status': 'failed', 'error': str(error)}
-            warnings.warn(f'Automatic contribution failed: {error}')
+            warnings.warn(f'Timing upload failed: {error}')
+            return {'status': 'failed', 'error': str(error)}
 
 
-def connect(web=False, cache=None, codes=None, speed=1, limit_frames=None, contribute=None, history=False,
-            node='node', timeout=60) -> Feed:
-    """Start a live feed and return once its bootstrap state is available."""
-    feed = Feed(web, cache, codes, speed, limit_frames, contribute, history, node)
+def connect(web=False, cache=None, codes=None, speed=1, limit_frames=None, upload=None, history=False,
+            node='node', timeout=60, output=None, on_day=None) -> Feed:
+    """Start a live feed and return once its bootstrap state is available. `output` keeps the finished
+    recording there (as SOURCE_YYYYMMDD_FROM-TO); `on_day(result)` is called once it is kept and uploaded."""
+    feed = Feed(web, cache, codes, speed, limit_frames, upload, history, node, output=output, on_day=on_day)
     try:
         return feed.ready(timeout)
     except BaseException:
@@ -362,27 +436,27 @@ def connect(web=False, cache=None, codes=None, speed=1, limit_frames=None, contr
         raise
 
 
-def record(output, web=False, cache=None, codes=None, speed=1, limit_frames=None, contribute=None,
+def record(output, web=False, cache=None, codes=None, speed=1, limit_frames=None, upload=None,
            binary=None) -> Recording:
     """Record a demo replay into the directory `output` (Parquet tables, see briskapi._parquet) and
-    contribute it according to saved consent.
+    upload it to your private archive according to saved consent.
 
-    contribute=None follows `briskapi.consent()` (and BRISK_CONTRIBUTE=0 opts out),
-    False keeps the recording local, True requires saved consent. Partial replays
-    (limit_frames) always stay local.
+    upload=None uploads by default or as you chose with `briskapi.consent()` (BRISK_UPLOAD=0 opts
+    out), False keeps the recording local, True requires uploads on. Partial replays (limit_frames)
+    always stay local.
     """
     output = Path(output)
-    choice, upload = _consent(contribute, limit_frames)
+    packaged, upload = _consent(upload, limit_frames)
     with tempfile.TemporaryDirectory() as tmp:
         events = Path(tmp) / 'events.jsonl'
         cli.record_events(events, web, cache, codes and _codes(codes), limit_frames, speed, binary)
-        if choice is None:
+        if not packaged:
             if (output / _parquet.DEPTHS).exists():
                 raise BriskError(f'A recording already exists in {output}')
             cli.save_recording(events, output)
             return Recording(output)
-        cli.package(events, output, choice['contributor'], choice['license'])
+        cli.package(events, output)
     recording = Recording(output)
     if upload:
-        recording.contribution = cli.contribute(output, cli.settings()['api_url'], verify=False)
+        recording.uploaded = cli.upload(output, cli.settings()['api_url'], verify=False)
     return recording

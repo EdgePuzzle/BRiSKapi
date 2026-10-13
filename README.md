@@ -3,8 +3,8 @@
 [English](https://github.com/honvl/BRiSKapi/blob/main/README.md) | [日本語](https://github.com/honvl/BRiSKapi/blob/main/README.ja.md)
 
 An unofficial, pybrisk-style Python API and `brisk` command line for BRiSK auction
-data. Consume a live feed, query recordings at any point in time, pull shared
-recordings from a public archive, and use SBI BRiSK or Tachibana e-shiten BRiSK Next
+data. Consume a live feed, query recordings at any point in time, keep them in your own
+private archive, and use BRiSK at SBI Securities or Tachibana e-shiten (BRiSK Next)
 with your own account, signing in with a passkey if you like. This
 is an independent project, not affiliated with or endorsed by BRiSK, Tachibana,
 SBI, TSE or JPX.
@@ -13,9 +13,9 @@ SBI, TSE or JPX.
 > - **No account needed:** the public BRiSK Next demo of 27 September 2021 (one
 >   pre-open snapshot and the first three minutes after the open), replayed at
 >   its recorded pace. This is not live market data.
-> - **With an SBI Securities BRiSK subscription:** SBI BRiSK market data (candles,
->   margin, alerts, schedule, watchlist) and an experimental live feed.
-> - **With Tachibana e-shiten BRiSK Next:** the same, kept on your computer.
+> - **With your broker's BRiSK (SBI Securities, or Tachibana e-shiten's BRiSK Next):**
+>   BRiSK market data (candles, margin, alerts, schedule, watchlist) and an
+>   experimental live feed.
 
 ## Install
 
@@ -58,14 +58,14 @@ the demo assets), `codes`, `speed` (`1` real time, `0` as fast as possible) and
 first receive each security's current quote, then every update in order. A slow
 consumer slows the feed instead of losing updates.
 
-## Recordings and the archive
+## Recordings and your archive
 
 ```python
-recordings = briskapi.recordings(source="historical_mock")   # no AWS account needed
+recordings = briskapi.recordings(source="historical_mock")   # yours only; no account needed
 if recordings:
     briskapi.pull(recordings[0]["prefix"])      # verify, decode and cache; becomes the default
 else:
-    briskapi.record("recordings/my-session", web=True)   # record the demo if the archive is empty
+    briskapi.record("recordings/my-session", web=True)   # record the demo (uploaded unless you opt out)
 # Or briskapi.load("recordings/my-session") for a local recording folder (or an older events.jsonl[.gz]).
 
 briskapi.Ticker("7203").quote(at="08:59:59.9999")             # available pre-open quote, in JST
@@ -75,31 +75,34 @@ briskapi.Market().snapshot(at="09:00:00").to_pandas()
 
 A recording is a folder of Parquet tables laid out like a NautilusTrader v2 catalog:
 `data/order_book_depths.parquet` (every quote update: v2's `OrderBookDepth`, then BRiSK's
-other quote fields), `data/equity.parquet` (the securities master, as v2 `Equity`) and
+other quote fields), `data/trades.parquet` (every execution, as v2 `TradeTick`),
+`data/equity.parquet` (the securities master, as v2 `Equity`) and
 `data/custom/BriskBatch.parquet` (per-frame timing). The complete demo replay takes about
-34 MB. pandas, Polars and DuckDB read the tables directly; `brisk export` writes a
+41 MB. pandas, Polars and DuckDB read the tables directly; `brisk export` writes a
 NautilusTrader catalog or JSONL. ARCHITECTURE.md lists every column.
 
 Time queries use each quote's timestamp. Toyota's first demo quote is at
 08:59:59.993551 JST; an earlier query raises `NotFoundError`. `Market().summary()`
 returns both `start` and `end`, including for local recordings and live feeds.
-Archive listings skip invalid or unsupported recordings with a warning. Demo
-recordings may be absent; `synthetic_test` entries are publication probes.
-The legacy [sample data](https://brisk-recordings-honvl-tokyo.s3.ap-northeast-1.amazonaws.com/archive/20260311/cca870a51e7f96f16009c3709c3f597d314b22ed8922bb3ea7fa1acc67a0f85f/events.jsonl.gz)
-uses the SBI wire format for protocol research and requires a wire-format decoder.
+Your archive holds only what you uploaded, under your identity: a random key the tool
+makes on your computer and never registers (see [Your private archive](#your-private-archive)).
+Listings skip invalid or unsupported recordings with a warning. One sample stays a public
+download for everyone: a [raw wire capture](https://brisk-recordings-honvl-tokyo.s3.ap-northeast-1.amazonaws.com/samples/20260311/cca870a51e7f96f16009c3709c3f597d314b22ed8922bb3ea7fa1acc67a0f85f/events.jsonl.gz) (2026-03-11, from 12:12:40 JST), in
+the legacy `brisk-sbi-wire-jsonl-v1` format the tool no longer reads.
 
-## SBI BRiSK
+## Your broker's BRiSK
 
-For SBI Securities customers with a BRiSK subscription. Log in on
-[sbi.brisk.jp](https://sbi.brisk.jp) in your browser, then pass its session
-cookies: copy them from DevTools, or use `pycookiecheat`'s
+The same client serves SBI Securities' BRiSK ([sbi.brisk.jp](https://sbi.brisk.jp), the
+default site) and Tachibana e-shiten's BRiSK Next (its own subsection follows); you need a
+BRiSK subscription with the broker. For SBI, log in on sbi.brisk.jp in your browser, then
+pass its session cookies: copy them from DevTools, or use `pycookiecheat`'s
 `chrome_cookies("https://sbi.brisk.jp")`. Or let `briskapi` sign in with your passkey
 ([below](#signing-in-with-a-passkey-experimental)).
 
 ```python
-from briskapi import sbi
+from briskapi import brisk
 
-sbi.login(cookies={"session_bfaf77a2": "v2.local..."})   # remember=True saves them (owner-only file)
+brisk.login(cookies={"session_bfaf77a2": "v2.local..."})   # remember=True saves them (owner-only file)
 toyota = briskapi.Ticker("7203")
 toyota.candles("5m").to_pandas()   # price bars: 5m (today), 1d, 1w or 1mo
 toyota.margin(days=30)             # margin balances and stock-lending fees
@@ -110,35 +113,42 @@ market.events()       # basket orders, limit up/down, volume surges
 market.schedule()     # trading date, status and session times
 market.watchlist()    # your saved codes
 
-feed = sbi.connect(codes=["7203"])          # live (experimental); timing sharing follows consent
+feed = brisk.connect(codes=["7203"])        # live (experimental); each finished day uploaded unless you opt out
 toyota.quote()                              # same calls as any feed
-# To share this session's market data too, first accept the current policy:
-# briskapi.consent(accept=True, contributor="your-alias", license="CC0-1.0")
-# feed = sbi.connect(codes=["7203"], share_market_data=True)
+# upload_market_data=False keeps each day's market recording local; upload=False keeps all of it
 ```
 
-Results use the conventions below. Errors are `sbi.SessionExpiredError` (log in
-again), `briskapi.NotFoundError`, `sbi.RateLimitError` and `sbi.APIError`.
+A broker feed records continuously, one recording per trading day, and keeps running across
+days. When the site starts serving the next trading date (checked every 10 minutes), or the
+server closes the stream after the market, the day ends: it is packaged and uploaded (its
+market recording and timing summary, unless you opt out) while the next day records from a
+fresh snapshot. `output=DIR` (`brisk.connect(output=...)`, `briskapi.connect(output=...)`,
+`brisk live --output DIR`) also keeps each finished day in DIR, in a folder named
+`SOURCE_YYYYMMDD_FROM-TO` (the day's first and last source clock, JST HHMMSS), such as
+`sbi_live_20261013_085800-153512`. `feed.recordings` lists the finished days (`trading_date`,
+`name`, `path`, `uploaded`, `timing_uploaded`), and `on_day=callback` is called for each. A
+day still open when you stop the feed is not uploaded, only its timing summary.
+
+Results use the conventions below. Errors are `brisk.SessionExpiredError` (log in
+again), `briskapi.NotFoundError`, `brisk.RateLimitError` and `brisk.APIError`.
 Requests are limited to one per second.
 
-The live feed runs SBI's own decoder under Node, downloaded with your session;
+The live feed runs BRiSK's own decoder under Node, downloaded with your session;
 no browser is involved. It follows the vendor client's connect sequence: it feeds
 the decoder from the first frame, catches the snapshot up to the stream, answers
 the server's pings through the decoder and watches the server heartbeat. It hasn't
 yet been validated against a live SBI session. The stream is expected to be a plain
 binary WebSocket, as in the Next client. Should the server open with Socket.IO
 instead, the host joins its `/v2/user` namespace with unverified parameters that
-`sbi.connect(profile={...})` can set. See what the server answers with
+`brisk.connect(profile={...})` can set. See what the server answers with
 `trace_protocol=True` (every token redacted); anything unexpected stops with an
 explicit error rather than a guess. Please report what you see. Live sessions now
 get through sign-in, the data endpoints, the decoder download, the stock master and
 the snapshot (loaded with the session schedule). The WebSocket upgrade to
 `api.brisk.jp` was then answered with HTTP 502; those sessions didn't ask for the
 `flex` subprotocol the vendor client asks for, which this version does, and whether
-that is enough is not known yet. Your cookies
-go only to sbi.brisk.jp. SBI market data is shared only after an explicit choice for
-that capture; the Python API requires `share_market_data=True`. With contribution
-on, a timing summary is shared even when market-data sharing is declined.
+that is enough is not known yet. Your SBI cookies
+go only to sbi.brisk.jp.
 
 ### Tachibana e-shiten BRiSK Next
 
@@ -149,16 +159,16 @@ cookies with `site="e-shiten"`, or let `briskapi` sign in with your e-shiten pas
 then `brisk login` before `brisk live --site e-shiten`.
 
 ```python
-sbi.login(cookies={...}, site="e-shiten")   # or BRISK_ESHITEN_COOKIES; remember=True keeps them apart from SBI's
-feed = sbi.connect(codes=["7203"])           # live (experimental)
+brisk.login(cookies={...}, site="e-shiten")  # or BRISK_ESHITEN_COOKIES; remember=True keeps them apart from SBI's
+feed = brisk.connect(codes=["7203"])         # live (experimental)
 ```
 
-Everything above applies, sharing included (a timing summary under your saved choice,
-market data only if you opt in for that capture); its cookies go only to
+Everything above applies, daily recordings and uploads included (each finished day's market
+recording and timing summary); its cookies go only to
 next.e-shiten.brisk.jp. e-shiten allows one
 BRiSK session at a time: opening it in a second tab or browser has stopped the first
 (message 10011), so the feed and BRiSK in your browser can end each other. Before you
-record or share, read what Tachibana's BRiSK Next terms say about storing and reusing
+record or upload, read what Tachibana's BRiSK Next terms say about storing and reusing
 its data.
 
 ## Signing in with a passkey (experimental)
@@ -193,7 +203,7 @@ without asking. The broker's site cannot tell the difference.
    the broker's site in that window (or pass `--launch-url` to have it opened for you).
    `briskapi` reads the BRiSK session cookies, saves them and closes Chrome.
 3. **Then use it.** For SBI and e-shiten, `brisk live --sbi` or `brisk live --site e-shiten` and the
-   `briskapi.sbi` API use the saved cookies. For the other brokers `briskapi` has no data client
+   `briskapi.brisk` API use the saved cookies. For the other brokers `briskapi` has no data client
    yet, so the cookies are only saved (under `~/.config/brisk/cookies/`) for your own use.
 
 Your existing passkeys on your phone or in a password manager are not touched. The broker simply
@@ -246,20 +256,26 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | --- | --- |
 | `briskapi.connect(...)` | Live `Feed`; becomes the default source |
 | `Ticker(code).info()` | Name, lot size, tick type, base price and daily limits |
-| `Ticker(code).quote(at=None)` | Bid/ask with their quantities and orders, the ten best book levels per side (`bids`, `asks`), indicative price/volume, market-order and closing quantities, last trade, turnover, issue status |
-| `Ticker(code).auction(at=None)` | Indicative auction state with `market_order_imbalance` (market buy minus sell) |
+| `Ticker(code).quote(at=None)` | Bid/ask with their quantities and orders, the ten best book levels per side (`bids`, `asks`) and of the closing-condition orders (`closing_bids`, `closing_asks`), the board's order totals, indicative price/volume, market-order and closing quantities, last trade, turnover, issue status and `special_quote` (side, price, when its timer ends) |
+| `Ticker(code).auction(at=None, closing=False)` | The auction's indicative state, market orders and board totals with `market_order_imbalance` (market buy minus sell); `closing=True` for the closing auction |
 | `Ticker(code).history(start, end)` | Every update in order |
+| `Ticker(code).trades(start, end)` | Every execution: time, price, shares and the initiating side (`buy`, `sell`; None for most opening prints) |
 | `Market().stocks()` | Master for every security |
 | `Market().snapshot(at=None)` | Every security's quote |
-| `Market().imbalances(at=None, top=None)` | Securities ranked by absolute market-order imbalance |
+| `Market().imbalances(at=None, top=None, closing=False)` | Securities ranked by absolute market-order imbalance (or the closing auction's) |
+| `Market().special_quotes(at=None)` | Securities in a special quote (特別気配): side, price, when its timer ends |
+| `Market().trades(start, end)` | Every security's executions in time order |
+| `Market().frames()` | A recording's batches: clocks, local timing, quote and trade counts |
 | `Market().summary()` | Source, date, coverage and clock range |
 | `Feed.quotes(codes)` / `Feed.on_quote(fn, codes)` | Live updates as they arrive |
-| `briskapi.recordings()` / `.pull()` / `.load()` | Archive listing, verified download, local file |
-| `briskapi.record(output, web=True, ...)` | A recording of the demo, shared per your choice |
-| `briskapi.consent(...)` | Your sharing choice |
+| `Feed.recordings` | A live feed's finished days: `trading_date`, `name`, `path`, `uploaded`, `timing_uploaded` |
+| `briskapi.recordings()` / `.pull()` / `.load()` | Your archive's listing, verified download, local file |
+| `briskapi.Archive().upload(dir)` / `.delete(prefix)` / `.deleted()` / `.restore(prefix)` / `.timing()` / `.owner` | Upload, delete, what you deleted in the last 30 days (with `deleted_at`, `restore_until`), bring one back, your timing reports, your owner ID |
+| `briskapi.record(output, web=True, ...)` | A recording of the demo, uploaded per your choice |
+| `briskapi.consent(...)` | Your upload choice |
 | `Ticker(code).candles(interval)` / `.margin(days)` | Broker BRiSK (SBI, e-shiten) price bars; margin balances and lending fees |
 | `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | Broker BRiSK market data |
-| `briskapi.sbi.login(site=...)` / `.connect()` | SBI (default) or e-shiten BRiSK session and live feed |
+| `briskapi.brisk.login(site=...)` / `.connect()` | SBI (default) or e-shiten BRiSK session and live feed |
 | `briskapi.passkey.enroll()` / `.login()` / `.forget()` | Passkey sign-in to your broker's BRiSK |
 
 Prices are yen floats, with `None` for the vendor's zero "unavailable" value.
@@ -276,54 +292,83 @@ one security's history is read on its own.
 ```sh
 brisk live --web --codes 7203,6758          # one JSON object per quote update (--raw for vendor fields)
 brisk sites | enroll | login | forget       # sign in to your broker's BRiSK with a passkey through Chrome (experimental)
-brisk live --sbi --codes 7203               # SBI BRiSK; cookies from BRISK_SBI_COOKIES (JSON) or `brisk login`; --trace-protocol shows the handshake, wire details in BRISK_SBI_PROFILE
+brisk live --sbi --codes 7203               # BRiSK at SBI Securities; cookies from BRISK_SBI_COOKIES (JSON) or `brisk login`; --trace-protocol shows the handshake, wire details in BRISK_PROFILE
 brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; cookies from BRISK_ESHITEN_COOKIES (JSON) or `brisk login`
-brisk record --web --output recordings/s1   # record a replay (shared if you agreed)
-brisk list --date 20210927 --source historical_mock
+brisk live --sbi --output days              # runs day after day; keeps each finished day in days/ (e.g. sbi_live_20261013_085800-153512) and prints a {"day": {...}} line on stderr
+brisk record --web --output recordings/s1   # record a replay (uploaded unless you opt out)
+brisk list --date 20210927 --source historical_mock   # your recordings (--timing: your timing reports; --deleted: what you deleted in the last 30 days)
 brisk pull PREFIX --output recordings/downloaded   # use a prefix returned by brisk list
+brisk delete PREFIX                         # remove one of your uploads from your archive (restorable for 30 days)
+brisk restore PREFIX                        # bring back an upload deleted in the last 30 days (also a timing report's key)
+brisk prune recordings/s1                   # free disk: remove a local recording your archive holds
 brisk export recordings/s1 --nautilus catalog      # a NautilusTrader v2 catalog (or --jsonl FILE)
-brisk consent [--accept | --revoke]         # show or change sharing
-brisk upload recordings/s1                  # retry sharing a recording
+brisk consent [--accept | --revoke]         # show or change automatic uploads (--no-upload: this run only)
+brisk upload recordings/s1                  # retry uploading a recording
+brisk identity [--recovery-code | --recover CODE]  # your owner ID; its recovery code; use it on another computer
 ```
 
 Each command has `--help`. `pull` verifies everything before writing and never
 overwrites an existing folder.
 
-At the beginning of each interactive `brisk live --sbi` or `--site e-shiten` capture
-with contribution enabled, you are asked whether to publish that session's market data;
-Enter opts in. The choice is not saved. Use `--share-market-data` to opt in explicitly
-in a script, or `--no-share-market-data` to decline without prompting. A clean session
-end is required to publish a recording. `brisk list --source sbi_live` (or
-`eshiten_live`) lists shared broker recordings; their market content is
-contributor-declared.
+`brisk live --sbi` and `--site e-shiten` run until you stop them, one recording per trading
+day. Unless you opt out, they upload each finished day's market recording and timing summary
+without asking; `--no-upload-market-data` keeps the recordings local and `--no-upload` keeps
+both. `brisk list --source sbi_live` (or `eshiten_live`) lists your broker recordings.
 
-## Sharing recordings
+## Your private archive
 
-The first time you record or start a demo live session from the command line,
-the tool shows what would be shared and asks once; Enter accepts. After that,
-every complete demo session is uploaded and published automatically. The Python
-API never asks: until you decide, sessions stay on your computer.
+Uploading gives you a free, off-computer copy of every complete session, checked on arrival
+(a complete demo replay must match the reference). Once a recording is in your archive,
+`brisk prune DIR` deletes the local copy (after checking its SHA-256 against your archive)
+and `brisk pull` brings it back, on this computer or any other. Each upload is filed under
+`archive/OWNER/YYYYMMDD/FROM-TO-SHA256` (the prefix `brisk list` returns), FROM and TO being
+the recording's first and last source clock (JST, HHMMSS), so a day's recordings sort by time.
 
-- **Broker timing sharing (SBI, e-shiten):** percentiles of decode time, data age at
-  receipt and frame spacing, a stall count, the frame count, the trading date,
-  the first and last minute, and your alias and license.
-  `briskapi.Archive().timing()` lists everyone's reports.
-- **Optional broker market sharing:** an explicit choice at the start of each capture
-  adds the decoded securities master, prices, quantities, codes and local timing
-  to the public archive. Cookies, tokens and connection diagnostics are excluded.
-- **What a demo session shares:** the market data you recorded, local timing measurements
-  (including your computer's clock, which shows when you recorded), and a public
-  alias (random `anon-…` by default) and license. Your IP address is used only to
-  rate limit uploads.
-- **Visibility:** published recordings are public and permanent, and you cannot
-  delete them yourself. See [PRIVACY.md](https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md).
-- **Opting out:** `brisk consent --revoke`, `BRISK_CONTRIBUTE=0`, or `--no-upload`
-  for one run.
-- **License:** accepting declares that you may redistribute the recordings under
-  the chosen data license (CC0-1.0 or CC-BY-4.0). This project's open-source
-  license gives no rights to vendor or exchange data. If you can't make that
-  declaration, turn sharing off.
-- Partial replays (`--limit-frames`) and sessions closed early are never shared.
+Uploads are private: only you can list, download or delete them. There is no account. The
+first time it needs one, the tool makes your **identity**, a random secret, and the archive
+files your uploads under a one-way hash of it, your owner ID. The secret is kept twice, in
+your system's credential store (the macOS Keychain or Windows Credential Manager) and in an
+owner-only file (`~/.config/brisk/identity.json`); each restores the other. When it is made,
+the tool shows its **recovery code**, 28 letters and digits: write it down.
+`brisk identity --recovery-code` shows it again, and `brisk identity --recover CODE` uses it
+on another computer (or set `BRISK_IDENTITY`). Keep it private: whoever holds it is you to
+the archive, and without it or a saved copy your uploads can't be reached. The archive's
+operator can access what it stores, as with any hosted service; see
+[PRIVACY.md](https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md).
+
+Uploads are on by default. The first time you record or start a live session from the
+command line, the tool shows what is uploaded and asks once (Enter accepts, `n` declines),
+and saves your answer. After that, every clean, complete session (or finished day of a live
+feed) uploads automatically,
+without asking again. Where nothing can ask, in the Python API or a command run without a
+terminal, sessions upload by default and the tool says so once per process (a warning in
+Python), until you decide with `brisk consent --accept` or `--revoke`
+(`briskapi.consent(accept=True)` or `revoke=True`).
+
+- **What a demo session uploads:** local timing measurements (including your computer's
+  clock, which shows when you recorded). A demo replay's market data is the same for
+  everyone, so the archive keeps it once: a demo upload sends only its own timing table
+  (about 0.4 MB instead of about 41 MB), the archive joins it to its verified copy of the
+  demo's market tables, and `brisk pull` returns the complete recording, verified as before.
+  (The very first demo upload to an archive sends the whole recording.) Your IP address is
+  used only to rate limit uploads.
+- **What a broker session (SBI, e-shiten) uploads:** a timing summary (percentiles of
+  decode time, data age at receipt and frame spacing, a stall count, the frame count, the
+  trading date and the first and last minute; `briskapi.Archive().timing()` lists yours)
+  and, once a trading day has ended, that day's decoded market recording: securities master,
+  prices, quantities, books, trades, codes and local timing. Cookies, tokens and connection
+  diagnostics are never uploaded.
+- **Opting out:** `--no-upload` for one run (`upload=False` in Python);
+  `--no-upload-market-data` (`upload_market_data=False`) keeps only a broker capture's
+  market recording local; `BRISK_UPLOAD=0` for every run in that environment;
+  `brisk consent --revoke` for good.
+- **Deleting and restoring:** `brisk delete PREFIX` removes an upload from your archive, so
+  you can no longer list or download it. For 30 days you can bring it back:
+  `brisk list --deleted` shows what you deleted (with `deleted_at` and `restore_until`) and
+  `brisk restore PREFIX` (also a timing report's key) restores it. After 30 days it can no
+  longer be restored and is removed.
+- Partial replays (`--limit-frames`) and recordings closed before their day ends are never
+  uploaded; a broker feed stopped mid-day uploads only its timing summary.
 
 ## More documentation
 
@@ -331,7 +376,7 @@ API never asks: until you decide, sessions stay on your computer.
 - [PRIVACY.md](https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md): privacy policy
 - [CONTRIBUTING.md](https://github.com/honvl/BRiSKapi/blob/main/CONTRIBUTING.md): development, tests and releases
 - [tools/brisk_mock/README.md](https://github.com/honvl/BRiSKapi/blob/main/tools/brisk_mock/README.md): field definitions, timing and latency, checking the SBI master layout, and the optional Rust collector
-- [infra/README.md](https://github.com/honvl/BRiSKapi/blob/main/infra/README.md): deploying your own archive
+- [infra/README.md](https://github.com/honvl/BRiSKapi/blob/main/infra/README.md): deploying an archive
 - [THIRD_PARTY.md](https://github.com/honvl/BRiSKapi/blob/main/THIRD_PARTY.md): decoder, data and pybrisk attribution
 
 Software is MIT licensed.
