@@ -293,3 +293,16 @@ test('the heartbeat monitor reports a stale feed even while heartbeats keep comi
   assert.match(failures[0].message, /data is stale/);
   monitor.stop();
 });
+
+test('the socket asks for the subprotocol it is given, names its site in errors and traces what the server agreed', async () => {
+  const { seen, socket } = open({ protocols: 'flex', name: 'e-shiten BRiSK Next' });
+  assert.equal(socket.init.protocols, 'flex');
+  socket.protocol = 'flex';
+  socket.dispatchEvent(new Event('open'));
+  assert.ok(seen.trace.some(line => line.includes('open (subprotocol "flex")')), seen.trace.join('\n'));
+  socket.dispatchEvent(Object.assign(new Event('error'), { message: 'Received network error or non-101 status code.' }));
+  await until(() => seen.errors.length, 'the error');
+  assert.match(seen.errors[0].message, /^e-shiten BRiSK Next WebSocket error: Received network error/);
+  const plain = open();
+  assert.equal(plain.socket.init.protocols, undefined, 'no subprotocol unless asked');
+});

@@ -85,6 +85,12 @@ const CATCH_UP_FORMATS = {
 };
 const DEFAULT_CATCH_UP = 'issue-lists';
 
+// The vendor client opens the market stream as `new WebSocket(url, "flex")` (its stream service's
+// start(), in the SBI app bundle of both March and October 2026), so the upgrade asks for the
+// WebSocket subprotocol "flex". Live upgrades sent without it were refused with HTTP 502 whatever
+// the other headers; whether the subprotocol is all the server wants is not yet confirmed.
+const STREAM_PROTOCOL = 'flex';
+
 // Fetch the frames between the snapshot and the stream's first frame. Mirrors the vendor
 // client: up to five retries, but never for an expired session or a snapshot that is too old.
 async function fetchCatchUp(session, { app, issues, format = DEFAULT_CATCH_UP, retries = 5, backoffMs = n => 1000 + 1000 * n, trace }) {
@@ -313,7 +319,8 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     // Origin is what a browser on the site sends.
     const headers = { origin: where.origin };
     if (wsUrl.origin === where.origin.replace(/^https:/, 'wss:')) headers.cookie = session.cookie;
-    link = new Link({ WebSocketImpl, url: wsUrl, headers, profile, context, trace, connectTimeoutMs, onBinary: onFrame,
+    link = new Link({ WebSocketImpl, url: wsUrl, headers, protocols: STREAM_PROTOCOL, name: where.name, profile, context, trace,
+      connectTimeoutMs, onBinary: onFrame,
       onClose: closed => settle(closed), onError: error => { failure = failure || error; settle({ code: -1, reason: '' }); } });
 
     const closed = await ended;
