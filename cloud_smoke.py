@@ -21,7 +21,7 @@ def main():
         s3=client(config)
         assert [p for p,_ in manifests(s3,config['bucket'],'20210927') if p==result['prefix']]
         pull(s3,config['bucket'],result['prefix'],root/'download')
-        assert b''.join(Recording(root/'download').lines())==b''.join(map(encode,synthetic_recording()))
+        assert list(Recording(root/'download').batches())==synthetic_recording()
         # Content that is not the reference replay must be rejected by the service,
         # even with a self-consistent manifest from a modified client.
         tampered=synthetic_recording(); tampered[1]['quotes'][0]['indicative_price10']+=10

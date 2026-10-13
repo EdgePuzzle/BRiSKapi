@@ -46,6 +46,11 @@ account concurrency limit and application quotas still apply. This does not alte
 other functions' concurrency allocations. Upload quotas are intentionally modest
 and defined in `archive_service.py`; adjust them when usage warrants it.
 
+S3 can take a few minutes to apply a changed notification filter (0.9.0 changed it
+from `events.jsonl.gz` to `recording.zip`). An upload in that window is not ingested;
+invoke the function with that object's S3 event (key and version) to process it, or
+let staging expire it after two days.
+
 Events are version bound, publications use conditional immutable writes and the
 manifest is a commit marker. Infrastructure/storage failures retry via Lambda;
 malformed data produces a private `rejected` status. The CLI prints a bearer-ticket
