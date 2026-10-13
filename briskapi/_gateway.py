@@ -381,15 +381,19 @@ class _Bars:
     span within the trading sessions lies between `first` (where they begin, UTC ns) and the clock. With
     `first` None (a replay of the demo, whose cloud bars have no such rule) every bar is given. The clock is
     the latest batch's, or this computer's less the feed's delay (Live._tick). A trade that arrives after its
-    bar was given is left out (the cloud's bar counts it)."""
+    own bar has ended goes into the next bar still open, so every trade counts and bars come in order (the
+    cloud's bars place it by its own time)."""
 
     def __init__(self, length):
-        self.length, self.first, self.started = length, None, False
-        self.open = {}      # bar start -> {code: [open key, open, high, low, close key, close, volume]}
-        self.done = set()   # the day's bar starts already given (or found uncovered)
+        self.length = length
+        self.begin(None)
+        self.started = False
 
     def begin(self, first):
-        self.first, self.started, self.done = first, True, set()
+        self.first, self.started = first, True
+        self.open = {}         # bar start -> {code: [open key, open, high, low, close key, close, volume]}
+        self.horizon = None    # the clock the bars have been given to
+        self._spans = {}
 
     def add(self, trades):
         """Rows of the trades schema."""
@@ -401,8 +405,8 @@ class _Bars:
                                                       trades.column('trade_id').to_pylist(),
                                                       trades.column('price').to_pylist(), trades.column('size').to_pylist()):
             start = (ts + records.JST_NS) // self.length * self.length - records.JST_NS
-            if start in self.done:
-                continue
+            while self.horizon is not None and self._span(start)[0] <= self.horizon:
+                start += self.length    # its bar has ended: the next one still open
             key = (ts, frame, int(trade.split('-')[1]))
             bar = self.open.setdefault(start, {}).get(code)
             if bar is None:
@@ -416,11 +420,14 @@ class _Bars:
 
     def _span(self, start):
         """Where a bar ends for its trades, and its session pieces ((low, high), UTC ns; None without the rule)."""
-        if self.first is None:
-            return start + self.length, None
-        pieces = [(int(low[0]), int(high[0])) for low, high in
-                  records.session_pieces(np.array([start]), np.array([start + self.length])) if high[0] > low[0]]
-        return max(high for _, high in pieces), pieces
+        if start not in self._spans:
+            if self.first is None:
+                self._spans[start] = start + self.length, None
+            else:
+                pieces = [(int(low[0]), int(high[0])) for low, high in
+                          records.session_pieces(np.array([start]), np.array([start + self.length])) if high[0] > low[0]]
+                self._spans[start] = max(high for _, high in pieces), pieces
+        return self._spans[start]
 
     def due(self):
         """When the next bar ends (UTC ns, BRiSK's clock), or None."""
@@ -429,13 +436,13 @@ class _Bars:
     def ready(self, clock, final=False):
         """[(bar start, code, (open, high, low, close, volume))] for the bars done by `clock` (UTC ns), or, with
         `final` (the day's end), for every bar left."""
+        self.horizon = clock if self.horizon is None else max(self.horizon, clock)
         out = []
         for start in sorted(self.open):
             end, pieces = self._span(start)
             covered = pieces is None or all(self.first <= low and high <= clock + 1 for low, high in pieces)
             if final or clock >= end:
                 bars = self.open.pop(start)
-                self.done.add(start)
                 if covered:
                     out += [(start, code, (b[1], b[2], b[3], b[5], b[6])) for code, b in bars.items()]
         return out

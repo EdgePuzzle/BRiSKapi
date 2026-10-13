@@ -6,7 +6,8 @@ from two places:
 - **The cloud API** (`briskapi.Historical`, `brisk query`): records in Databento's shapes, one
   schema per request. [Cloud API records](#cloud-api-records). `briskapi.Live` gives the same
   records live from the feed on your computer: the same columns, types and values for the same
-  session (a bar can lack a trade that reached this computer after the bar had ended).
+  session (except that a trade reaching this computer after its bar has ended counts in the next
+  live bar, where the cloud places it by its own time).
 - **Recordings on your computer** (`brisk record`, `brisk pull`, `brisk live --output`): a
   folder of four Parquet tables in NautilusTrader v2's layout, everything the decoder produced.
   [Recordings](#recordings).

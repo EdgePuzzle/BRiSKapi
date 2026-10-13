@@ -109,8 +109,9 @@ for record in live:             # or live.add_callback(fn); live.start(); live.b
   session. `Live` builds its bars from the trades it receives, by the cloud's rules.
 - **Bars** come as soon as their interval ends, by the feed's clock: when a later batch is
   stamped past the end, or when this computer's clock, less the delay measured from BRiSK to this
-  session (the largest of the last 10 seconds), passes it. A trade that arrives after its bar
-  has been given is left out of it (the cloud's bar counts it). A bar is given only if the
+  session (the largest of the last 10 seconds), passes it. A trade that arrives after its own
+  bar has ended goes into the next bar still open (the cloud places it by its own time), so
+  every trade counts and bars come in order. A bar is given only if the
   session saw its whole span within the trading sessions: with `start`, from the feed's start;
   without, the bars that begin after it subscribed.
 - **Where a session starts:** with the day's definitions, then each update as it arrives.

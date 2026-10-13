@@ -225,8 +225,10 @@ to the broker; a session needs the gateway's key and nothing else.
 - **Bars.** Each bar subscription aggregates its trades per (code, bar start) as the cloud's
   `build_bars` does: the open is the first trade by (`ts_event`, frame, place in the frame), the
   close the last, with high, low and summed size. A bar goes out once BRiSK's clock reaches its
-  end, with no allowance for trades stamped earlier than the clock (a trade arriving after its
-  bar went out is dropped, and never starts a second bar for that interval). That clock is the
+  end, with no allowance for trades stamped earlier than the clock: a trade arriving after its
+  own bar has ended (by the clock the bars were last given to) goes into the next bar still
+  open, so its volume counts and no bar for a past interval goes out late. The cloud places such
+  a trade by its own time, so the two can differ there. That clock is the
   latest batch's, or, between batches, this computer's less the feed's delay: `_Latency` keeps,
   for each live batch, when the session took it in less BRiSK's stamp (network, the gateway's
   hop and any clock difference) and allows for the largest of the last 10 seconds, and

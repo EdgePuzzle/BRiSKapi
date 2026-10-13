@@ -15,7 +15,7 @@ import briskapi as brisk
 import briskapi.cli as cli
 from briskapi import _gateway, _live, records
 from test_api import market
-from test_query import OWNER, archive, at, isolated, query, session, trades_at  # noqa: F401
+from test_query import OPEN_US, OWNER, archive, at, isolated, query, session, trades_at  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -161,6 +161,25 @@ def test_a_quiet_bar_closes_on_this_computers_clock(decoder, monkeypatch):
     live.block_for_close(timeout=30)
     feed.wait()
     assert [b.ts_event.second for b in bars] == [10, 20]     # 09:00:30's bar ends after the session does
+
+
+def test_a_late_trade_goes_into_the_next_open_bar(decoder):
+    """A trade stamped 09:00:19.5 that arrives with the 09:00:21 batch: its own bar has ended, so it counts in the
+    next one still open (09:00:20), whose open it is by time."""
+    batches = session(0, 30)
+    late = {'issue_id': 0, 'code': '7203', 'frame': 22, 'time_us': OPEN_US + 19_500_000, 'price10': 31000,
+            'quantity': 100, 'side': 1}
+    batches[21] = dict(batches[21], trades=[*batches[21]['trades'], late])
+    script, release = decoder(batches, holds=[1])
+    feed = broker_feed(script)
+    live = brisk.Live()
+    live.subscribe('XTKS.BRISK', 'ohlcv-1s', symbols='7203')
+    live.start()
+    wait_for(lambda: live._subscriptions[0].active)
+    release(1)
+    bars = [(b.ts_event.second, b.open, b.high, b.low, b.close, b.volume) for b in live]
+    feed.wait()
+    assert bars == [(10, 3001.0, 3001.0, 3001.0, 3001.0, 200), (20, 3100.0, 3100.0, 3002.0, 3002.0, 400)]
 
 
 def test_one_session_spans_trading_days(decoder):
