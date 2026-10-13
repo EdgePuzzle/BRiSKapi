@@ -6,10 +6,11 @@ upload tickets, identity secrets or broker BRiSK session cookies. The committed
 `briskapi/archive.json` contains only bucket, region, API URL and query URL. The archive is
 private: each uploader reaches only its own uploads; only `samples/` is public. The cloud API
 (`query_engine.py`, `query_service.py`) runs only in the cloud, like `archive_service.py`: it
-is not in the wheel, so OHLCV bars exist only there (`infra/deploy.py` packages it). Its record
-schemas and projections are `briskapi/records.py`, shared with `briskapi.Live`, which streams the
-same records from a local feed's gateway: keep the two equal (`tests/test_gateway.py` checks), and
-keep the gateway on 127.0.0.1 behind its owner-only key file. Uploads
+is not in the wheel, so Historical's OHLCV bars exist only there (`infra/deploy.py` packages it):
+Historical never builds bars from local files. Its record schemas and projections are
+`briskapi/records.py`, shared with `briskapi.Live`, which streams the same records from a local
+feed's gateway and builds live bars from the stream by the cloud's rules: keep the two equal
+(`tests/test_gateway.py` checks), and keep the gateway on 127.0.0.1 behind its owner-only key file. Uploads
 are on by default: the CLI asks once on a terminal (Enter accepts) and saves the answer; the Python
 API and runs without a terminal upload by default after a once-per-process notice. Every
 clean session uploads, broker market recordings and timing reports included, with explicit

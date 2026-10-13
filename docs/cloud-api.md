@@ -34,7 +34,7 @@ Decided (2026-10-13):
 - **Cheap to run.** Serverless, reading only the Parquet row groups a request needs; no database.
 
 Non-goals: live streaming from the cloud (live records come from the feed on your own computer,
-through `briskapi.Live`, in these same schemas but the bars), other owners' records, SQL, DBN for
+through `briskapi.Live`, in these same schemas, bars included), other owners' records, SQL, DBN for
 now.
 
 ## What Databento's historical API is, and what is built
@@ -146,8 +146,9 @@ Planned for phase 2:
 
 ## OHLCV bars
 
-Bars come only from the cloud: the engine (`query_engine.py`) is server side and not in the
-`briskapi` wheel.
+`Historical`'s bars come only from the cloud: the engine (`query_engine.py`) is server side and
+not in the `briskapi` wheel. (`briskapi.Live` builds bars from the stream on your computer, by the
+same rules.)
 
 - **Building.** From trades, per security and interval. Intervals align to JST (a day bar runs
   JST midnight to midnight); a bar's `ts_event` is its start; an interval without a trade has

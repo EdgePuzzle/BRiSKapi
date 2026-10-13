@@ -102,12 +102,19 @@ import briskapi
 live = briskapi.Live()          # このコンピューターで動いているフィードを見つける
 live.subscribe(dataset="XTKS.BRISK", schema="imbalance", symbols=["7203", "6758"])
 live.subscribe(dataset="XTKS.BRISK", schema="trades", symbols=["7203"], start=0)   # その日のここまで、続けてライブ
+live.subscribe(dataset="XTKS.BRISK", schema="ohlcv-1m", symbols=["7203"])          # 1分ごとのバーを、その1分が終わりしだい
 for record in live:             # または live.add_callback(fn); live.start(); live.block_for_close()
     print(record.schema, record.symbol, record.ts_event)
 ```
 
-- **スキーマ:** `trades`、`mbp-10`、`imbalance`、`definition`、`brisk-quotes`。同じセッションなら
-  `Historical` が返すのと同じ列・同じ値です。OHLCV バーはクラウドからのみ得られます。
+- **スキーマ:** `trades`、`mbp-10`、`imbalance`、`definition`、`brisk-quotes`、OHLCV バーの
+  `ohlcv-1s` 〜 `ohlcv-1d`。同じセッションなら `Historical` が返すのと同じ列・同じ値です。`Live` は
+  受け取った約定から、クラウドと同じ規則でバーを作ります。
+- **バー**は、その区間がフィードの時計で終わりしだい届きます。終わりより後の時刻のバッチが届いたとき、
+  またはこのコンピューターの時計から、BRiSK からこのセッションまでに測った遅延（直近10秒の最大値）を
+  引いた時刻が終わりを過ぎたときです。バーを渡したあとに届いた約定はそのバーに含まれません（クラウドの
+  バーには含まれます）。バーは、セッションがその取引時間内の全期間を見ている場合にだけ渡します。
+  `start` を指定すればフィードの開始から、指定しなければ購読より後に始まるバーです。
 - **セッションの始まり:** その日の銘柄定義、続いて届いた更新を順に受け取ります。`start`（時刻、
   日付、UTC ナノ秒、またはフィードが持つすべてを表す 0）を指定すると、まずフィードのその取引日を
   その時点から再生します。フィードが持っているのは、起動してからの分と、スナップショットが復元
@@ -117,8 +124,9 @@ for record in live:             # または live.add_callback(fn); live.start();
   フィードがバッチを受け取った順に届き、バッチ内は `Historical` と同じ順です。
   `add_callback(fn, exception_callback)` と `add_stream(path)`（JSON Lines。Databento では DBN）
   でも受け取れます。`block_for_close(timeout)` はセッションの終わりを待ち、`stop()` は終わらせます。
-  1つのセッションの購読は同じデータセットを共有し、一緒に始まるので、`start()` の前に購読して
-  ください。`symbology_map` は `instrument_id` から銘柄コードへの対応です。
+  購読は `start()` の前でも後でもかまいません。後からの購読にもそれぞれの再生やスナップショットがあり、
+  その銘柄はその時点から届きます。1つのセッションの購読は同じデータセットを共有します。
+  `symbology_map` は `instrument_id` から銘柄コードへの対応です。
 - **このコンピューターだけ:** フィードは 127.0.0.1 でのみ待ち受け、所有者だけが読めるファイル
   （`~/.config/brisk/gateway/XTKS.BRISK.json`）にポート番号とともに保存したキーを持つセッション
   だけを受け入れます。`Live()` はこのファイルを読みます。配信する内容がこのコンピューターの外に
@@ -497,7 +505,8 @@ path=None)` はストアを返します。`path` を指定すると Parquet フ�
 - **銘柄**は JPX の銘柄コードです。`instrument_id` はコードごとに固定です。数字だけのコードはその数値
   （7203）、それ以外は 100,000 にコードの36進数の値を足したものです（`167A` は 154694）。
 
-**OHLCV バーはクラウドにしかありません。** アーカイブは取引日ごとに、自分の現在のライブ記録から
+**`Historical` の OHLCV バーはクラウドにしかなく、** 手元のファイルから作ることはありません（`Live` は
+ストリームから作ります）。アーカイブは取引日ごとに、自分の現在のライブ記録から
 バーを作ります（各約定は1回だけ数えます）。記録をアップロード、削除、復元するたびに作り直すので、
 照会では作成済みのバーを読むだけです。含まれるのは、記録がその銘柄と、取引時間（前場 09:00〜11:30 と
 後場 12:30〜15:30、日本時間）内のそのバーの全期間をカバーしているバーだけです。たとえば 08:55 から

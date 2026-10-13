@@ -99,13 +99,20 @@ import briskapi
 live = briskapi.Live()          # finds the feed running on this computer
 live.subscribe(dataset="XTKS.BRISK", schema="imbalance", symbols=["7203", "6758"])
 live.subscribe(dataset="XTKS.BRISK", schema="trades", symbols=["7203"], start=0)   # the day so far, then live
+live.subscribe(dataset="XTKS.BRISK", schema="ohlcv-1m", symbols=["7203"])          # each minute's bar as it ends
 for record in live:             # or live.add_callback(fn); live.start(); live.block_for_close()
     print(record.schema, record.symbol, record.ts_event)
 ```
 
-- **Schemas:** `trades`, `mbp-10`, `imbalance`, `definition` and `brisk-quotes`, with the same
-  columns and values as `Historical` returns for the same session. OHLCV bars come only from
-  the cloud.
+- **Schemas:** `trades`, `mbp-10`, `imbalance`, `definition`, `brisk-quotes` and the OHLCV bars
+  `ohlcv-1s` to `ohlcv-1d`, with the same columns and values as `Historical` returns for the same
+  session. `Live` builds its bars from the trades it receives, by the cloud's rules.
+- **Bars** come as soon as their interval ends, by the feed's clock: when a later batch is
+  stamped past the end, or when this computer's clock, less the delay measured from BRiSK to this
+  session (the largest of the last 10 seconds), passes it. A trade that arrives after its bar
+  has been given is left out of it (the cloud's bar counts it). A bar is given only if the
+  session saw its whole span within the trading sessions: with `start`, from the feed's start;
+  without, the bars that begin after it subscribed.
 - **Where a session starts:** with the day's definitions, then each update as it arrives.
   `start` (a time, a date, UTC nanoseconds, or 0 for everything the feed has) first replays
   the feed's trading day from then: the feed has the day from when it started, plus the day's
@@ -115,8 +122,9 @@ for record in live:             # or live.add_callback(fn); live.start(); live.b
   They come in the order the feed receives its batches; within a batch, in `Historical`'s
   order. `add_callback(fn, exception_callback)` and `add_stream(path)` (JSON lines; Databento
   writes DBN) take them too. `block_for_close(timeout)` waits for the session's end, and
-  `stop()` ends it. A session's subscriptions share one dataset and start together, so
-  subscribe before `start()`. `symbology_map` maps `instrument_id` to the code.
+  `stop()` ends it. Subscribe before or after `start()`: a later subscription gets its own
+  replay or snapshot, and its symbols from then on. A session's subscriptions share one
+  dataset. `symbology_map` maps `instrument_id` to the code.
 - **Only this computer:** the feed listens on 127.0.0.1 and admits a session only with the key
   it keeps, with its port, in an owner-only file (`~/.config/brisk/gateway/XTKS.BRISK.json`),
   which `Live()` reads. Nothing it serves leaves your computer. A session that falls more than
@@ -494,7 +502,8 @@ with quotas of 60 requests a minute and 2 GB a day per identity, and 120 request
 - **Symbols** are JPX codes. `instrument_id` is fixed per code: digits-only codes are their
   number (7203), others are 100,000 plus the code's base-36 value (`167A` is 154694).
 
-**OHLCV bars come only from the cloud.** The archive builds your bars for each trading day
+**`Historical`'s OHLCV bars come only from the cloud**, never from files on your computer
+(`Live` builds them from the stream). The archive builds your bars for each trading day
 from your own current live recordings of that day, counting each trade once, whenever you
 upload, delete or restore one, so a query reads them ready-made. They hold the bars your
 recordings cover: the security, and the bar's whole span within the trading sessions (09:00 to

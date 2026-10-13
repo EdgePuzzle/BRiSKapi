@@ -5,8 +5,8 @@ from two places:
 
 - **The cloud API** (`briskapi.Historical`, `brisk query`): records in Databento's shapes, one
   schema per request. [Cloud API records](#cloud-api-records). `briskapi.Live` gives the same
-  records, but the bars, live from the feed on your computer: the same columns, types and
-  values for the same session.
+  records live from the feed on your computer: the same columns, types and values for the same
+  session (a bar can lack a trade that reached this computer after the bar had ended).
 - **Recordings on your computer** (`brisk record`, `brisk pull`, `brisk live --output`): a
   folder of four Parquet tables in NautilusTrader v2's layout, everything the decoder produced.
   [Recordings](#recordings).
@@ -217,8 +217,8 @@ API follows Databento's.
 | `stocks()`: `name`, `lot_size`, `base_price`, `limit_up`, `limit_down`, `tick_type`, `issue_type` | `definition`: `name`, `min_lot_size_round_lot`, `base_price`, `high_limit_price`, `low_limit_price`, `tick_type`, `issue_type` | |
 | The other quote fields (`last_price`, `volume`, `turnover`, …) | `brisk-quotes`, same names | |
 
-OHLCV bars exist only in the cloud (`ohlcv-1s` to `ohlcv-1d`). `Ticker.candles()` is a different
-thing: BRiSK's own bars from your broker.
+OHLCV bars (`ohlcv-1s` to `ohlcv-1d`) come from the cloud API, or live from `briskapi.Live`;
+there are none locally. `Ticker.candles()` is a different thing: BRiSK's own bars from your broker.
 
 ## Recordings
 
