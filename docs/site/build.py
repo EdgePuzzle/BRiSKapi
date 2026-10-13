@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 from pymdownx.slugs import slugify
@@ -67,9 +68,10 @@ GROUPS = {   # reference groups: slug prefix, title, Japanese title
     'python/archive_': ('Archive', 'Archive'), 'python/broker_': ('Your broker', '証券会社'), 'python/': ('Functions', '関数'),
 }
 LANGUAGES = {'Python': 'python', 'HTTP': 'bash', 'CLI': 'bash'}
+ALONE = ['guides/cli.md', 'data-format.md']   # pages that are a tab of their own (nav_yaml)
 LANGUAGE_LINE = re.compile(r'^\[English\]\([^)]*\) \| \[日本語\]\([^)]*\).*$', re.M)
 LINK = re.compile(r'(\]\()([^)\s]+)(\))')
-TRANSLATIONS = {'Home': 'ホーム', 'Getting started': 'はじめに', 'Your archive': 'アーカイブ', 'Reference': 'リファレンス',
+TRANSLATIONS = {'Home': 'ホーム', 'Guides': 'ガイド', 'Getting started': 'はじめに', 'Your archive': 'アーカイブ',
                 'Cloud API': 'クラウド API', 'Python API': 'Python API', 'About': 'このプロジェクトについて'}
 
 
@@ -165,8 +167,7 @@ class Site:
                         self.readme[(name, anchor)] = f'{section[0]}#{anchor}'
         for name, japanese in (('README.md', False), ('README.ja.md', True)):
             parts = split((ROOT / name).read_text())
-            intro = '\n'.join(parts[0][1])
-            self.add('index.md', home(intro, japanese), name, japanese)
+            self.add('index.md', home(parts, japanese), name, japanese)
             for (heading, body), section in zip(parts[1:], SECTIONS):
                 if not section:
                     continue
@@ -251,26 +252,120 @@ def english_anchors(translation, original):
     return '\n'.join(out) + '\n'
 
 
-def home(intro, japanese):
-    """The README's introduction, then cards to the main sections."""
-    cards = [('guides/which-api.md', 'Which API should I use?', 'どの API を使うか',
-              'A live feed, a recording, the cloud API or your broker\'s BRiSK.', 'ライブフィード、記録、クラウド API、証券会社の BRiSK。'),
-             ('guides/install.md', 'Install', 'インストール', 'pip, Node and the demo.', 'pip、Node、デモ。'),
-             ('guides/recording.md', 'Recording', '記録する', 'What brisk live and brisk record keep and upload, and what reads it.',
-              'brisk live と brisk record が何を残しアップロードし、何で読むか。'),
-             ('guides/cli.md', 'Command line', 'コマンドライン', 'Every brisk command, and the Python call it stands for.',
-              'brisk の全コマンドと、対応する Python の呼び出し。'),
-             ('reference/historical/timeseries/get_range.md', 'Cloud API', 'クラウド API',
-              'Databento-style queries over your uploads, and the public demo.', 'アップロードした記録と公開デモへの Databento 風の照会。'),
-             ('reference/python/ticker_quote.md', 'Python API', 'Python API',
-              'Quotes, trades and auctions from a feed or a recording.', 'フィードや記録から気配、約定、板寄せ。'),
-             ('data-format.md', 'Data format', 'データ形式', 'Every column, and how to read the Parquet.', '全列と Parquet の読み方。'),
-             ('privacy.md', 'Privacy', 'プライバシー', 'What is uploaded, kept and deleted.', '何をアップロードし、保存し、削除するか。')]
-    grid = ['<div class="grid cards" markdown>', '']
-    for page, title, title_ja, text, text_ja in cards:
-        grid += [f'-   **[{title_ja if japanese else title}](/{page})**', '', '    ---', '',
-                 f'    {text_ja if japanese else text}', '']
-    return f'---\nhide:\n  - navigation\n  - toc\n---\n\n{intro.strip()}\n\n' + '\n'.join(grid) + '</div>\n'
+# The home page's own words, in English and Japanese; the rest of it comes from the README and the reference.
+HOME = {
+    'eyebrow': ('Documentation', 'ドキュメント'),
+    'title': ('BRiSK auction data, in Python and the command line', 'BRiSK の板寄せデータを、Python とコマンドラインで'),
+    'start': ('Get started', 'はじめる'),
+    'reference': ('Cloud API reference', 'クラウド API リファレンス'),
+    'query': ('Query the public demo, no account needed', '口座なしで公開デモを照会する'),
+    'bars': ('One-minute bars, built in the cloud', 'クラウドで作られた 1 分足'),
+    'guides': ('Getting started', 'はじめに'),
+    'guides_text': ('From install to your first recording.', 'インストールから最初の記録まで。'),
+    'refs': ('Reference', 'リファレンス'),
+    'refs_text': ('Every call, with an example and its response.', 'すべての呼び出しを、例と応答とともに。'),
+    'datasets': ('Datasets and schemas', 'データセットとスキーマ'),
+    'datasets_text': ('Named like Databento\'s, venue then feed: `XTKS` is the Tokyo Stock Exchange.',
+                      'Databento にならって取引所、フィードの順に名付けています。`XTKS` は東京証券取引所です。'),
+    'columns': ('Dataset | Holds | Who can query it', 'データセット | 内容 | 照会できる人'),
+    'brisk': ('Your own live recordings, merged across days | You', '自分のライブ記録（日をまたいでまとめたもの） | 自分だけ'),
+    'demo': ('The public demo of 27 September 2021 | Every identity', '2021年9月27日の公開デモ | 誰でも'),
+    'schemas': ('Schemas', 'スキーマ'),
+    'only_cloud': ('OHLCV bars exist only in the cloud, built from your own uploads.',
+                   'OHLCV バーはクラウドにだけあり、自分のアップロードから作られます。'),
+}
+# Cards to the main sections: page, icon, title, Japanese title, text, Japanese text
+GUIDE_CARDS = [
+    ('guides/which-api.md', 'compass-outline', 'Which API should I use?', 'どの API を使うか',
+     'A live feed, a recording, the cloud API or your broker\'s BRiSK.', 'ライブフィード、記録、クラウド API、証券会社の BRiSK。'),
+    ('guides/install.md', 'download', 'Install', 'インストール', 'pip, Node and the demo.', 'pip、Node、デモ。'),
+    ('guides/recording.md', 'record-circle-outline', 'Recording', '記録する',
+     'What brisk live and brisk record keep and upload, and what reads it.', 'brisk live と brisk record が何を残しアップロードし、何で読むか。'),
+    ('guides/cli.md', 'console', 'Command line', 'コマンドライン', 'Every brisk command, and the Python call it stands for.',
+     'brisk の全コマンドと、対応する Python の呼び出し。'),
+]
+REFERENCE_CARDS = [
+    ('reference/historical/timeseries/get_range.md', 'cloud-outline', 'Cloud API', 'クラウド API',
+     'Databento-style queries over your uploads, and the public demo.', 'アップロードした記録と公開デモへの Databento 風の照会。'),
+    ('reference/python/ticker_quote.md', 'language-python', 'Python API', 'Python API',
+     'Quotes, trades and auctions from a feed or a recording.', 'フィードや記録から気配、約定、板寄せ。'),
+    ('data-format.md', 'table', 'Data format', 'データ形式', 'Every column, and how to read the Parquet.', '全列と Parquet の読み方。'),
+    ('privacy.md', 'shield-outline', 'Privacy', 'プライバシー', 'What is uploaded, kept and deleted.', '何をアップロードし、保存し、削除するか。'),
+]
+SOURCE_ICONS = ['play-circle-outline', 'lock-outline']   # the README's data sources, in order
+SCHEMAS = [(name, name) for name in ('trades', 'mbp-10', 'definition', 'imbalance', 'brisk-quotes')] + \
+          [(f'ohlcv-1{unit}', 'ohlcv-1s-ohlcv-1m-ohlcv-1h-ohlcv-1d') for unit in 'smhd']   # schema, data-format.md anchor
+
+
+def home(parts, japanese):
+    """The home page: the README's introduction beside a query of the demo and its captured response, the
+    README's data sources, then cards to the main sections and the datasets."""
+    say = {key: value[japanese] for key, value in HOME.items()}
+    lines = [line for line in parts[0][1] if not line.startswith('# ') and not LANGUAGE_LINE.match(line)]
+    intro = '\n'.join(line for line in lines if not line.startswith('>')).strip()
+    install = '\n'.join(parts[1 + [section and section[0] for section in SECTIONS].index('guides/install.md')][1]).strip()
+    requirements = install.split('\n\n')[0]
+    pip = re.search(r'```sh\n([^\n#]*?)\s*(?:#[^\n]*)?\n', install)[1]
+
+    label, *quote = [re.sub(r'^>\s?', '', line) for line in lines if line.startswith('>')]
+    sources = []
+    for line in quote:
+        if line.startswith('- '):
+            sources.append(line[2:])
+        elif sources:
+            sources[-1] += '\n' + line.strip()
+    out = ['---', 'hide:', '  - navigation', '  - toc', '---', '', '<div class="home" markdown>',
+           '<div class="home-hero" markdown>', '<div class="home-intro" markdown>',
+           f'<p class="home-eyebrow">{say["eyebrow"]}</p>', f'<h1 class="home-title">{say["title"]}</h1>', '', intro, '',
+           f'[{say["start"]}](/guides/install.md){{ .md-button .md-button--primary }} '
+           f'[{say["reference"]}](/reference/historical/timeseries/get_range.md){{ .md-button }}', '',
+           fence('sh', pip), '', requirements, '{: .home-note }', '', '</div>', *quickstart(say), '</div>', '',
+           '<div class="home-section" markdown>', f'<p class="home-label">{label.strip().strip("*").rstrip(":")}</p>',
+           '<div class="home-sources" markdown>']
+    for i, source in enumerate(sources):
+        title, body = re.match(r'\*\*(.+?):\*\*\s*(.*)', source, re.S).groups()
+        title = re.sub(r'\s*\n\s*', '' if japanese else ' ', title)
+        body = body if japanese else body[:1].upper() + body[1:]
+        out += ['<div class="home-source" markdown>', f':material-{SOURCE_ICONS[i % len(SOURCE_ICONS)]}:{{ .source-icon }}', '',
+                f'**{title}**', '', body, '</div>']
+    out += ['</div>', '</div>', '']
+    for key, cards in (('guides', GUIDE_CARDS), ('refs', REFERENCE_CARDS)):
+        out += ['<div class="home-section" markdown>', f'<h2 class="home-heading">{say[key]}</h2>', '',
+                say[f'{key}_text'], '{: .home-lede }', '', '<div class="grid cards" markdown>', '']
+        for page, icon, title, title_ja, text, text_ja in cards:
+            out += [f'-   :material-{icon}:{{ .card-icon }} **[{title_ja if japanese else title}](/{page})**', '',
+                    f'    {text_ja if japanese else text}', '']
+        out += ['</div>', '</div>', '']
+    chips = ' '.join(f'[`{name}`](/data-format.md#{anchor}){{ .schema }}' for name, anchor in SCHEMAS)
+    out += ['<div class="home-section" markdown>', f'<h2 class="home-heading">{say["datasets"]}</h2>', '',
+            say['datasets_text'], '{: .home-lede }', '', '<div class="home-datasets" markdown>', '<div markdown>', '',
+            f'| {say["columns"]} |', '| --- | --- | --- |', f'| `XTKS.BRISK` | {say["brisk"]} |',
+            f'| `XTKS.BRISKDEMO` | {say["demo"]} |', '', '</div>', '<div class="home-schemas" markdown>',
+            f'<p class="home-label">{say["schemas"]}</p>', '', chips, '', say['only_cloud'], '{: .home-note }', '',
+            '</div>', '</div>', '</div>', '</div>', '']
+    return '\n'.join(out)
+
+
+def quickstart(say):
+    """A card with the reference's query of the demo's one-minute bars, and the bars it returned (capture.py)."""
+    bars = next(method for _, methods in reference.REFERENCE for method in methods
+                if method.slug == 'historical/timeseries/get_range_bars')
+    output = json.loads((HERE / 'responses.json').read_text())[bars.slug]['Python'].splitlines()
+    columns = output[0].split()
+    shown = ['symbol', 'open', 'high', 'low', 'close', 'volume']
+    rows = []
+    for line in output[2:]:   # the header, the index's name, then the bars
+        day, time, *values = line.split()
+        bar = dict(zip(columns, values))
+        rows.append('<tr><td>' + html.escape(time.split('+')[0]) + '</td>' +
+                    ''.join(f'<td>{html.escape(bar[name])}</td>' for name in shown) + '</tr>')
+    table = ['<div class="response-table">', '<table class="response">', '<thead><tr><th>ts_event (JST)</th>' +
+             ''.join(f'<th>{name}</th>' for name in shown) + '</tr></thead>', '<tbody>', *rows, '</tbody>', '</table>',
+             '</div>']
+    return ['<div class="card home-quickstart" markdown>',
+            f'<div class="card-title"><span><span class="card-step">1</span>{say["query"]}</span><span>Python</span></div>', '',
+            fence('python', bars.examples['Python'], numbers=True), '',
+            f'<div class="card-title"><span><span class="card-step">2</span>{say["bars"]}</span></div>', *table, '</div>']
 
 
 def link_calls(text):
@@ -310,15 +405,28 @@ def tabs(blocks):
     return '\n\n'.join(f'=== "{name}"\n\n{block}' for name, block in blocks.items())
 
 
+ENDPOINT = re.compile(r"curl (-X POST|-G) '\{QUERY_URL\}(v0/[\w.]+)'")
+DEFAULT = re.compile(r'^\s+\**(\w+): [^=\n]*? = (.+?),?(?:\s+#.*)?$', re.M)   # a signature's `name: type = default,`
+
+
+def api_title(title):
+    """A method's title with what it belongs to muted (Historical.timeseries.get_range, Ticker.quote), and a phone
+    free to wrap it after a dot."""
+    owner, dot, rest = title.partition('.')
+    return f'<span class="api-title-prefix">{owner}.</span><wbr>{rest.replace(".", ".<wbr>")}' if dot else title
+
+
 def method_page(method, responses, query_url):
     returns = method.signature.rpartition('-> ')[2] if '->' in method.signature else 'None'
+    defaults = {name: value for name, value in DEFAULT.findall(method.signature) if value != 'None'}
     left = [method.text, '']
     if method.params:
         left += ['## Parameters', '']
         for p in method.params:
             need = '<span class="param-required">required</span>' if p.required else '<span class="param-optional">optional</span>'
+            default = f' <span class="param-default">= {html.escape(defaults[p.name])}</span>' if p.name in defaults else ''
             left += ['<div class="param" markdown>', f'<div class="param-head"><code class="param-name">{p.name}</code> '
-                     f'{need} <span class="param-sep">|</span> <span class="param-type">{html.escape(p.type)}</span></div>',
+                     f'<span class="param-type">{html.escape(p.type)}</span> {need}{default}</div>',
                      '', p.text, '', '</div>', '']
     left += ['## Returns', '', '<div class="param" markdown>',
              f'<div class="param-head"><span class="param-type">{html.escape(returns)}</span></div>', '', method.returns, '',
@@ -330,13 +438,26 @@ def method_page(method, responses, query_url):
     usage = tabs({name: fence(LANGUAGES[name], code, '    ' * (len(examples) > 1), True) for name, code in examples.items()})
     result = tabs({name: fence('json' if name == 'HTTP' and text[:1] in '[{' else 'text', text, '    ' * (len(shown) > 1))
                    for name, text in shown.items()})
+    # A response's tabs follow the example's (content.tabs.link), so the card shows none of its own; a response
+    # in one language, beside examples in several, says which.
+    language = f' ({next(iter(shown))})' if len(shown) == 1 and len(examples) > 1 else ''
+    source = ('<span class="card-source card-source--illustrative">Illustrative</span>' if method.illustrative else
+              '<span class="card-source">Captured from the demo</span>')
     note = ('<div class="card-note">Illustrative values: this call needs your broker\'s BRiSK, or your own uploads, to run.</div>'
             if method.illustrative else '')
     right = ['<div class="card" markdown>', '<div class="card-title">API method</div>', '', fence('python', method.signature), '',
-             '</div>', '<div class="card" markdown>', '<div class="card-title">Example usage</div>', '', usage, '', '</div>',
-             '<div class="card" markdown>', '<div class="card-title">Example response</div>', note, '', result, '', '</div>']
-    return '\n'.join([f'---\ntitle: {method.title}\nhide:\n  - toc\n---\n', f'# {method.title}', '',
-                      '<div class="api" markdown>', '<div class="api-text" markdown>', '', *left, '</div>',
+             '</div>', '<div class="card card--usage" markdown>', '<div class="card-title">Example usage</div>', '', usage, '',
+             '</div>', '<div class="card card--response" markdown>',
+             f'<div class="card-title"><span>Example response{language}</span>{source}</div>', note, '', result, '', '</div>']
+    http = ENDPOINT.search(method.examples.get('HTTP', ''))
+    endpoint = ''
+    if http:
+        verb = 'POST' if http[1] == '-X POST' else 'GET'
+        endpoint = (f'<span class="endpoint"><span class="endpoint-verb endpoint-verb--{verb.lower()}">{verb}</span>'
+                    f'<code>/{http[2]}</code></span>')
+    meta = f'<div class="api-meta">{endpoint}<span class="api-languages">{" · ".join(examples)}</span></div>'
+    return '\n'.join([f'---\ntitle: {method.title}\nhide:\n  - toc\n---\n', f'# {api_title(method.title)} {{ .api-title }}', '',
+                      meta, '', '<div class="api" markdown>', '<div class="api-text" markdown>', '', *left, '</div>',
                       '<div class="api-cards" markdown>', '', *right, '', '</div>', '</div>', ''])
 
 
@@ -355,16 +476,23 @@ def group(slug):
 
 
 def nav_yaml():
+    """The navigation: a tab each for Home, the guides, the two APIs, the command line, the data format and the
+    other documents."""
     def item(title, page, depth):
         return '  ' * depth + f'- {json.dumps(title, ensure_ascii=False)}: {page}'
 
-    guides = {s[0].removeprefix('guides/').removesuffix('.md'): item(s[1], s[0], 1) for s in SECTIONS if s}
-    lines = [item('Home', 'index.md', 0), '- "Getting started":']
-    lines += [guides[name] for name in ('which-api', 'install', 'recording', 'live-feed', 'live-records', 'recordings', 'broker', 'passkey')]
-    lines += ['- "Your archive":', guides['archive'], guides['cloud']]
-    lines += ['- "Reference":', guides['cli'], guides['api-overview'], item(DOCUMENTS[0][2], DOCUMENTS[0][1], 1)]
+    guides = {s[0].removeprefix('guides/').removesuffix('.md'): s for s in SECTIONS if s}
+
+    def guide(name, depth):
+        return item(guides[name][1], guides[name][0], depth)
+
+    lines = [item('Home', 'index.md', 0), '- "Guides":', '  - "Getting started":']
+    lines += [guide(name, 2) for name in ('which-api', 'install', 'recording', 'live-feed', 'live-records', 'recordings', 'broker', 'passkey')]
+    lines += ['  - "Your archive":', guide('archive', 2), guide('cloud', 2)]
     for title, methods in reference.REFERENCE:
         lines.append(f'- {json.dumps(title)}:')
+        if title == 'Python API':   # the README's table of every call, local and cloud
+            lines.append(guide('api-overview', 1))
         current = None
         for method in methods:
             name = group(method.slug)[0]
@@ -375,7 +503,7 @@ def nav_yaml():
                 lines.append('  ' + f'- {json.dumps(name)}:')
                 current = name
             lines.append(item(method.nav, f'reference/{method.slug}.md', 2))
-    lines.append('- "About":')
+    lines += [guide('cli', 0), item(DOCUMENTS[0][2], DOCUMENTS[0][1], 0), '- "About":']   # ALONE
     lines += [item(title, page, 1) for _, page, title, _ in DOCUMENTS[1:]]
     return '\n'.join(lines)
 
@@ -400,12 +528,21 @@ def build():
         for method in methods:
             page = f'reference/{method.slug}.md'
             site.pages[page] = root_links(method_page(method, responses, query_url), page)
+    for page in ALONE:   # a tab of its own: its sidebar would list only itself
+        for path in (page, page.replace('.md', '.ja.md')):
+            meta, text = re.match(r'(?:---\n(.*?)\n---\n)?(.*)', site.pages[path], re.S).groups()
+            assert not meta or 'hide:' not in meta, f'{path} already hides something'
+            site.pages[path] = '---\n' + (meta + '\n' if meta else '') + 'hide:\n  - navigation\n---\n\n' + text.lstrip('\n')
     for page, text in site.pages.items():
         (DOCS / page).parent.mkdir(parents=True, exist_ok=True)
         (DOCS / page).write_text(text)
     (DOCS / 'assets').mkdir(exist_ok=True)
     shutil.copy(HERE / 'extra.css', DOCS / 'assets' / 'extra.css')
+    shutil.copy(HERE / 'logo.svg', DOCS / 'assets' / 'logo.svg')
+    shutil.copytree(HERE / 'overrides', OUT / 'overrides')
+    version = tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['version']
     config = (HERE / 'mkdocs.yml').read_text().replace('{nav}', nav_yaml()).replace('{nav_translations}', translations())
+    config = config.replace('{version}', json.dumps(version))
     (OUT / 'mkdocs.yml').write_text(config)
     return site
 

@@ -1,5 +1,5 @@
-# The documentation site's configuration. docs/site/build.py fills in the navigation and writes the site's
-# pages beside a copy of this file, in build/site.
+# The documentation site's configuration. docs/site/build.py fills in the navigation and the version, and writes
+# the site's pages beside a copy of this file, in build/site.
 site_name: briskapi
 site_url: https://honvl.github.io/BRiSKapi/
 site_description: An unofficial Python API and command line for BRiSK auction data, with your own private archive and a Databento-style cloud API.
@@ -12,18 +12,20 @@ copyright: An independent project, not affiliated with or endorsed by BRiSK, Tac
 
 theme:
   name: material
-  font:
-    text: Inter
-    code: Inconsolata
+  custom_dir: overrides   # Geist fonts, and the version beside the site's name
+  font: false
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
   palette:
     scheme: default
     primary: custom
     accent: custom
   icon:
     repo: fontawesome/brands/github
-    logo: material/chart-timeline-variant
   features:
+    - navigation.tabs
     - navigation.sections
+    - navigation.path
     - navigation.top
     - navigation.footer
     - search.suggest
@@ -34,6 +36,9 @@ theme:
 
 extra_css:
   - assets/extra.css
+
+extra:
+  version: {version}
 
 markdown_extensions:
   - admonition
@@ -54,6 +59,9 @@ markdown_extensions:
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 plugins:
   - search

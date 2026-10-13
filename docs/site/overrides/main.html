@@ -1,0 +1,9 @@
+{#- The theme's page, with Geist and Geist Mono (Google Fonts serves them through its css2 API, which the theme's
+    own font setting doesn't use). -#}
+{% extends "base.html" %}
+
+{% block fonts %}
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=fallback">
+  <style>:root{--md-text-font:"Geist";--md-code-font:"Geist Mono"}</style>
+{% endblock %}
