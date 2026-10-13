@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Provision/update a standalone S3 + Lambda + DynamoDB archive in Tokyo."""
 import argparse
+import hashlib
 import io
 import json
 from pathlib import Path
 import secrets
+import subprocess
+import sys
+import tempfile
 import time
 import zipfile
 
@@ -14,6 +18,8 @@ from botocore.exceptions import ClientError
 ROOT = Path(__file__).resolve().parents[1]
 REGION = 'ap-northeast-1'
 NAME = 'brisk-recorder-archive'
+# The service's Parquet dependencies, pinned: a layer of their manylinux wheels for python3.12 on arm64.
+LAYER_REQUIREMENTS = ('pyarrow==26.0.0', 'numpy==2.5.3')
 
 def ignore_exists(call, **kwargs):
     try:
@@ -23,17 +29,51 @@ def ignore_exists(call, **kwargs):
             raise
 
 def package():
-    """The Lambda zip: the service, the shared schema and reference fingerprints only."""
+    """The Lambda zip: the service, the shared schema and Parquet format, and reference fingerprints only."""
     code=io.BytesIO()
     with zipfile.ZipFile(code,'w',zipfile.ZIP_DEFLATED) as z:
         z.write(ROOT/'archive_service.py','archive_service.py')
         # An empty package init keeps the client API (and its dependencies) out.
         z.writestr('briskapi/__init__.py','')
         z.write(ROOT/'briskapi/schema.py','briskapi/schema.py')
+        z.write(ROOT/'briskapi/_parquet.py','briskapi/_parquet.py')
         # Reference fingerprints verify demo/synthetic content; SBI is structurally checked.
         for path in sorted((ROOT/'briskapi/references').glob('*.json')):
             z.write(path,f'briskapi/references/{path.name}')
     return code.getvalue()
+
+def layer():
+    """The dependency layer zip: LAYER_REQUIREMENTS' wheels unpacked under python/ (needs pip and PyPI)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run([sys.executable,'-m','pip','download','--only-binary=:all:','--no-deps','--implementation','cp',
+                        '--python-version','3.12','--platform','manylinux_2_28_aarch64','--platform','manylinux2014_aarch64',
+                        '--dest',tmp,*LAYER_REQUIREMENTS],check=True)
+        out=io.BytesIO()
+        with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+            for wheel in sorted(Path(tmp).glob('*.whl')):
+                with zipfile.ZipFile(wheel) as w:
+                    for info in w.infolist():
+                        # C++ headers, Cython sources and test suites are not needed at run time.
+                        if info.is_dir() or '/include/' in info.filename or '/tests/' in info.filename \
+                                or info.filename.endswith(('.pxd','.pyx','.pxi','.h','.cc')):
+                            continue
+                        entry=zipfile.ZipInfo(f'python/{info.filename}',date_time=(1980,1,1,0,0,0))
+                        entry.compress_type,entry.external_attr=zipfile.ZIP_DEFLATED,info.external_attr
+                        z.writestr(entry,w.read(info))
+        return out.getvalue()
+
+def publish_layer(lam, s3, bucket):
+    """This layer's version ARN, published from the (private) deploy/ prefix unless already published."""
+    data=layer()
+    tag=hashlib.sha256(data).hexdigest()[:16]
+    for version in lam.list_layer_versions(LayerName=NAME+'-deps').get('LayerVersions',[]):
+        if version.get('Description')==tag:
+            return version['LayerVersionArn']
+    # Over 50 MB, so the layer goes through S3; deploy/ is outside the public prefixes.
+    key=f'deploy/layer-{tag}.zip'
+    s3.put_object(Bucket=bucket,Key=key,Body=data)
+    return lam.publish_layer_version(LayerName=NAME+'-deps',Description=tag,Content={'S3Bucket':bucket,'S3Key':key},
+        CompatibleRuntimes=['python3.12'],CompatibleArchitectures=['arm64'])['LayerVersionArn']
 
 def deploy(bucket):
     session = boto3.Session(region_name=REGION)
@@ -83,8 +123,9 @@ def deploy(bucket):
         existing={}
     # Keyed IP hashing for rate limits; keep the key across redeploys.
     salt=existing.get('QUOTA_SALT') or secrets.token_hex(32)
-    # Full-replay validation and recompression need about one vCPU.
-    config=dict(Runtime='python3.12',Role=role_arn,Handler='archive_service.handler',Timeout=600,MemorySize=1769,
+    # Verifying a complete replay holds its decoded columns in memory: about 1.8 GB for the demo.
+    config=dict(Runtime='python3.12',Role=role_arn,Handler='archive_service.handler',Timeout=600,MemorySize=3008,
+                Layers=[publish_layer(lam,s3,bucket)],
                 Environment={'Variables':{'ARCHIVE_BUCKET':bucket,'QUOTA_TABLE':NAME,'QUOTA_SALT':salt}},
                 EphemeralStorage={'Size':512})
     try:
@@ -125,7 +166,7 @@ def deploy(bucket):
         url=lam.create_function_url_config(FunctionName=NAME,AuthType='NONE')['FunctionUrl']
     s3.put_bucket_notification_configuration(Bucket=bucket,NotificationConfiguration={'LambdaFunctionConfigurations':[
         {'Id':'AutomaticIngest','LambdaFunctionArn':function_arn,'Events':['s3:ObjectCreated:*'],
-         'Filter':{'Key':{'FilterRules':[{'Name':'prefix','Value':'incoming/'},{'Name':'suffix','Value':'/events.jsonl.gz'}]}}}]})
+         'Filter':{'Key':{'FilterRules':[{'Name':'prefix','Value':'incoming/'},{'Name':'suffix','Value':'/recording.zip'}]}}}]})
     result={'bucket':bucket,'region':REGION,'api_url':url}
     (ROOT/'briskapi/archive.json').write_text(json.dumps(result,indent=2)+'\n')
     return result

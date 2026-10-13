@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import queue
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,7 +12,7 @@ import threading
 from typing import Callable, Iterator
 import warnings
 
-from briskapi import cli, schema
+from briskapi import _parquet, cli, schema
 from briskapi._recording import BriskError, NotFoundError, Recording, Table, micros, quote_view
 from briskapi.timing import TimingStats
 
@@ -365,7 +364,8 @@ def connect(web=False, cache=None, codes=None, speed=1, limit_frames=None, contr
 
 def record(output, web=False, cache=None, codes=None, speed=1, limit_frames=None, contribute=None,
            binary=None) -> Recording:
-    """Record a demo replay into `output` and contribute it according to saved consent.
+    """Record a demo replay into the directory `output` (Parquet tables, see briskapi._parquet) and
+    contribute it according to saved consent.
 
     contribute=None follows `briskapi.consent()` (and BRISK_CONTRIBUTE=0 opts out),
     False keeps the recording local, True requires saved consent. Partial replays
@@ -377,10 +377,9 @@ def record(output, web=False, cache=None, codes=None, speed=1, limit_frames=None
         events = Path(tmp) / 'events.jsonl'
         cli.record_events(events, web, cache, codes and _codes(codes), limit_frames, speed, binary)
         if choice is None:
-            output.mkdir(parents=True, exist_ok=True)
-            if (output / 'events.jsonl').exists():
-                raise BriskError(f'{output / "events.jsonl"} already exists')
-            shutil.move(str(events), str(output / 'events.jsonl'))
+            if (output / _parquet.DEPTHS).exists():
+                raise BriskError(f'A recording already exists in {output}')
+            cli.save_recording(events, output)
             return Recording(output)
         cli.package(events, output, choice['contributor'], choice['license'])
     recording = Recording(output)

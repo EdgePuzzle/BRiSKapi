@@ -17,7 +17,7 @@ import pytest
 import briskapi
 import briskapi.cli as cli
 import briskapi.schema as schema
-from briskapi import sbi
+from briskapi import _parquet, sbi
 from briskapi._recording import JST, NotFoundError
 
 CHECK_SESSION = sbi._check_session  # stubbed for every test below; the session tests put it back
@@ -338,7 +338,7 @@ def test_sbi_market_sharing_is_explicit_and_honors_opt_out(fake_host, monkeypatc
     sent = []
     def publish(directory, url, **options):
         m = json.loads((directory / 'manifest.json').read_text())
-        schema.inspect_package(directory / 'events.jsonl.gz', m)
+        _parquet.inspect_package(directory, m)
         sent.append(m)
         return {'status': 'published'}
     monkeypatch.setattr(cli, 'contribute', publish)
@@ -434,7 +434,7 @@ def eshiten_host(tmp_path, monkeypatch):
     sent = {'timing': [], 'market': []}
     def publish(directory, url, **options):
         m = json.loads((directory / 'manifest.json').read_text())
-        schema.inspect_package(directory / 'events.jsonl.gz', m)
+        _parquet.inspect_package(directory, m)
         sent['market'].append(m)
         return {'status': 'published'}
     monkeypatch.setattr(cli, 'contribute', publish)

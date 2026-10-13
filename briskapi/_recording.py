@@ -9,7 +9,8 @@ from pathlib import Path
 import re
 from typing import Iterator
 
-from briskapi.schema import canonical_lines, validate_stream
+from briskapi import _parquet
+from briskapi.schema import canonical_lines, encode, validate_stream
 
 JST = dt.timezone(dt.timedelta(hours=9), 'JST')
 PRICES = ('last_price10', 'open_price10', 'bid_price10', 'ask_price10', 'indicative_price10',
@@ -101,10 +102,11 @@ def master_view(entry: dict) -> dict:
 
 
 class Recording:
-    """A decoded BRiSK stream: events.jsonl, events.jsonl.gz or a directory holding one.
+    """A decoded BRiSK stream: a recording directory of Parquet tables (see briskapi._parquet), or an
+    older events.jsonl, events.jsonl.gz or directory holding one.
 
-    Reading is streaming; whole-market queries parse the file once (about ten
-    seconds for the complete 420 MB demo replay) and the final state is cached.
+    Parquet recordings answer quotes, snapshots and per-security history from their columns, read
+    once and kept in memory (one security's history is read alone). JSONL is read as a stream.
     """
 
     contribution = None  # Publication status when record() contributed this recording.
@@ -112,39 +114,62 @@ class Recording:
     def __init__(self, path):
         path = Path(path).expanduser()
         self.directory = path if path.is_dir() else path.parent
-        if path.is_dir():
+        self.format = 'jsonl'
+        if path.is_dir() and (path / _parquet.DEPTHS).exists():
+            self.format = 'parquet'
+        elif path.is_dir():
             path = next((path / n for n in ('events.jsonl', 'events.jsonl.gz') if (path / n).exists()), None)
             if path is None:
-                raise NotFoundError(f'No events.jsonl(.gz) in {self.directory}')
+                raise NotFoundError(f'No recording in {self.directory}: expected data/*.parquet or events.jsonl[.gz]')
         if not path.exists():
             raise NotFoundError(f'No recording at {path}')
         self.path = path
         manifest = self.directory / 'manifest.json'
         self.manifest = json.loads(manifest.read_text()) if manifest.exists() else None
         self._bootstrap = None
+        self._columns = None
         self._final = None
         self._last_source_time_us = None
 
     def __repr__(self):
         return f'Recording({str(self.path)!r})'
 
+    def _load(self) -> _parquet.Columns:
+        if self._columns is None:
+            self._columns = _parquet.Columns.load(self.directory)
+        return self._columns
+
     def open(self):
+        """The JSONL file (JSONL recordings only)."""
+        if self.format == 'parquet':
+            raise BriskError(f'{self.directory} is a Parquet recording; use batches()')
         return gzip.open(self.path, 'rb') if self.path.suffix == '.gz' else self.path.open('rb')
 
     def lines(self) -> Iterator[bytes]:
+        """Batches as JSON lines (canonical ones for a Parquet recording)."""
+        if self.format == 'parquet':
+            yield from map(encode, self.batches())
+            return
         with self.open() as f:
             yield from f
 
     def batches(self) -> Iterator[dict]:
         """Every decoded batch in order, exactly as recorded."""
+        if self.format == 'parquet':
+            yield from self._load().iter_batches()
+            return
         for line in self.lines():
             yield json.loads(line)
 
     @property
     def bootstrap(self) -> dict:
+        """The first batch: source, clocks and master (its quotes too, for JSONL recordings)."""
         if self._bootstrap is None:
-            with self.open() as f:
-                self._bootstrap = json.loads(f.readline())
+            if self.format == 'parquet':
+                self._bootstrap, self._last_source_time_us = _parquet.header(self.directory)
+            else:
+                with self.open() as f:
+                    self._bootstrap = json.loads(f.readline())
         return self._bootstrap
 
     @property
@@ -160,6 +185,8 @@ class Recording:
         """First and last batch clocks, including empty batches and a clean end."""
         if self.manifest:
             last = self.manifest['summary']['last_source_time_us']
+        elif self.format == 'parquet':
+            last = _parquet.header(self.directory)[1]
         else:
             if self._last_source_time_us is None:
                 for batch in self.batches():
@@ -178,7 +205,9 @@ class Recording:
         raise NotFoundError(f'{code} is not in this recording')
 
     def validate(self) -> dict:
-        """Run the archive's full checks (canonical form, timing bounds, reference replay)."""
+        """Run the archive's full checks (exact tables, timing bounds, reference replay)."""
+        if self.format == 'parquet':
+            return _parquet.summarize(self.directory)
         with self.open() as f:
             return validate_stream(_Lines(canonical_lines(f)))
 
@@ -187,6 +216,11 @@ class Recording:
         limit = micros(self.trading_date, at)
         if limit is None and self._final is not None:
             return dict(self._final)
+        if self.format == 'parquet':
+            quotes = self._load().state(limit)
+            if limit is None:
+                self._final = dict(quotes)
+            return quotes
         quotes = {}
         for batch in self.batches():
             # A batch clock bounds its quotes from above, so a later batch can
@@ -201,8 +235,12 @@ class Recording:
     def updates(self, code: str, start=None, end=None) -> Iterator[dict]:
         """Raw quote updates for one security, skipping unrelated batches without parsing them."""
         issue = self.issue(code)['issue_id']
-        needle = json.dumps(str(code)).encode()  # Matches any JSON spacing; a false hit only costs a parse.
         low, high = micros(self.trading_date, start), micros(self.trading_date, end)
+        if self.format == 'parquet':
+            columns = self._columns or _parquet.Columns.load(self.directory, issue_id=issue)
+            yield from columns.updates(issue, low, high)
+            return
+        needle = json.dumps(str(code)).encode()  # Matches any JSON spacing; a false hit only costs a parse.
         for line in self.lines():
             if needle not in line:
                 continue

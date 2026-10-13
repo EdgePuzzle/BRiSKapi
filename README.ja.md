@@ -70,12 +70,19 @@ if recordings:
     briskapi.pull(recordings[0]["prefix"])      # 検証・展開・キャッシュし、既定のデータにする
 else:
     briskapi.record("recordings/my-session", web=True)   # アーカイブが空ならデモを自分で記録
-# または briskapi.load("recordings/my-session") でローカルの events.jsonl[.gz] やフォルダーを読む。
+# または briskapi.load("recordings/my-session") でローカルの記録フォルダー（以前の events.jsonl[.gz] も可）を読む。
 
 briskapi.Ticker("7203").quote(at="08:59:59.9999")             # 寄り前の気配（日本時間）
 briskapi.Ticker("7203").history(start="09:00", end="09:01")   # 期間内のすべての更新
 briskapi.Market().snapshot(at="09:00:00").to_pandas()
 ```
+
+記録は NautilusTrader v2 のカタログと同じ構成の Parquet テーブルのフォルダーです。
+`data/order_book_depths.parquet`（すべての気配更新。v2 の `OrderBookDepth` に BRiSK の
+ほかの気配項目を加えたもの）、`data/equity.parquet`（銘柄マスター、v2 の `Equity`）、
+`data/custom/BriskBatch.parquet`（フレームごとの計測値）からなります。デモ全体で約
+34 MB です。pandas、Polars、DuckDB でそのまま読めます。`brisk export` で
+NautilusTrader のカタログや JSONL に書き出せます。全列の説明は ARCHITECTURE.md にあります。
 
 時刻の照会には、バッチではなく各気配のタイムスタンプを使います。デモの
 7203 の最初の気配は日本時間 08:59:59.993551 で、それより前は `NotFoundError`
@@ -267,8 +274,9 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 ステータスはベンダーの値のままです。`raw=True` を指定すると、ベンダー形式
 （`*_price10` は0.1円単位、`*_us` は日本時間0時からのマイクロ秒）で返します。
 表形式の結果は dict のリストで、`.to_pandas()` で DataFrame に変換できます。
-エラーは `briskapi.BriskError` と `briskapi.NotFoundError` です。市場全体の照会
-では記録を1回読み込みます（デモ全体の 420 MB で約6秒）。
+エラーは `briskapi.BriskError` と `briskapi.NotFoundError` です。最初の市場全体の
+照会で記録のテーブルをメモリーに読み込みます（デモ全体で約2秒）。1銘柄の履歴は
+その銘柄の分だけを読みます。
 
 ## コマンドライン
 
@@ -280,6 +288,7 @@ brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next
 brisk record --web --output recordings/s1   # デモを記録（同意済みなら共有）
 brisk list --date 20210927 --source historical_mock
 brisk pull PREFIX --output recordings/downloaded   # brisk list が返した prefix を使う
+brisk export recordings/s1 --nautilus catalog      # NautilusTrader v2 のカタログ（または --jsonl FILE）
 brisk consent [--accept | --revoke]         # 共有設定の表示・変更
 brisk upload recordings/s1                  # 記録の共有を再試行
 ```

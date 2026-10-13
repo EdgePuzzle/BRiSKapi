@@ -66,12 +66,19 @@ if recordings:
     briskapi.pull(recordings[0]["prefix"])      # verify, decode and cache; becomes the default
 else:
     briskapi.record("recordings/my-session", web=True)   # record the demo if the archive is empty
-# Or briskapi.load("recordings/my-session") for a local events.jsonl[.gz] or folder.
+# Or briskapi.load("recordings/my-session") for a local recording folder (or an older events.jsonl[.gz]).
 
 briskapi.Ticker("7203").quote(at="08:59:59.9999")             # available pre-open quote, in JST
 briskapi.Ticker("7203").history(start="09:00", end="09:01")   # every update in a window
 briskapi.Market().snapshot(at="09:00:00").to_pandas()
 ```
+
+A recording is a folder of Parquet tables laid out like a NautilusTrader v2 catalog:
+`data/order_book_depths.parquet` (every quote update: v2's `OrderBookDepth`, then BRiSK's
+other quote fields), `data/equity.parquet` (the securities master, as v2 `Equity`) and
+`data/custom/BriskBatch.parquet` (per-frame timing). The complete demo replay takes about
+34 MB. pandas, Polars and DuckDB read the tables directly; `brisk export` writes a
+NautilusTrader catalog or JSONL. ARCHITECTURE.md lists every column.
 
 Time queries use each quote's timestamp. Toyota's first demo quote is at
 08:59:59.993551 JST; an earlier query raises `NotFoundError`. `Market().summary()`
@@ -260,8 +267,9 @@ Times are JST `datetime`s on the trading date. Quantities are shares; side, flag
 and status codes are raw vendor values. `raw=True` returns vendor fields
 (`*_price10` in tenths of a yen, `*_us` in microseconds since JST midnight).
 Tabular results are lists of dicts with `.to_pandas()`. Errors are
-`briskapi.BriskError` and `briskapi.NotFoundError`. A whole-market query reads a
-recording once (about six seconds for the complete 420 MB demo).
+`briskapi.BriskError` and `briskapi.NotFoundError`. The first whole-market query
+reads a recording's tables into memory (about two seconds for the complete demo);
+one security's history is read on its own.
 
 ## Command line
 
@@ -273,6 +281,7 @@ brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; coo
 brisk record --web --output recordings/s1   # record a replay (shared if you agreed)
 brisk list --date 20210927 --source historical_mock
 brisk pull PREFIX --output recordings/downloaded   # use a prefix returned by brisk list
+brisk export recordings/s1 --nautilus catalog      # a NautilusTrader v2 catalog (or --jsonl FILE)
 brisk consent [--accept | --revoke]         # show or change sharing
 brisk upload recordings/s1                  # retry sharing a recording
 ```

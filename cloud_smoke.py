@@ -1,10 +1,11 @@
 """Opt-in real automatic-publication/anonymous-download smoke test (synthetic data)."""
-import gzip
 import hashlib
 import json
 from pathlib import Path
 import tempfile
 
+from briskapi import _parquet
+from briskapi._recording import Recording
 from briskapi.schema import encode, synthetic_recording
 from briskapi.cli import package, contribute, client, manifests, pull, settings
 
@@ -20,13 +21,12 @@ def main():
         s3=client(config)
         assert [p for p,_ in manifests(s3,config['bucket'],'20210927') if p==result['prefix']]
         pull(s3,config['bucket'],result['prefix'],root/'download')
-        assert (root/'download/events.jsonl').read_bytes()==events.read_bytes()
+        assert b''.join(Recording(root/'download').lines())==b''.join(map(encode,synthetic_recording()))
         # Content that is not the reference replay must be rejected by the service,
         # even with a self-consistent manifest from a modified client.
         tampered=synthetic_recording(); tampered[1]['quotes'][0]['indicative_price10']+=10
-        (root/'tampered').mkdir()
-        data=gzip.compress(b''.join(map(encode,tampered)))
-        (root/'tampered/events.jsonl.gz').write_bytes(data)
+        _parquet.write(tampered,root/'tampered')
+        data=_parquet.pack(root/'tampered')
         (root/'tampered/manifest.json').write_text(json.dumps({**m,'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data)}))
         try:
             contribute(root/'tampered',config['api_url'],verify=False)

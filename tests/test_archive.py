@@ -1,18 +1,22 @@
 import copy
-import gzip
 import hashlib
 import hmac
 import io
 import json
 from pathlib import Path
 import uuid
+import zipfile
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from botocore.exceptions import ClientError
 
 import briskapi.schema as schema
 import archive_service as service
 import briskapi.cli as cli
+from briskapi import _parquet
+from briskapi._recording import Recording
 
 
 def batches(source='synthetic_test'):
@@ -102,9 +106,12 @@ def event(method='POST', body=None, query=''):
             'body': json.dumps(body), 'rawQueryString': query}
 
 def upload(s3, manifest, directory, ticket, version='v1', data=None):
-    key = f'incoming/{ticket}/events.jsonl.gz'
-    s3.versions[(key, version)] = data if data is not None else (directory / 'events.jsonl.gz').read_bytes()
+    key = f'incoming/{ticket}/recording.zip'
+    s3.versions[(key, version)] = data if data is not None else _parquet.pack(directory)
     return {'s3': {'bucket': {'name': service.BUCKET}, 'object': {'key': key, 'versionId': version}}}
+
+def jsonl(directory):
+    return b''.join(Recording(directory).lines())
 
 def ticket_for(s3, db, m):
     return json.loads(service.api(event(body=m), s3, db)['body'])['ticket']
@@ -117,15 +124,17 @@ def test_automatic_publish_public_pull(packaged, tmp_path):
     service.ingest(rec, s3, db)
     status = json.loads(service.api(event('GET', query='ticket=' + ticket), s3, db)['body'])
     assert status['status'] == 'published'
-    # The validated staging upload is gone; only the service's own bytes are public.
-    assert not s3.versions and s3.deleted == [(f'incoming/{ticket}/events.jsonl.gz', 'v1')]
-    published = s3.objects[status['prefix'] + '/events.jsonl.gz']
-    assert hashlib.sha256(published).hexdigest() == status['sha256']
+    # The validated staging upload is gone; the verified tables are public in the service's zip.
+    assert not s3.versions and s3.deleted == [(f'incoming/{ticket}/recording.zip', 'v1')]
+    published = s3.objects[status['prefix'] + '/recording.zip']
+    assert hashlib.sha256(published).hexdigest() == status['sha256'] == m['sha256']
     entries = list(cli.manifests(s3, 'bucket'))
     assert len(entries) == 1 and entries[0][1]['summary'] == m['summary']
     result = cli.pull(s3, 'bucket', status['prefix'], tmp_path / 'download')
-    assert result['sha256'] == status['sha256']
-    assert (tmp_path / 'download/events.jsonl').read_bytes() == canon(batches())
+    assert result['sha256'] == status['sha256'] and _parquet.pack(tmp_path / 'download') == published
+    assert sorted(p.name for p in (tmp_path / 'download').rglob('*') if p.is_file()) == \
+        ['BriskBatch.parquet', 'equity.parquet', 'manifest.json', 'order_book_depths.parquet']
+    assert jsonl(tmp_path / 'download') == canon(batches())
     # At-least-once delivery, and extra POSTs with the same upload form, cannot
     # change a publication or leave data in staging.
     service.ingest(rec, s3, db)
@@ -135,22 +144,82 @@ def test_automatic_publish_public_pull(packaged, tmp_path):
     with pytest.raises(ValueError, match='already exists'):
         cli.pull(s3, 'bucket', status['prefix'], tmp_path / 'download')
 
-def test_gzip_container_never_published(packaged):
+def test_zip_container_never_published(packaged):
     directory, m = packaged; s3 = S3(); db = DB()
-    content = gzip.decompress((directory / 'events.jsonl.gz').read_bytes())
     payload = b'ARBITRARY-PAYLOAD'
     stuffed = io.BytesIO()
-    with gzip.GzipFile(filename=payload.decode(), mode='wb', fileobj=stuffed, mtime=123) as gz:
-        gz.write(content[:10])
-    stuffed.write(gzip.compress(content[10:]) + b'\0' * 64)
+    with zipfile.ZipFile(stuffed, 'w') as z:
+        z.comment = payload
+        for name in _parquet.FILES:
+            z.writestr(zipfile.ZipInfo(name, date_time=(2020, 2, 2, 2, 2, 2)), (directory / name).read_bytes())
     data = stuffed.getvalue()
     m = {**m, 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}
     ticket = ticket_for(s3, db, m)
     service.ingest(upload(s3, m, directory, ticket, data=data), s3, db)
     status = service.json_get(s3, f'incoming/{ticket}/status.json')
     assert status['status'] == 'published' and status['sha256'] != m['sha256']
-    published = s3.objects[status['prefix'] + '/events.jsonl.gz']
-    assert payload not in published and gzip.decompress(published) == content
+    published = s3.objects[status['prefix'] + '/recording.zip']
+    assert payload not in published and published == _parquet.pack(directory)
+
+
+def rewrite(directory, name, change, **options):
+    """Rewrite one table of a package after `change` (a function of the table)."""
+    path = directory / name
+    table = change(pq.read_table(path))
+    pq.write_table(table, path, **{**_parquet.WRITE, 'row_group_size': _parquet.ROW_GROUP, **options})
+
+
+def replace(table, name, values):
+    return table.set_column(table.schema.get_field_index(name), table.schema.field(name), values)
+
+
+@pytest.mark.parametrize('name,change,error', [
+    # Values the decoder does not read are checked against the content they derive from.
+    (_parquet.DEPTHS, lambda t: replace(t, 'ts_init', pa.array([10**18] * len(t), _parquet.TIME)), 'Non-canonical'),
+    (_parquet.DEPTHS, lambda t: replace(t, 'flags', pa.array([255] * len(t), pa.uint8())), 'Non-canonical'),
+    (_parquet.EQUITY, lambda t: replace(t, 'currency', pa.array(['payload'] * len(t))), 'Non-canonical'),
+    (_parquet.EQUITY, lambda t: replace(t, 'info', pa.array(['{"payload":1}'] * len(t))), 'Non-canonical'),
+    (_parquet.BATCHES, lambda t: replace(t, 'type', pa.array(['payload'] * len(t))), 'Non-canonical'),
+    # The zero price sentinel has one encoding: null.
+    (_parquet.DEPTHS, lambda t: replace(t, 'open_price', pa.array([0] * len(t)).cast(_parquet.DECIMAL)), 'Non-canonical'),
+    # Rows in one order only, and no metadata beyond the schema's.
+    (_parquet.DEPTHS, lambda t: t.take([1, 0]), 'sorted'),
+    (_parquet.BATCHES, lambda t: t.replace_schema_metadata({**t.schema.metadata, b'payload': b'1'}), 'schema'),
+    (_parquet.DEPTHS, lambda t: replace(t, 'seq', pa.array([1] * len(t), pa.uint64())), 'sorted'),
+])
+def test_uploaded_tables_must_be_canonical(packaged, name, change, error):
+    directory, m = packaged
+    two = copy.deepcopy(batches())
+    two[0]['quotes'].append(dict(two[0]['quotes'][0], issue_id=1, code='0001'))
+    two[0]['master'].append(dict(two[0]['master'][0], issue_id=1, code='0001'))
+    two[0]['market_issue_count'] = 2
+    _parquet.write(two, directory / 'two')
+    rewrite(directory / 'two', name, change)
+    columns = _parquet.Columns.load(directory / 'two')
+    with pytest.raises(ValueError, match=error):
+        _parquet.check(directory / 'two')
+        _parquet.verify_tables(directory / 'two', columns)
+
+
+@pytest.mark.parametrize('options,error', [({}, None), ({'compression': 'snappy', 'compression_level': None}, 'compression'),
+                                           ({'row_group_size': 1}, 'row groups')])
+def test_writer_choices(packaged, options, error):
+    directory, m = packaged
+    rewrite(directory, _parquet.DEPTHS, lambda t: t, **options)
+    if error:
+        with pytest.raises(ValueError, match=error):
+            _parquet.check(directory)
+    else:
+        _parquet.check(directory)
+
+
+def test_file_bytes_outside_the_tables_are_refused(packaged):
+    directory, m = packaged
+    path = directory / _parquet.EQUITY
+    data = path.read_bytes()
+    path.write_bytes(data[:4] + b'payload!' + data[4:])
+    with pytest.raises((ValueError, OSError)):
+        _parquet.check(directory)
 
 @pytest.mark.parametrize('mutation', [
     lambda b: b[1].update(seq=3),
@@ -302,38 +371,49 @@ def test_manifest_summary_strict(packaged, change):
     with pytest.raises(ValueError):
         schema.validate_manifest(m)
 
-def test_hash_summary_and_corrupt_gzip(packaged, tmp_path):
-    directory, m = packaged; p = directory / 'events.jsonl.gz'
+def test_hash_summary_and_corrupt_package(packaged, tmp_path):
+    directory, m = packaged
     bad = copy.deepcopy(m); bad['summary']['batches'] = 9
     with pytest.raises(ValueError, match='Summary'):
-        schema.inspect_package(p, bad)
+        _parquet.inspect_package(directory, bad)
     with pytest.raises(ValueError, match='Summary'):
-        schema.repack(p, bad, tmp_path / 'out.gz')
+        _parquet.repack(_parquet.pack(directory), {**bad, 'sha256': m['sha256']})
     with pytest.raises(ValueError, match='mismatch'):
-        schema.repack(p, {**m, 'bytes': 1}, tmp_path / 'out.gz')
-    p.write_bytes(b'not gzip'); m['bytes'] = p.stat().st_size; m['sha256'] = schema.digest(p)
-    with pytest.raises(OSError):
-        schema.inspect_package(p, m)
+        _parquet.repack(_parquet.pack(directory), {**m, 'bytes': 1})
+    (directory / _parquet.EQUITY).write_bytes(b'not parquet')
+    blob = _parquet.pack(directory); m.update(bytes=len(blob), sha256=_parquet.digest(blob))
+    with pytest.raises(ValueError):
+        _parquet.inspect_package(directory, m)
 
-def corrupt_deflate(data):
-    return data[:20] + bytes(b ^ 0xFF for b in data[20:40]) + data[40:]
+def zipped(members):
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
+        for name, data in members:
+            z.writestr(name, data)
+    return out.getvalue()
 
-@pytest.mark.parametrize('corrupt', [b'bad', None, 'tampered', 'deflate', 'nested'])
-def test_rejection_stays_private(packaged, corrupt):
+@pytest.mark.parametrize('corrupt', [b'bad', None, 'tampered', 'flipped', 'garbage', 'extra', 'deflated'])
+def test_rejection_stays_private(packaged, corrupt, tmp_path):
     directory, m = packaged; s3 = S3(); db = DB()
     ticket = ticket_for(s3, db, m)
+    blob = _parquet.pack(directory)
     if corrupt is None:
         m = copy.deepcopy(m); m['summary']['batches'] = 123
         service.json_put(s3, f'incoming/{ticket}/manifest.json', m)
-    elif corrupt == 'tampered':
-        # Structurally valid but not the reference replay, with a matching manifest.
-        b = batches(); b[1]['quotes'][0]['indicative_price10'] = 1250
-        corrupt = gzip.compress(stream(b).read())
-        m = {**m, 'sha256': hashlib.sha256(corrupt).hexdigest(), 'bytes': len(corrupt)}
-        service.json_put(s3, f'incoming/{ticket}/manifest.json', m)
-    elif corrupt in {'deflate', 'nested'}:
-        corrupt = (corrupt_deflate((directory / 'events.jsonl.gz').read_bytes()) if corrupt == 'deflate'
-                   else gzip.compress(b'[' * 200000 + b'\n'))
+    elif isinstance(corrupt, str):
+        if corrupt == 'tampered':
+            # Structurally valid but not the reference replay, with a matching manifest.
+            b = batches(); b[1]['quotes'][0]['indicative_price10'] = 1250
+            _parquet.write(b, tmp_path / 'tampered')
+            corrupt = _parquet.pack(tmp_path / 'tampered')
+        elif corrupt == 'flipped':
+            corrupt = blob[:200] + bytes(b ^ 0xFF for b in blob[200:240]) + blob[240:]
+        elif corrupt == 'garbage':
+            corrupt = zipped((name, b'PAR1 garbage PAR1') for name in _parquet.FILES)
+        elif corrupt == 'extra':
+            corrupt = zipped([*((name, (directory / name).read_bytes()) for name in _parquet.FILES), ('payload', b'x')])
+        else:
+            corrupt = zipped((name, (directory / name).read_bytes()) for name in _parquet.FILES)
         m = {**m, 'sha256': hashlib.sha256(corrupt).hexdigest(), 'bytes': len(corrupt)}
         service.json_put(s3, f'incoming/{ticket}/manifest.json', m)
     service.ingest(upload(s3, m, directory, ticket, data=corrupt), s3, db)
@@ -389,7 +469,7 @@ def test_pull_tampered_atomic(packaged, tmp_path):
     directory, m = packaged; s3 = S3()
     prefix = f"archive/20210927/{m['sha256']}"
     service.json_put(s3, prefix + '/manifest.json', m)
-    s3.objects[prefix + '/events.jsonl.gz'] = b'bad'
+    s3.objects[prefix + '/recording.zip'] = b'bad'
     with pytest.raises(ValueError, match='mismatch'):
         cli.pull(s3, 'bucket', prefix, tmp_path / 'bad')
     assert not (tmp_path / 'bad').exists()
@@ -477,7 +557,7 @@ def test_broker_market_recording_publish_and_pull(tmp_path, source):
     status = service.json_get(s3, f'incoming/{ticket}/status.json')
     assert status['status'] == 'published'
     cli.pull(s3, 'bucket', status['prefix'], tmp_path / 'download')
-    data = (tmp_path / 'download/events.jsonl').read_bytes()
+    data = jsonl(tmp_path / 'download') + s3.objects[status['prefix'] + '/recording.zip']
     assert b'secret' not in data and b'/private/' not in data
     assert json.loads(data.splitlines()[0])['input_transport'] == schema.BROKER_TRANSPORT[source]
     assert list(cli.manifests(s3, 'bucket'))[0][1]['summary']['source'] == source
@@ -551,7 +631,7 @@ def test_contribute_auto_poll(packaged, monkeypatch, status):
         with pytest.raises(ValueError): cli.contribute(directory, 'https://api.test')
     else:
         assert cli.contribute(directory, 'https://api.test', verify=False)['status'] == 'published'
-    (directory / 'events.jsonl.gz').write_bytes(b'changed')
+    (directory / _parquet.BATCHES).write_bytes(b'changed')
     with pytest.raises(ValueError, match='mismatch'):
         cli.contribute(directory, 'https://api.test', verify=False)
 
@@ -564,7 +644,15 @@ def test_package_failure_leaves_nothing(tmp_path):
     events.write_bytes(raw(batches()[:-1]))
     with pytest.raises(ValueError, match='clean end'):
         cli.package(events, tmp_path / 'out', 'test', 'CC0-1.0')
-    assert not (tmp_path / 'out/events.jsonl.gz').exists()
+    assert not [p for p in (tmp_path / 'out').rglob('*') if p.is_file()]
+
+def test_package_over_the_archive_limit_leaves_nothing(tmp_path, monkeypatch):
+    events = tmp_path / 'source.jsonl'
+    events.write_bytes(raw(batches()))
+    monkeypatch.setattr(cli, 'MAX_COMPRESSED', 1000)
+    with pytest.raises(ValueError, match='accepts up to'):
+        cli.package(events, tmp_path / 'out', 'test', 'CC0-1.0')
+    assert not [p for p in (tmp_path / 'out').rglob('*') if p.is_file()]
 
 @pytest.fixture
 def harness(tmp_path, monkeypatch):
@@ -605,7 +693,7 @@ def test_cli(command, packaged, tmp_path, monkeypatch, capsys, harness):
 
 def test_record_without_consent_stays_local(tmp_path, harness, capsys):
     assert harness('record', '--cache', str(tmp_path), '--output', str(tmp_path / 'local')) == []
-    assert (tmp_path / 'local/events.jsonl').exists() and not (tmp_path / 'local/manifest.json').exists()
+    assert (tmp_path / 'local' / _parquet.DEPTHS).exists() and not (tmp_path / 'local/manifest.json').exists()
     assert 'not contributed' in capsys.readouterr().err
     with pytest.raises(ValueError, match='already exists'):
         harness('record', '--cache', str(tmp_path), '--output', str(tmp_path / 'local'))
@@ -646,7 +734,7 @@ def test_consent_controls(tmp_path, monkeypatch, harness, capsys):
     assert len(harness('package', '--events', str(tmp_path / 'source.jsonl'), '--output', str(tmp_path / 'c'))) == 1
     monkeypatch.delenv('BRISK_CONTRIBUTE')
     assert len(harness('record', '--web', '--limit-frames', '2', '--output', str(tmp_path / 'd'))) == 1
-    assert (tmp_path / 'd/events.jsonl').exists()
+    assert (tmp_path / 'd' / _parquet.DEPTHS).exists()
     with pytest.raises(ValueError, match='complete'):
         harness('record', '--web', '--limit-frames', '2', '--upload', '--output', str(tmp_path / 'e'))
     harness('consent', '--revoke')
@@ -684,7 +772,7 @@ def test_lambda_package_is_self_contained(tmp_path):
     spec = importlib.util.spec_from_file_location('deploy', root / 'infra/deploy.py')
     deploy = importlib.util.module_from_spec(spec); spec.loader.exec_module(deploy)
     with zipfile.ZipFile(io.BytesIO(deploy.package())) as z:
-        assert sorted(z.namelist()) == ['archive_service.py', 'briskapi/__init__.py',
+        assert sorted(z.namelist()) == ['archive_service.py', 'briskapi/__init__.py', 'briskapi/_parquet.py',
                                         'briskapi/references/historical_mock.json', 'briskapi/schema.py']
         z.extractall(tmp_path)
     check = ("import archive_service, briskapi, briskapi.schema as s, sys; "
@@ -693,3 +781,46 @@ def test_lambda_package_is_self_contained(tmp_path):
              "assert 'briskapi.cli' not in sys.modules")
     subprocess.run([sys.executable, '-c', check], cwd=tmp_path, check=True,
                    env={'PYTHONPATH': str(tmp_path), 'PATH': os.environ.get('PATH', '')})
+
+
+def test_lambda_layer_holds_the_pinned_wheels(monkeypatch):
+    import importlib.util
+    import zipfile
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location('deploy', root / 'infra/deploy.py')
+    deploy = importlib.util.module_from_spec(spec); spec.loader.exec_module(deploy)
+    calls = []
+
+    def download(cmd, check):
+        calls.append(cmd)
+        dest = Path(cmd[cmd.index('--dest') + 1])
+        with zipfile.ZipFile(dest / 'pyarrow-26.0.0-cp312-cp312-manylinux_2_28_aarch64.whl', 'w') as w:
+            w.writestr('pyarrow/__init__.py', '')
+            w.writestr('pyarrow/include/arrow/api.h', '')
+            w.writestr('pyarrow/tests/test_x.py', '')
+    monkeypatch.setattr(deploy.subprocess, 'run', download)
+    with zipfile.ZipFile(io.BytesIO(deploy.layer())) as z:
+        assert z.namelist() == ['python/pyarrow/__init__.py']
+    assert all(r in calls[0] for r in deploy.LAYER_REQUIREMENTS) and 'manylinux_2_28_aarch64' in calls[0]
+
+
+def test_export(packaged, tmp_path, capsys):
+    directory, m = packaged
+    cli.main(['export', str(directory), '--jsonl', str(tmp_path / 'events.jsonl')])
+    assert (tmp_path / 'events.jsonl').read_bytes() == canon(batches())
+    cli.main(['export', str(directory), '--nautilus', str(tmp_path / 'catalog')])
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])['files'] == 3
+    depths = list((tmp_path / 'catalog/data/order_book_depths/0000.XTKS').glob('*.parquet'))
+    table = pq.read_table(depths[0])
+    assert table.schema.names == list(_parquet.V2_DEPTH) and table.schema.metadata[b'instrument_id'] == b'0000.XTKS'
+    equity = pq.read_table(next((tmp_path / 'catalog/data/equity/0000.XTKS').glob('*.parquet')))
+    assert equity.schema.field('info').type == pa.json_(pa.string()) and equity.column('currency')[0].as_py() == 'JPY'
+    custom = pq.read_table(next((tmp_path / 'catalog/data/custom/BriskQuote/0000.XTKS').glob('*.parquet')))
+    assert custom.column('indicative_price10').to_pylist() == [1230, 1240] and custom.schema.metadata[b'type_name'] == b'BriskQuote'
+    with pytest.raises(ValueError, match='already exists'):
+        cli.export(directory, nautilus=tmp_path / 'catalog')
+    with pytest.raises(ValueError, match='already exists'):
+        cli.export(directory, jsonl=tmp_path / 'events.jsonl')
+    (tmp_path / 'old').mkdir(); (tmp_path / 'old/events.jsonl').write_bytes(canon(batches()))
+    with pytest.raises(ValueError, match='Parquet'):
+        cli.export(tmp_path / 'old', nautilus=tmp_path / 'other')

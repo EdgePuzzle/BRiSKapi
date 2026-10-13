@@ -9,7 +9,7 @@ import pytest
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[2]), str(Path(__file__).parent)]
 import briskapi.schema as schema  # noqa: E402
-from briskapi import Market, NotFoundError, Recording, Ticker  # noqa: E402
+from briskapi import Market, NotFoundError, Recording, Ticker, _parquet  # noqa: E402
 from build_reference import LineReader, replay  # noqa: E402
 
 CACHE = os.environ.get("BRISK_MOCK_CACHE")
@@ -35,6 +35,12 @@ def test_genuine_subset_accepted_and_tampering_rejected(tmp_path):
     with pytest.raises(NotFoundError):
         toyota.quote(at='08:59:59.99')
     assert Market(rec).summary()['end'].isoformat() == '2021-09-27T09:02:59.999896+09:00'
+    # The same subset as Parquet tables: identical batches, summary and queries.
+    _parquet.write((json.loads(line) for line in lines), tmp_path / 'parquet')
+    tables = Recording(tmp_path / 'parquet')
+    assert b''.join(tables.lines()) == b''.join(lines) and tables.validate() == summary
+    assert Ticker('7203', tables).history(raw=True) == toyota.history(raw=True)
+    assert Market(tables).snapshot(at='09:00:01', raw=True) == Market(rec).snapshot(at='09:00:01', raw=True)
     index = next(i for i, line in enumerate(lines) if i and b'"code":"7203"' in line)
     batch = json.loads(lines[index])
     batch["quotes"][0]["bid_price10"] += 10

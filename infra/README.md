@@ -27,12 +27,15 @@ enabled. Logs expire after 14 days.
 Ingest accepts canonical demo/synthetic recordings that match a reference replay
 and opted-in decoded broker recordings (SBI, e-shiten) with structural/continuity checks,
 and timing reports from either. It
-publishes its own gzip of the validated content (see the integrity section of
+publishes the verified Parquet tables in its own zip (see the integrity section of
 [ARCHITECTURE.md](../ARCHITECTURE.md)). The deployment package holds
-`archive_service.py`, `briskapi/schema.py` and `briskapi/references/*.json`,
-with an empty package init so the client API stays out of it. The function has
-1,769 MB (one vCPU) because validating and recompressing a complete 420 MB replay
-takes about a minute. Each validated staging upload, and any extra upload made
+`archive_service.py`, `briskapi/schema.py`, `briskapi/_parquet.py` and
+`briskapi/references/*.json`, with an empty package init so the client API stays
+out of it. pyarrow and numpy come from a layer the deployer builds from their pinned
+manylinux arm64 wheels (`LAYER_REQUIREMENTS`; pip downloads them from PyPI) and
+publishes through the bucket's private `deploy/` prefix, once per distinct layer.
+The function has 3,008 MB: verifying a complete demo replay holds its decoded
+columns in memory (about 1.7 GB at peak) and takes about 40 seconds. Each validated staging upload, and any extra upload made
 with an already-used ticket, is deleted on arrival. The deployer creates a random
 `QUOTA_SALT` once and keeps it across redeploys, so per-IP quota entries are keyed
 hashes that cannot be reversed to addresses.

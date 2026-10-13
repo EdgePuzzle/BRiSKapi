@@ -10,7 +10,7 @@ itself. For usage, see the [README](README.md).
 | Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `sbi.cjs` drives SBI BRiSK's (or e-shiten BRiSK Next's) decoder from an authenticated session. Both emit one JSON batch per frame. |
 | Python API | `briskapi/` | `Recording` (files), `Feed` (live, background thread), `Ticker`/`Market` views and `Archive`. |
 | SBI session | `briskapi/sbi.py` | Cookie login (SBI, or e-shiten with `site="e-shiten"`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `sbi.connect()` starts the live host. |
-| Archive client | `briskapi/cli.py`, `briskapi/schema.py` | The `brisk` CLI, sharing consent, canonical packaging, upload and verified download. |
+| Archive client | `briskapi/cli.py`, `briskapi/schema.py`, `briskapi/_parquet.py` | The `brisk` CLI, sharing consent, Parquet packaging, upload, verified download and export. |
 | Auction state | `rust/brisk_quote_ingest` | Optional Rust tools: `brisk_quote_ingest` validates batches, keeps per-security state and publishes latest-state files; `brisk_recording` reconstructs a saved recording. |
 | Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL issues upload tickets; S3-triggered ingest validates and publishes; DynamoDB holds quotas. |
 
@@ -18,9 +18,9 @@ itself. For usage, see the [README](README.md).
 demo assets (HTTPS, pinned) ─► decoder.cjs ─┐
 SBI/e-shiten session ────────► sbi.cjs ─────┴─► JSON batches ─┬─► briskapi.Feed: live state, callbacks, iterators
                                                              ├─► brisk live: JSON lines
-                                                             └─► briskapi.record ─► events.jsonl (demo only)
+                                                             └─► briskapi.record ─► Parquet recording (demo only)
 
-events.jsonl ─► canonical package ─► upload ticket ─► S3 staging ─► validation ─► archive/ ─► briskapi.pull
+JSON batches ─► Parquet tables ─► zip ─► upload ticket ─► S3 staging ─► verification ─► archive/ ─► briskapi.pull
 ```
 
 ## Data source
@@ -78,6 +78,34 @@ bounds on contained quote times, so stopping at the first later batch would miss
 valid snapshots and deltas. `Market.summary()` uses the first and last batch
 clocks, including empty batches and the end marker; recordings cache that range
 when no manifest is available, while feeds track it under the state lock.
+
+## Recording format
+
+A recording is a directory of three Parquet tables (`briskapi/_parquet.py`), laid out
+like a NautilusTrader v2 catalog's `data/`. Each table is v2's own schema with BRiSK's
+fields added after it. Rows carry v2's `identifier` column (`CODE.XTKS`), as v2
+returns multi-instrument queries, instead of one directory per instrument: a
+directory per security would make the complete demo 8,262 small files and about three
+times the size. Reading gives back the decoder's batches exactly, so validation and
+reference fingerprints are the same for every format.
+
+| File | Rows | Columns |
+| --- | --- | --- |
+| `data/order_book_depths.parquet` | One per quote update, sorted by issue, then batch | v2 `OrderBookDepth`: `bids`, `asks` (up to ten levels each, best first: `price`, `size`, `count`, `order_id` 0), `flags` (16, plus 32 on the bootstrap snapshot), `sequence` (the frame number), `ts_event` (source time), `ts_init` (the same). Then `identifier`, `issue_id`, `seq` (the batch), `max_frame`, the prices (`last_price`, `open_price`, `bid_price`, `ask_price`, `indicative_price`, `closing_indicative_price`, `indicative_open_price`, `reference_price`; null for the vendor's zero), the counts and enums (`indicative_volume`, `indicative_imbalance_side`, `closing_indicative_volume`, `closing_indicative_imbalance_side`, `quote_flag`, `quote_side`, `volume`, `issue_status`, market and closing market buy/sell quantities, `bid_quantity`, `bid_orders`, `ask_quantity`, `ask_orders`), `special_quote_time` and `turnover` |
+| `data/equity.parquet` | One per security, by issue | v2 `Equity` (`id`, `raw_symbol`, `currency` JPY, `price_precision` 1, `price_increment` 0.1, `lot_size`, `max_price`/`min_price` from the daily limits, `ts_event`/`ts_init` at JST midnight; `info`, JSON in v2, is a null string), then `issue_id`, `tick_type`, `issue_type`, `name`, `base_price` |
+| `data/custom/BriskBatch.parquet` | One per batch | `seq`, `kind` (bootstrap, quotes or end), `received_unix_ms`, `decode_ns`, `replay_lateness_ms`, `skipped_issues`, `frames`, `quote_updates`, `replay_wall_ms`; on the bootstrap row `source`, `trading_date`, `input_transport` (canonical JSON), `source_timestamp_origin`, `exchange_delay_ms`, `market_issue_count`; v2 custom data's `type`, `ts_event` and `ts_init` |
+
+Prices and level sizes are `decimal128(38, 16)` as in v2; times are UTC
+`timestamp[ns]`. `ts_init` repeats the source time rather than a local clock, since a
+demo replay's receipt clock is years after its market time; receipt times stay exact
+in `BriskBatch.received_unix_ms`. Tables are zstd-compressed in row groups of 65,536
+rows, so one security's history reads only its row groups. The complete demo replay
+(735,382 updates) is 34 MB, against 754 MB of JSONL and 117 MB gzipped.
+
+`brisk export DIR --nautilus CATALOG` writes v2's layout: `equity` and
+`order_book_depths` per instrument, readable by v2's `ParquetDataCatalog`, and the
+rest of each quote as custom data `BriskQuote` (int64 columns in vendor units, so a
+v2 `customdataclass` can declare them). `--jsonl FILE` writes canonical batches.
 
 ## Live feed
 
@@ -571,11 +599,13 @@ the feed then uses: Chrome is closed by then.
 ## Reconstructing a recording
 
 To validate and reconstruct a saved or downloaded recording with the Rust state
-(`brisk_recording` from a release archive, or built from source):
+(`brisk_recording` from a release archive, or built from source), export its batches
+first:
 
 ```sh
+brisk export recordings/downloaded --jsonl /tmp/events.jsonl
 rust/brisk_quote_ingest/target/release/brisk_recording \
-  --input recordings/downloaded/events.jsonl --latest /tmp/restored-state.json
+  --input /tmp/events.jsonl --latest /tmp/restored-state.json
 ```
 
 This rebuilds final state for offline analysis. It does not retimestamp data or
@@ -601,11 +631,12 @@ is contributor-declared:
   market data. Any subset of securities is accepted, but only complete replays.
   `tools/brisk_mock/build_reference.py` regenerates it after a re-audited asset pin.
   This comparison applies only to demo/synthetic sources, not to `sbi_live` or `eshiten_live`.
-- **Canonical bytes.** Each line must be the one canonical JSON encoding of its
-  value: sorted keys, issues in ID order, compact separators, no escapes. Extra
-  whitespace, duplicate keys, alternative number spellings and other encoding
-  variants are rejected. Packaging converts recorder output to this form and
-  rounds local timings to microseconds.
+- **Canonical tables.** Each table must have exactly its schema and metadata, a
+  pyarrow writer, zstd, full row groups and no bytes between its column chunks.
+  Every row group must equal the encoding of the validated content, including the
+  columns reading ignores (`ts_init`, `flags`, v2's constant Equity fields), null for
+  every zero price and rows sorted by issue, then batch. Packaging converts recorder
+  output to this form and rounds local timings to microseconds.
 - **Exact fields.** Batches, master entries and quotes must have exactly the
   fields defined in `briskapi/schema.py`. Account, session or unknown fields are
   rejected. Local timing values must be plausible: decode ≤ 10 s, receipt clock
@@ -617,15 +648,19 @@ is contributor-declared:
   connection/decoder diagnostics and publishes only
   `{"kind":"sbi_websocket","origin":"https://sbi.brisk.jp/"}` as transport metadata.
   The service rejects any additional transport fields.
-- **Service-made objects.** The service publishes its own deterministic gzip of
-  the validated lines, never the uploaded bytes. Gzip header fields, extra
-  members, padding and deflate choices therefore cannot carry data.
+- **Verified tables, the service's zip.** The service publishes the uploaded tables
+  once verified, inside its own deterministic zip, so zip comments, extra fields and
+  timestamps never reach the archive. The tables themselves are not rewritten: what
+  table verification can't see (Parquet statistics, unused dictionary entries,
+  encoder choices in pages) is the one place an upload could keep a few bytes of
+  its own.
   `synthetic_test` accepts only the fixed one-security probe in `briskapi/schema.py`.
 - **Nothing lingers in staging.** Each upload is deleted right after validation,
   whether accepted or rejected. A ticket admits only its first object version;
   later POSTs with the same upload form are deleted on arrival.
-- **Malformed input.** Corrupt deflate data and deeply nested JSON are rejected
-  like any other invalid upload.
+- **Malformed input.** Corrupt zips, unexpected zip members, compressed members and
+  unreadable Parquet are rejected like any other invalid upload. Row counts, list
+  lengths and declared decoded sizes are checked before data is read.
 
 A client chooses its alias (up to 64 characters), its license and bounded timing
 measurements. These cannot be verified. SBI master names and market values also
@@ -639,15 +674,16 @@ to every source.
 - Uploads are bound to their first S3 object version. Retries of that event are
   safe, and overwriting an upload cannot replace a published dataset.
 - Recordings are content addressed: `archive/YYYYMMDD/SHA256/`, where SHA-256 is
-  that of the published gzip. Publication writes the data first and the immutable
-  manifest last, as the catalog commit marker.
-- Limits: 64 MiB compressed, 1 GiB expanded and 16 MiB per JSONL line. Tickets
-  are limited to four per IP address per hour (stored as a keyed hash, never the
-  address), 64 per hour in total and 5 GiB of authorized uploads per UTC day. A
-  complete replay is about 34 MB compressed.
+  that of the published `recording.zip`. Publication writes the data first and the
+  immutable manifest last, as the catalog commit marker.
+- Limits: a 64 MiB package, 1 GiB in canonical JSON form and 16 MiB per batch in
+  that form. Tickets are limited to four per IP address per hour (stored as a keyed
+  hash, never the address), 64 per hour in total and 5 GiB of authorized uploads per
+  UTC day. A complete demo replay is a 34 MB package.
 - Ticket metadata in staging expires after two days. Published data is retained.
-- `pull` checks compressed size, SHA-256, the complete stream, the manifest and
-  the reference replay where available, then moves the folder into place atomically.
+- `pull` checks the package's size and SHA-256, the tables, the manifest and the
+  reference replay where available, then moves the folder (the tables and the
+  manifest; the zip isn't kept) into place atomically.
   Manifest validation and archive identity checks precede payload download.
   Listings warn and skip invalid/unsupported manifests, including old probes
   with incomplete reference metadata, without hiding S3/network failures.

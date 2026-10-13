@@ -40,7 +40,8 @@ Opting out:
 
 ## What a contribution contains
 
-Each published recording consists of `events.jsonl.gz` and `manifest.json`:
+Each published recording consists of `recording.zip` (three Parquet tables holding the
+decoded recording) and `manifest.json`:
 
 - **Market data you recorded**: the BRiSK demo's securities master and decoded
   auction quotes, or an explicitly opted-in broker session's (SBI or e-shiten) decoded

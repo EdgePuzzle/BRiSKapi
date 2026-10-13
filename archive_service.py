@@ -5,24 +5,26 @@ import hashlib
 import hmac
 import json
 import os
-from pathlib import Path
-import tempfile
 import time
 from urllib.parse import parse_qs
 import uuid
+import zipfile
 import zlib
 
 import boto3
 from botocore.exceptions import ClientError
-from briskapi.schema import encode, repack, validate_manifest, validate_timing, require, MAX_COMPRESSED, MAX_TIMING_BYTES
+import pyarrow as pa
+from briskapi._parquet import repack
+from briskapi.schema import encode, validate_manifest, validate_timing, require, MAX_COMPRESSED, MAX_TIMING_BYTES
 
 BUCKET = os.environ.get('ARCHIVE_BUCKET', '')
 TABLE = os.environ.get('QUOTA_TABLE', '')
 # Per-deployment key: stored quota IDs cannot be reversed to IP addresses.
 QUOTA_KEY = os.environ.get('QUOTA_SALT', '').encode()
 FINAL = {'published', 'rejected'}
-# Malformed input of any kind: corrupt deflate data and deeply nested JSON included.
-INVALID = (ValueError, KeyError, TypeError, EOFError, OSError, zlib.error, RecursionError)
+# Malformed input of any kind: corrupt zips and Parquet files and deeply nested JSON included.
+INVALID = (ValueError, KeyError, TypeError, IndexError, NotImplementedError, EOFError, OSError, zlib.error,
+           RecursionError, zipfile.BadZipFile, pa.ArrowException)
 
 def clients():
     from botocore.config import Config
@@ -102,9 +104,9 @@ def api(event, s3, db):
     ticket = str(uuid.uuid4())
     json_put(s3, f'incoming/{ticket}/manifest.json', m)
     json_put(s3, f'incoming/{ticket}/status.json', {'status': 'awaiting_upload', 'ticket': ticket})
-    fields = {'Content-Type': 'application/gzip', 'x-amz-server-side-encryption': 'AES256'}
-    post = s3.generate_presigned_post(Bucket=BUCKET, Key=f'incoming/{ticket}/events.jsonl.gz',
-        Fields=fields, Conditions=[{'Content-Type': 'application/gzip'},
+    fields = {'Content-Type': 'application/zip', 'x-amz-server-side-encryption': 'AES256'}
+    post = s3.generate_presigned_post(Bucket=BUCKET, Key=f'incoming/{ticket}/recording.zip',
+        Fields=fields, Conditions=[{'Content-Type': 'application/zip'},
         {'x-amz-server-side-encryption': 'AES256'}, ['content-length-range', m['bytes'], m['bytes']]], ExpiresIn=900)
     return response(201, {'ticket': ticket, 'upload': post, 'expires_seconds': 900})
 
@@ -129,7 +131,7 @@ def ingest(record, s3, db):
     obj = record['s3']['object']
     key = unquote_plus(obj['key'])
     parts = key.split('/')
-    require(len(parts) == 3 and parts[0] == 'incoming' and parts[2] == 'events.jsonl.gz', 'Unexpected key')
+    require(len(parts) == 3 and parts[0] == 'incoming' and parts[2] == 'recording.zip', 'Unexpected key')
     ticket = str(uuid.UUID(parts[1]))
     require(ticket == parts[1], 'Invalid ticket')
     version = obj.get('versionId')
@@ -153,30 +155,23 @@ def ingest(record, s3, db):
     try:
         m = json_get(s3, f'incoming/{ticket}/manifest.json')
         validate_manifest(m)
-        with tempfile.TemporaryDirectory() as tmp:
-            path, output = Path(tmp) / 'upload.gz', Path(tmp) / 'events.jsonl.gz'
-            data = s3.get_object(Bucket=BUCKET, Key=key, VersionId=version)
-            require(data['ContentLength'] == m['bytes'] <= MAX_COMPRESSED, 'Invalid upload size')
-            with data['Body'] as body, path.open('wb') as target:
-                total = 0
-                while chunk := body.read(1024 * 1024):
-                    total += len(chunk)
-                    require(total <= MAX_COMPRESSED, 'Upload too large')
-                    target.write(chunk)
-            # Publish the service's own compression of validated canonical lines,
-            # never the uploaded bytes.
-            published = repack(path, m, output)
-            prefix = f"archive/{published['summary']['trading_date']}/{published['sha256']}"
-            with output.open('rb') as body:
-                try:
-                    s3.put_object(Bucket=BUCKET, Key=f'{prefix}/events.jsonl.gz', Body=body,
-                                  ContentType='application/gzip', IfNoneMatch='*')
-                except ClientError as e:
-                    if e.response['Error']['Code'] not in {'PreconditionFailed', 'ConditionalRequestConflict'}:
-                        raise
-            # Manifest is the commit marker. Readers list only committed datasets.
-            json_put(s3, f'{prefix}/manifest.json', published, immutable=True)
-            json_put(s3, f'incoming/{ticket}/status.json', {'status': 'published', 'prefix': prefix, 'sha256': published['sha256']})
+        upload = s3.get_object(Bucket=BUCKET, Key=key, VersionId=version)
+        require(upload['ContentLength'] == m['bytes'] <= MAX_COMPRESSED, 'Invalid upload size')
+        with upload['Body'] as body:
+            data = body.read(MAX_COMPRESSED + 1)
+        require(len(data) <= MAX_COMPRESSED, 'Upload too large')
+        # Publish the verified tables, in the service's own zip.
+        published, blob = repack(data, m)
+        prefix = f"archive/{published['summary']['trading_date']}/{published['sha256']}"
+        try:
+            s3.put_object(Bucket=BUCKET, Key=f'{prefix}/recording.zip', Body=blob,
+                          ContentType='application/zip', IfNoneMatch='*')
+        except ClientError as e:
+            if e.response['Error']['Code'] not in {'PreconditionFailed', 'ConditionalRequestConflict'}:
+                raise
+        # Manifest is the commit marker. Readers list only committed datasets.
+        json_put(s3, f'{prefix}/manifest.json', published, immutable=True)
+        json_put(s3, f'incoming/{ticket}/status.json', {'status': 'published', 'prefix': prefix, 'sha256': published['sha256']})
     except INVALID as e:
         # No raw payload or potentially sensitive contents in public status/logs.
         json_put(s3, f'incoming/{ticket}/status.json', {'status': 'rejected', 'reason': type(e).__name__})

@@ -10,7 +10,7 @@ import pytest
 import briskapi as brisk
 import briskapi.cli as cli
 import briskapi.schema as schema
-from briskapi import _archive, _live, _recording
+from briskapi import _archive, _live, _parquet, _recording
 
 TOYOTA = {'issue_id': 1, 'code': '7203', 'tick_type': 3, 'base_price10': 101000, 'limit_up10': 131000,
           'limit_down10': 71000, 'lot_size': 100, 'issue_type': 111, 'name': 'Toyota'}
@@ -25,20 +25,33 @@ def market():
     """Two securities around the 09:00 open; source clock is microseconds since JST midnight."""
     open_us = 9 * 3600 * 1_000_000
     sony = {**TOYOTA, 'issue_id': 0, 'code': '6758', 'name': 'Sony', 'base_price10': 120000}
+    timing = dict(received_unix_ms=1632700800000, decode_ns=1000, replay_lateness_ms=None)
     return [
         dict(type='bootstrap', seq=0, source='historical_mock', trading_date='20210927', source_time_us=open_us - 45,
+             input_transport={'kind': 'local_cache'}, source_timestamp_origin='brisk_decoder_unverified', exchange_delay_ms=None,
              master=[sony, TOYOTA], market_issue_count=2, quotes=[
                  quote(0, '6758', 1, open_us - 50, indicative_price10=120500, market_buy_quantity=500, market_sell_quantity=900),
                  quote(1, '7203', 1, open_us - 45, indicative_price10=101500, indicative_volume=304700,
-                       market_buy_quantity=201300, market_sell_quantity=105700, special_quote_time_us=open_us - 1)]),
-        dict(type='quotes', seq=1, source_time_us=open_us + 10, quotes=[
-            quote(1, '7203', 2, open_us + 10, last_price10=101500, volume=304700)]),
-        dict(type='quotes', seq=2, source_time_us=open_us + 20, quotes=[
+                       market_buy_quantity=201300, market_sell_quantity=105700, special_quote_time_us=open_us - 1,
+                       bid_levels=[[101500, 3000, 4], [101400, 100, 1]], ask_levels=[[101600, 200, 2]])]),
+        dict(type='quotes', seq=1, source_time_us=open_us + 10, **timing, quotes=[
+            quote(1, '7203', 2, open_us + 10, last_price10=101500, volume=304700, turnover10=309270500)]),
+        dict(type='quotes', seq=2, source_time_us=open_us + 20, **timing, quotes=[
             quote(0, '6758', 2, open_us + 20, last_price10=120500)]),
-        dict(type='quotes', seq=3, source_time_us=open_us + 30, quotes=[
+        dict(type='quotes', seq=3, source_time_us=open_us + 30, **timing, quotes=[
             quote(1, '7203', 3, open_us + 30, last_price10=101600, volume=310000)]),
-        dict(type='end', seq=4, source_time_us=open_us + 30, frames=4, quote_updates=3),
+        dict(type='end', seq=4, source_time_us=open_us + 30, frames=4, quote_updates=3, replay_wall_ms=1.5),
     ]
+
+
+def save(batches, directory, form):
+    """A recording of these batches: an events.jsonl or a Parquet recording directory."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if form == 'jsonl':
+        (directory / 'events.jsonl').write_text(''.join(json.dumps(b) + '\n' for b in batches))
+    else:
+        _parquet.write(batches, directory)
+    return brisk.Recording(directory)
 
 
 @pytest.fixture(autouse=True)
@@ -49,24 +62,21 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(brisk, '_current', None)
 
 
-@pytest.fixture
-def recording(tmp_path):
-    path = tmp_path / 'rec' / 'events.jsonl'
-    path.parent.mkdir()
-    path.write_text(''.join(json.dumps(b) + '\n' for b in market()))
-    return brisk.load(path.parent)
+@pytest.fixture(params=['parquet', 'jsonl'])
+def recording(tmp_path, request):
+    return brisk.load(save(market(), tmp_path / 'rec', request.param))
 
 
 def test_recording_basics(recording, tmp_path):
     assert recording.codes == ['6758', '7203'] and recording.trading_date == '20210927'
     assert recording.source == 'historical_mock' and recording.manifest is None
-    assert len(list(recording.batches())) == 5 and 'events.jsonl' in repr(recording)
+    assert len(list(recording.batches())) == 5 and 'rec' in repr(recording)
     gz = tmp_path / 'gz' / 'events.jsonl.gz'
     gz.parent.mkdir()
-    gz.write_bytes(gzip.compress(recording.path.read_bytes()))
+    gz.write_bytes(gzip.compress(b''.join(recording.lines())))
     assert brisk.Recording(gz.parent).codes == recording.codes
     (tmp_path / 'empty').mkdir()
-    with pytest.raises(brisk.NotFoundError, match='No events'):
+    with pytest.raises(brisk.NotFoundError, match='No recording in'):
         brisk.Recording(tmp_path / 'empty')
     with pytest.raises(brisk.NotFoundError, match='No recording'):
         brisk.Recording(tmp_path / 'missing.jsonl')
@@ -111,13 +121,14 @@ def test_market(recording, tmp_path):
     assert summary['contributor'] == 'alice' and summary['end'].microsecond == 30
 
 
-def test_state_uses_quote_clocks_even_in_later_batches(recording):
+@pytest.mark.parametrize('form', ['parquet', 'jsonl'])
+def test_state_uses_quote_clocks_even_in_later_batches(tmp_path, form):
     batches = market()
     open_us = 32_400_000_000
     batches[0]['quotes'][0]['source_time_us'] = open_us - 7655
     batches[0]['quotes'][1]['source_time_us'] = open_us - 6449
     batches[1]['quotes'][0]['source_time_us'] = open_us + 5
-    recording.path.write_text(''.join(json.dumps(b) + '\n' for b in batches))
+    recording = save(batches, tmp_path / 'rec', form)
     toyota = brisk.Ticker('7203', recording)
     initial = toyota.history(raw=True)[0]
     assert toyota.quote(at='08:59:59.9999', raw=True) == initial
@@ -135,14 +146,17 @@ def test_state_uses_quote_clocks_even_in_later_batches(recording):
     assert toyota.quote(at='08:59:59.9999')['frame'] == 1  # final cache does not affect past queries
 
 
-@pytest.mark.parametrize('compressed', [False, True])
-def test_summary_covers_empty_batches_and_caches_the_range(tmp_path, monkeypatch, compressed):
+@pytest.mark.parametrize('form', ['jsonl', 'gzip', 'parquet'])
+def test_summary_covers_empty_batches_and_caches_the_range(tmp_path, monkeypatch, form):
     batches = market()
     batches[-1]['source_time_us'] += 100
     data = ''.join(json.dumps(b) + '\n' for b in batches).encode()
-    path = tmp_path / ('events.jsonl.gz' if compressed else 'events.jsonl')
-    path.write_bytes(gzip.compress(data) if compressed else data)
-    rec = brisk.Recording(path)
+    if form == 'parquet':
+        rec = save(batches, tmp_path / 'rec', form)
+    else:
+        path = tmp_path / ('events.jsonl.gz' if form == 'gzip' else 'events.jsonl')
+        path.write_bytes(gzip.compress(data) if form == 'gzip' else data)
+        rec = brisk.Recording(path)
     summary = brisk.Market(rec).summary()
     assert summary['start'].microsecond == 999955 and summary['end'].microsecond == 130
     monkeypatch.setattr(rec, 'batches', lambda: pytest.fail('clock range should be cached'))
@@ -181,7 +195,21 @@ def test_validate_synthetic(tmp_path):
     path = tmp_path / 'events.jsonl'
     path.write_bytes(b''.join(map(schema.encode, schema.synthetic_recording())))
     assert brisk.Recording(path).validate()['source'] == 'synthetic_test'
+    assert save(schema.synthetic_recording(), tmp_path / 'pq', 'parquet').validate()['source'] == 'synthetic_test'
     assert brisk.Table([{'a': 1}]) == [{'a': 1}]
+
+
+def test_parquet_recording_reads_back_the_decoder_batches(tmp_path):
+    rec = save(market(), tmp_path / 'rec', 'parquet')
+    assert list(rec.batches()) == [{**b, 'quotes': sorted(b['quotes'], key=lambda q: q['issue_id'])} if 'quotes' in b else b
+                                   for b in market()]
+    assert rec.lines().__next__() == schema.encode(next(rec.batches()))
+    with pytest.raises(brisk.BriskError, match='Parquet recording'):
+        rec.open()
+    toyota = brisk.Ticker('7203', rec).quote(at='08:59:59.99996')
+    assert toyota['bids'] == [{'price': 10150.0, 'quantity': 3000, 'orders': 4}, {'price': 10140.0, 'quantity': 100, 'orders': 1}]
+    assert brisk.Ticker('7203', rec).quote()['turnover'] == 0 and brisk.Ticker('7203', rec).history()[0]['frame'] == 1
+    assert brisk.Ticker('7203', brisk.Recording(rec.directory)).history(raw=True)[1]['turnover10'] == 309270500
 
 
 def test_table_to_pandas():
@@ -202,8 +230,7 @@ def test_archive(tmp_path, monkeypatch):
 
     def pull(s3, bucket, prefix, output):
         pulls.append(output)
-        output.mkdir(parents=True)
-        (output / 'events.jsonl').write_bytes(b''.join(map(schema.encode, schema.synthetic_recording())))
+        _parquet.write(schema.synthetic_recording(), output)
 
     monkeypatch.setattr(cli, 'pull', pull)
     monkeypatch.setattr(cli, 'client', lambda config: S3())
@@ -264,7 +291,7 @@ def test_record_follows_consent(recorder, tmp_path, monkeypatch):
     calls, uploads = recorder
     with pytest.warns(UserWarning, match='undecided'):
         rec = brisk.record(tmp_path / 'local', web=True, codes=['7203'])
-    assert calls == ['7203'] and rec.path.name == 'events.jsonl' and brisk.current() is rec and not uploads
+    assert calls == ['7203'] and rec.format == 'parquet' and brisk.current() is rec and not uploads
     with pytest.raises(brisk.BriskError, match='already exists'):
         brisk.record(tmp_path / 'local', web=True, contribute=False)
     with pytest.raises(brisk.BriskError, match='consent'):
@@ -272,7 +299,7 @@ def test_record_follows_consent(recorder, tmp_path, monkeypatch):
     brisk.consent(accept=True, contributor='carol')
     rec = brisk.record(tmp_path / 'shared', web=True)
     assert rec.contribution == {'status': 'published'} and uploads == [False]
-    assert rec.manifest['contributor'] == 'carol' and rec.path.name == 'events.jsonl.gz'
+    assert rec.manifest['contributor'] == 'carol' and rec.format == 'parquet'
     rec = brisk.record(tmp_path / 'kept', web=True, contribute=False)
     assert rec.contribution is None and rec.manifest and len(uploads) == 1
     monkeypatch.setenv('BRISK_CONTRIBUTE', '0')

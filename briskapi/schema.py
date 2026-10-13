@@ -1,12 +1,12 @@
-"""Bounded, streaming validation shared by local packaging and automatic ingest.
+"""Bounded validation of decoded batches, shared by local packaging and automatic ingest.
 
-The archive accepts byte-canonical recordings with exact market/timing fields.
+The archive accepts recordings with exact market/timing fields, checked batch by batch
+in their canonical JSON form whatever the file format (see briskapi/_parquet.py).
 Demo and synthetic market content must match a pinned reference replay. Opted-in
 broker recordings (SBI, e-shiten) have structural and continuity checks, but their market content
-cannot be independently verified. The service recompresses accepted content itself.
+cannot be independently verified. The service writes accepted content itself.
 """
 import datetime as dt
-import gzip
 import hashlib
 import io
 import json
@@ -15,9 +15,10 @@ from pathlib import Path
 import re
 
 MAX_COMPRESSED = 64 * 1024 * 1024
+# Bounds on the canonical JSON form of a recording and of each batch.
 MAX_EXPANDED = 1024 * 1024 * 1024
 MAX_LINE = 16 * 1024 * 1024
-SCHEMA = 'brisk-decoded-jsonl-v1'
+SCHEMA = 'brisk-nautilus-parquet-v1'
 SOURCES = {'historical_mock', 'synthetic_test', 'sbi_live', 'eshiten_live'}
 QUOTE_KEYS = set('issue_id code frame source_time_us max_frame last_price10 open_price10 bid_price10 ask_price10 indicative_price10 indicative_volume indicative_imbalance_side closing_indicative_price10 closing_indicative_volume closing_indicative_imbalance_side quote_flag quote_side special_quote_time_us indicative_open_price10 reference_price10 volume turnover10 issue_status market_buy_quantity market_sell_quantity closing_market_buy_quantity closing_market_sell_quantity bid_quantity bid_orders ask_quantity ask_orders bid_levels ask_levels'.split())
 # A side of the book: up to LEVELS [price10, quantity, orders], best price first.
@@ -46,7 +47,6 @@ MAX_DECODE_NS = 10 * 10**9
 UNIX_MS = (1_600_000_000_000, 4_102_444_800_000)
 MAX_SESSION_MS = 86_400_000
 MAX_FETCH_MS = 600_000
-GZIP_LEVEL = 6
 
 def require(condition, message):
     if not condition:
@@ -89,8 +89,8 @@ def _issue(item):
     require(isinstance(item, dict) and type(item.get('issue_id')) is int, 'Invalid issue entry')
     return item['issue_id']
 
-def canonical_lines(source):
-    """Rewrite decoder JSONL as archive bytes: sorted keys and issues, microsecond timings."""
+def canonical_batches(source):
+    """Decoder JSONL as canonical batches: issues sorted, timings in microseconds, public transport only."""
     while line := source.readline(MAX_LINE + 1):
         require(len(line) <= MAX_LINE, 'Recording exceeds decode limit')
         b = json.loads(line, parse_constant=_nonfinite)
@@ -110,13 +110,11 @@ def canonical_lines(source):
         for holder, key in ((b, 'replay_lateness_ms'), (b, 'replay_wall_ms'), (b.get('input_transport'), 'asset_fetch_ms')):
             if isinstance(holder, dict) and type(holder.get(key)) is float:
                 holder[key] = round(holder[key], 3)
-        yield encode(b)
+        yield b
 
-def compress(lines, target):
-    """Deterministic gzip (no name or mtime) used for packages and publications."""
-    with target.open('wb') as raw, gzip.GzipFile(fileobj=raw, mode='wb', filename='', mtime=0, compresslevel=GZIP_LEVEL) as out:
-        for line in lines:
-            out.write(line)
+def canonical_lines(source):
+    """Decoder JSONL rewritten as canonical lines (see canonical_batches)."""
+    return map(encode, canonical_batches(source))
 
 class Fingerprint:
     """Digest of market content: the batch clock timeline plus one hash chain per issue."""
@@ -145,24 +143,32 @@ def _transport(value, source):
     if 'asset_fetch_ms' in value:
         measurement(value['asset_fetch_ms'], MAX_FETCH_MS)
 
-def _scan(stream):
-    """Check structure, canonical bytes and local timing; fingerprint market content."""
+def _lines(stream):
+    """(batch, line) pairs from JSONL, reading no line beyond the decode limit."""
+    while line := stream.readline(MAX_LINE + 1):
+        require(len(line) <= MAX_LINE, 'Recording exceeds decode limit')
+        yield json.loads(line, parse_constant=_nonfinite), line
+
+def _scan(entries):
+    """Check structure, canonical form and local timing; fingerprint market content.
+
+    `entries` yields (batch, line): a JSONL line must be the batch's canonical encoding, and
+    batches decoded from another format pass None.
+    """
     identities, clocks = {}, {}
     fingerprint = Fingerprint()
     seq = last = count = expanded = updates = market = 0
     first = source = date = paced = received = previous_stamp = None
     ended = False
-    while True:
-        line = stream.readline(MAX_LINE + 1)
-        if not line:
-            break
-        expanded += len(line)
-        require(len(line) <= MAX_LINE and expanded <= MAX_EXPANDED, 'Recording exceeds decode limit')
-        require(not ended, 'Data after end batch')
-        b = json.loads(line, parse_constant=_nonfinite)
+    for b, line in entries:
+        require(isinstance(b, dict), 'Invalid batch')
+        encoded = encode(b)
         # Exactly one byte encoding per value: no whitespace, duplicate keys,
         # escapes, key order or number spellings that could carry other data.
-        require(isinstance(b, dict) and encode(b) == line, 'Non-canonical encoding')
+        require(line is None or encoded == line, 'Non-canonical encoding')
+        expanded += len(encoded)
+        require(len(encoded) <= MAX_LINE and expanded <= MAX_EXPANDED, 'Recording exceeds decode limit')
+        require(not ended, 'Data after end batch')
         kind = b.get('type')
         require(kind in BATCH_KEYS and set(b) - {SKIPPED} == BATCH_KEYS[kind]
                 and (SKIPPED not in b or kind != 'end'), 'Unknown or missing batch fields')
@@ -255,8 +261,8 @@ def _scan(stream):
     return summary, fingerprint, market
 
 def build_reference(stream):
-    """Fingerprint a complete, trusted replay of every issue in a source's market."""
-    summary, fingerprint, market = _scan(stream)
+    """Fingerprint a complete, trusted replay (canonical JSONL) of every issue in a source's market."""
+    summary, fingerprint, market = _scan(_lines(stream))
     require(set(fingerprint.issues) == set(range(market)), 'Reference must cover the whole market')
     return dict(source=summary['source'], trading_date=summary['trading_date'], market_issue_count=market,
                 batches=summary['batches'], timeline=fingerprint.timeline.hexdigest(),
@@ -285,6 +291,10 @@ def load_references():
 REFERENCES = load_references()
 
 def validate_stream(stream, references=None):
+    """Validate canonical JSONL (see validate_batches); every line must be its batch's canonical bytes."""
+    return _verify(*_scan(_lines(stream)), references)
+
+def validate_batches(batches, references=None):
     """Validate canonical fields/continuity, plus reference content for demo/synthetic data.
 
     Broker live content (SBI, e-shiten) is contributor-declared and has no reference
@@ -293,7 +303,9 @@ def validate_stream(stream, references=None):
     quote batches. A batch lists in skipped_issues the issues whose quote could not be
     read; a bootstrap's quotes and skipped issues together cover its master.
     """
-    summary, fingerprint, market = _scan(stream)
+    return _verify(*_scan((b, None) for b in batches), references)
+
+def _verify(summary, fingerprint, market, references):
     if summary['source'] in BROKER_TRANSPORT:
         return summary
     reference = (REFERENCES if references is None else references).get(summary['source'])
@@ -305,13 +317,6 @@ def validate_stream(stream, references=None):
     require(all(i < len(issues) and fingerprint.digest(i) == issues[i] for i in fingerprint.issues),
             'Market data differs from the reference replay')
     return summary
-
-def digest(path):
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b''):
-            h.update(chunk)
-    return h.hexdigest()
 
 def validate_manifest(m):
     fields = {'schema', 'sha256', 'bytes', 'summary', 'contributor', 'license', 'redistribution_permitted'}
@@ -341,37 +346,6 @@ def validate_manifest(m):
         require(summary['trading_date'] == reference['trading_date'] and summary['batches'] == reference['batches'],
                 'Summary is not a complete reference replay')
     return m
-
-def inspect_package(path, manifest, references=None):
-    validate_manifest(manifest)
-    require(path.stat().st_size == manifest['bytes'] and digest(path) == manifest['sha256'], 'Size/hash mismatch')
-    with gzip.open(path, 'rb') as stream:
-        summary = validate_stream(stream, references)
-    require(summary == manifest['summary'], 'Summary mismatch')
-    return summary
-
-class _Tee:
-    def __init__(self, stream, sink):
-        self.stream, self.sink = stream, sink
-
-    def readline(self, size):
-        line = self.stream.readline(size)
-        self.sink.write(line)
-        return line
-
-def repack(path, manifest, output, references=None):
-    """Validate an upload and write the archive's own compression of its content.
-
-    Published bytes never include the uploader's gzip container (header fields,
-    extra members, padding or deflate choices); only validated canonical lines.
-    """
-    validate_manifest(manifest)
-    require(path.stat().st_size == manifest['bytes'] and digest(path) == manifest['sha256'], 'Size/hash mismatch')
-    with gzip.open(path, 'rb') as source, output.open('wb') as raw, \
-            gzip.GzipFile(fileobj=raw, mode='wb', filename='', mtime=0, compresslevel=GZIP_LEVEL) as sink:
-        summary = validate_stream(_Tee(source, sink), references)
-    require(summary == manifest['summary'], 'Summary mismatch')
-    return validate_manifest({**manifest, 'sha256': digest(output), 'bytes': output.stat().st_size})
 
 # Timing reports: what a broker session (SBI, e-shiten) contributes besides any opted-in market data.
 TIMING_SCHEMA = 'brisk-timing-v1'

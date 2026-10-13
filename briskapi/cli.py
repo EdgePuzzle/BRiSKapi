@@ -2,7 +2,6 @@
 """Consume BRiSK auction data live, record and automatically contribute it, and use the shared archive."""
 import argparse
 import datetime as dt
-import gzip
 import json
 import os
 from pathlib import Path
@@ -20,9 +19,10 @@ import warnings
 import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
-from briskapi._recording import BriskError
-from briskapi.schema import (SCHEMA, MAX_TIMING_BYTES, canonical_lines, compress, digest, inspect_package, validate_manifest,
-                             validate_stream, validate_timing, require)
+from briskapi import _parquet
+from briskapi._recording import BriskError, Recording
+from briskapi.schema import (SCHEMA, MAX_COMPRESSED, MAX_TIMING_BYTES, canonical_batches, encode, validate_manifest,
+                             validate_timing, require)
 
 PACKAGE = Path(__file__).resolve().parent
 # BRiSK's own WASM decoder runs under Node; the package ships only this host and SHA-256 pins.
@@ -125,20 +125,34 @@ def declaration(args):
         choice = ask_consent()
     return {k: choice[k] for k in ('contributor', 'license')} if choice and choice['enabled'] else None
 
-def package(events, output, contributor, license):
+def save_recording(events, output):
+    """Keep decoder JSONL locally as a recording directory (Parquet tables, no manifest)."""
     output.mkdir(parents=True, exist_ok=True)
-    target = output / 'events.jsonl.gz'
-    require(not target.exists(), 'Package output already exists')
+    require(not any((output / name).exists() for name in _parquet.FILES), 'Recording output already exists')
     try:
         with events.open('rb') as source:
-            compress(canonical_lines(source), target)
-        with gzip.open(target, 'rb') as stream:
-            summary = validate_stream(stream)
+            _parquet.write(canonical_batches(source), output)
     except BaseException:
-        target.unlink(missing_ok=True)
+        for name in _parquet.FILES:
+            (output / name).unlink(missing_ok=True)
         raise
-    m = validate_manifest(dict(schema=SCHEMA, sha256=digest(target), bytes=target.stat().st_size, summary=summary,
-                               contributor=contributor, license=license, redistribution_permitted=True))
+
+def package(events, output, contributor, license):
+    """Encode decoder JSONL as a package: the recording's tables plus a manifest of their zip."""
+    output.mkdir(parents=True, exist_ok=True)
+    require(not any((output / name).exists() for name in (*_parquet.FILES, 'manifest.json')), 'Package output already exists')
+    try:
+        save_recording(events, output)
+        summary = _parquet.summarize(output)
+        blob = _parquet.pack(output)
+        require(len(blob) <= MAX_COMPRESSED, f'The package is {len(blob) / 2**20:.0f} MiB; '
+                                             f'the archive accepts up to {MAX_COMPRESSED // 2**20} MiB')
+        m = validate_manifest(dict(schema=SCHEMA, sha256=_parquet.digest(blob), bytes=len(blob), summary=summary,
+                                   contributor=contributor, license=license, redistribution_permitted=True))
+    except BaseException:
+        for name in _parquet.FILES:
+            (output / name).unlink(missing_ok=True)
+        raise
     (output / 'manifest.json').write_text(json.dumps(m, indent=2) + '\n')
     return m
 
@@ -150,11 +164,10 @@ def request_json(url, data=None):
 
 def contribute(directory, api_url, timeout=660, verify=True, out=None):
     m = json.loads((directory / 'manifest.json').read_text())
-    path = directory / 'events.jsonl.gz'
     if verify:
-        inspect_package(path, m)
-    else:
-        require(path.stat().st_size == m['bytes'] and digest(path) == m['sha256'], 'Size/hash mismatch')
+        _parquet.inspect_package(directory, m)
+    blob = _parquet.pack(directory)
+    require(len(blob) == m['bytes'] and _parquet.digest(blob) == m['sha256'], 'Size/hash mismatch')
     ticket = request_json(api_url, m)
     # S3 browser POST policies bind key, encryption, content type and exact size.
     # The archive's 64 MiB cap bounds the multipart body below 65 MiB.
@@ -162,8 +175,8 @@ def contribute(directory, api_url, timeout=660, verify=True, out=None):
     parts = []
     for key, value in ticket['upload']['fields'].items():
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode())
-    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="events.jsonl.gz"\r\nContent-Type: application/gzip\r\n\r\n'.encode())
-    parts.extend([path.read_bytes(), f'\r\n--{boundary}--\r\n'.encode()])
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="recording.zip"\r\nContent-Type: application/zip\r\n\r\n'.encode())
+    parts.extend([blob, f'\r\n--{boundary}--\r\n'.encode()])
     request = urllib.request.Request(ticket['upload']['url'], data=b''.join(parts),
              headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}, method='POST')
     with urllib.request.urlopen(request, timeout=120) as response:
@@ -232,22 +245,30 @@ def pull(s3, bucket, prefix, output):
         directory = Path(tmp)
         # Refuse unsupported sources and identities before downloading payloads.
         m = _read_manifest(s3, bucket, prefix)
+        obj = s3.get_object(Bucket=bucket, Key=f'{prefix}/recording.zip')
+        with obj['Body'] as body:
+            require(obj['ContentLength'] <= MAX_COMPRESSED, 'Remote object exceeds limit')
+            data = body.read(MAX_COMPRESSED + 1)
+        require(len(data) == m['bytes'] and _parquet.digest(data) == m['sha256'], 'Size/hash mismatch')
+        # Only the tables are kept: they re-pack to the published zip byte for byte.
+        _parquet.unpack(data, directory)
+        _parquet.inspect_package(directory, m)
         (directory / 'manifest.json').write_text(json.dumps(m, indent=2) + '\n')
-        path = directory / 'events.jsonl.gz'
-        obj = s3.get_object(Bucket=bucket, Key=f'{prefix}/events.jsonl.gz')
-        limit = 64 * 1024**2
-        with obj['Body'] as body, path.open('wb') as target:
-            require(obj['ContentLength'] <= limit, 'Remote object exceeds limit')
-            size = 0
-            while chunk := body.read(1024 * 1024):
-                size += len(chunk)
-                require(size <= limit, 'Remote object exceeds limit')
-                target.write(chunk)
-        inspect_package(path, m)
-        with gzip.open(path, 'rb') as source, (directory / 'events.jsonl').open('wb') as target:
-            shutil.copyfileobj(source, target)
         shutil.move(str(directory), str(output))
     return m
+
+def export(source, nautilus=None, jsonl=None):
+    """Write a recording as a NautilusTrader v2 catalog or as canonical JSONL (for brisk_recording)."""
+    recording = Recording(source)
+    if nautilus:
+        require(recording.format == 'parquet', 'Export a Parquet recording (record, pull or package one)')
+        require(not (nautilus / 'data').exists(), 'Catalog output already exists')
+        return {'files': len(_parquet.export_nautilus(recording.directory, nautilus)), 'catalog': str(nautilus)}
+    require(not jsonl.exists(), 'JSONL output already exists')
+    with jsonl.open('wb') as out:
+        for batch in recording.batches():
+            out.write(encode(batch))
+    return {'jsonl': str(jsonl)}
 
 def record_events(events, web=False, cache=None, codes=None, limit_frames=None, speed=1, binary=None, node='node'):
     """Replay the pinned demo and save its decoded batches.
@@ -394,6 +415,11 @@ def _main(argv):
     p = sub.add_parser('upload', help='Contribute a prepared package'); p.add_argument('directory', type=Path)
     p = sub.add_parser('list', help='List published recordings'); p.add_argument('--date'); p.add_argument('--source', choices=['historical_mock','synthetic_test','sbi_live','eshiten_live'])
     p = sub.add_parser('pull', help='Download and verify a recording'); p.add_argument('prefix'); p.add_argument('--output', type=Path, required=True)
+    p = sub.add_parser('export', help='Write a recording as a NautilusTrader v2 catalog or as JSONL')
+    p.add_argument('recording', type=Path)
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument('--nautilus', type=Path, metavar='DIR', help='Catalog directory (data/<type>/<CODE>.XTKS/...)')
+    group.add_argument('--jsonl', type=Path, metavar='FILE', help='Canonical decoded batches, one per line')
     p = sub.add_parser('consent', help='Show or change automatic contribution')
     group = p.add_mutually_exclusive_group()
     group.add_argument('--accept', action='store_true')
@@ -420,11 +446,9 @@ def _main(argv):
                 events = Path(tmp) / 'events.jsonl'
                 record_events(events, args.web, args.cache, args.codes, args.limit_frames, args.speed, args.binary)
                 if found is None:
-                    args.output.mkdir(parents=True, exist_ok=True)
-                    require(not (args.output / 'events.jsonl').exists(), 'Recording output already exists')
-                    shutil.move(str(events), str(args.output / 'events.jsonl'))
+                    save_recording(events, args.output)
                     why = 'partial replays stay local' if partial else f'contribution is off (`{parser.prog} consent`)'
-                    print(f'Saved {args.output / "events.jsonl"}; not contributed: {why}.', file=sys.stderr)
+                    print(f'Saved {args.output}; not contributed: {why}.', file=sys.stderr)
                     return
                 m = package(events, args.output, **found)
         else:
@@ -445,6 +469,8 @@ def _main(argv):
                 print(json.dumps({'prefix': prefix, **m}))
     elif args.command == 'pull':
         print(json.dumps(pull(client(config), config['bucket'], args.prefix, args.output)))
+    elif args.command == 'export':
+        print(json.dumps(export(args.recording, args.nautilus, args.jsonl)))
 
 if __name__ == '__main__':
     main()
