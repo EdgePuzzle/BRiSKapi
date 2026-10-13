@@ -328,7 +328,7 @@ Known gaps in phase 1:
 - DynamoDB: query quotas in the existing table.
 - `deploy.py` deploys both functions and writes `query_url` to `archive.json`; `--seed-demo
   PACKAGE` uploads a complete demo recording as the operator so that `XTKS.BRISKDEMO` has data
-  (`brisk record --web --no-upload --output DIR` makes one). `cloud_smoke.py` calls
+  (`brisk record --no-upload --output DIR` makes one). `cloud_smoke.py` calls
   `list_datasets` and `list_publishers` as a throwaway identity and checks that a request
   without a key is refused; it does not query data, since its synthetic probe belongs to
   neither dataset. Deployment steps are in [infra/README.md](../infra/README.md).

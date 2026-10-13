@@ -33,6 +33,7 @@ class Method:
     examples: dict = field(default_factory=dict)
     responses: dict = field(default_factory=dict)
     illustrative: bool = False
+    unrun: tuple = ()     # example languages capture.py leaves out (their output is too long to show)
 
 
 KEY = 'export BRISK_KEY=$(brisk identity --export)   # your archive identity is the API key\n'
@@ -219,23 +220,22 @@ CLOUD = [
 
 PYTHON = [
     Method('python/connect', 'briskapi.connect', 'connect',
-           'Start a live feed and make it the default source for `Ticker` and `Market`, from one of three sources, as '
-           '`brisk live` does. `web=True` is the public BRiSK Next demo: not a live connection but a recording of 27 September '
+           'Start a live feed and make it the default source for `Ticker` and `Market`, from a site, as `brisk live --site` '
+           'does. `site="demo"` is the public BRiSK Next demo: not a live connection but a recording of 27 September '
            '2021 that the demo site serves as files, downloaded, checked against pinned hashes and replayed at its recorded '
-           'pace. `cache=DIR` replays the same files from a copy downloaded before. `site="sbi"` or `"e-shiten"` is your '
+           'pace; `cache=DIR` replays a copy of those files downloaded before. `site="sbi"` or `"e-shiten"` is your '
            'broker\'s live BRiSK ([below](/reference/python/broker_connect.md)). A complete session is uploaded to your private '
            'archive unless you opt out; `output` also keeps it on disk. On the command line: `brisk live` (see '
            '[Recording](/guides/recording.md)).',
-           'briskapi.connect(\n    *,\n    web: bool = False,\n    cache: str | Path | None = None,\n    site: str | None = None,\n'
+           'briskapi.connect(\n    *,\n    site: str,                              # "demo", "sbi" or "e-shiten"\n'
            '    codes: list[str] | None = None,\n    history: bool = False,\n    upload: bool | None = None,\n'
            '    output: str | Path | None = None,\n    on_day: Callable | None = None,\n    gateway: bool = False,\n'
-           '    timeout: float | None = None,\n    node: str = "node",\n    speed: float = 1,                       # the demo\n'
+           '    timeout: float | None = None,\n    node: str = "node",\n    cache: str | Path | None = None,        # the demo\n'
+           '    speed: float = 1,                       # the demo\n'
            '    limit_frames: int | None = None,        # the demo\n    trace_protocol: bool = False,           # a broker\n'
            '    profile: dict | None = None,            # a broker\n    upload_market_data: bool | None = None,  # a broker\n) -> Feed',
-           [P('web', 'bool', 'The demo, downloaded from BRiSK\'s demo site. Give exactly one of `web`, `cache` and `site`.'),
-            P('cache', 'str | Path | None', 'The demo, from a copy of its files downloaded before.'),
-            P('site', 'str | None', '`"sbi"` or `"e-shiten"`: your broker\'s live BRiSK, signing in as '
-              '[`login`](/reference/python/broker_login.md) does unless it already has.'),
+           [P('site', 'str', '`"demo"`, or `"sbi"` or `"e-shiten"`: your broker\'s live BRiSK, signing in as '
+              '[`login`](/reference/python/broker_login.md) does unless it already has.', required=True),
             P('codes', 'list[str] | None', 'Securities to decode (default: the whole market).'),
             P('history', 'bool', 'Keep every update and trade, for `Ticker.history()` and `.trades()`.'),
             P('upload', 'bool | None', '`False` uploads nothing; `None` follows your choice (on by default).'),
@@ -243,6 +243,7 @@ PYTHON = [
             P('on_day', 'Callable | None', 'Called with each finished day\'s result (kept, uploaded).'),
             P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).'),
             P('timeout', 'float | None', 'Seconds to wait for the initial state (default 60, or 120 for a broker).'),
+            P('cache', 'str | Path | None', 'The demo from a copy of its files downloaded before (default: download them).'),
             P('speed', 'float', 'The demo\'s replay speed: 1 is the recorded pace, 0 as fast as possible.'),
             P('limit_frames', 'int | None', 'Stop the demo after this many frames (a partial replay is never uploaded).'),
             P('trace_protocol', 'bool', 'A broker\'s connection steps on stderr, tokens redacted.'),
@@ -250,26 +251,25 @@ PYTHON = [
             P('upload_market_data', 'bool | None', '`False` uploads a broker session\'s timing summary but not its market '
               'recording.')],
            'A [`Feed`](/reference/python/feed_quotes.md), already holding every selected security\'s state.',
-           {'Python': 'import briskapi\n\nfeed = briskapi.connect(web=True, codes=["7203"], upload=False)\n'
+           {'Python': 'import briskapi\n\nfeed = briskapi.connect(site="demo", codes=["7203"], upload=False)\n'
             'print(feed)\nprint(briskapi.Ticker("7203").quote()["indicative_price"])\nfeed.close()',
-            'CLI': 'brisk live --web --codes 7203 --no-upload   # one JSON line per quote update'}),
+            'CLI': 'brisk live --site demo --codes 7203 --no-upload   # one JSON line per quote update'}, unrun=('CLI',)),
     Method('python/record', 'briskapi.record', 'record',
            'Record the demo replay into a folder (Parquet tables, see [Data format](/data-format.md)), upload it unless you '
            'opt out, and make it the default source. On the command line: `brisk record` (see '
            '[Recording](/guides/recording.md)).',
-           'briskapi.record(\n    output: str | Path,\n    web: bool = False,\n    cache: str | Path | None = None,\n'
+           'briskapi.record(\n    output: str | Path,\n    cache: str | Path | None = None,\n'
            '    codes: list[str] | None = None,\n    speed: float = 1,\n    limit_frames: int | None = None,\n    upload: bool | None = None,\n) -> Recording',
            [P('output', 'str | Path', 'The folder to write.', required=True),
-            P('web', 'bool', 'Download the demo\'s assets from BRiSK\'s website.'),
-            P('cache', 'str | Path | None', 'Use demo assets already downloaded here.'),
+            P('cache', 'str | Path | None', 'Replay a copy of the demo\'s files downloaded before (default: download them).'),
             P('codes', 'list[str] | None', 'Securities to record (default: the whole market).'),
             P('speed', 'float', '1 is the recorded pace, 0 as fast as possible.'),
             P('limit_frames', 'int | None', 'Stop early (never uploaded).'),
             P('upload', 'bool | None', '`False` keeps it local.')],
            'The `Recording`.',
-           {'Python': 'import briskapi\n\nrec = briskapi.record("recordings/s1", web=True, speed=0, upload=False)\n'
+           {'Python': 'import briskapi\n\nrec = briskapi.record("recordings/s1", speed=0, upload=False)\n'
             'print(rec.manifest["summary"]["batches"], rec.manifest["bytes"])',
-            'CLI': 'brisk record --web --speed 0 --no-upload --output recordings/s1'}),
+            'CLI': 'brisk record --speed 0 --no-upload --output recordings/s1'}),
     Method('python/load', 'briskapi.load', 'load',
            'Make a recording (a folder, or a `Recording`) or a live `Feed` the default source for `Ticker` and `Market`.',
            'briskapi.load(\n    source: str | Path | Recording | Feed,\n) -> Recording | Feed',
@@ -450,7 +450,7 @@ FEED = [
            'feed.quotes(\n    codes: list[str] | str | None = None,\n    raw: bool = False,\n    timeout: float | None = None,\n) -> Iterator[dict]',
            [P('codes', 'list[str] | str | None', 'Only these securities.'), P('raw', 'bool', 'BRiSK\'s own fields.'),
             P('timeout', 'float | None', 'Seconds to wait for each update.')], 'An iterator of quotes.',
-           {'Python': 'import briskapi\nfrom itertools import islice\n\nfeed = briskapi.connect(web=True, codes=["7203"], upload=False)\n'
+           {'Python': 'import briskapi\nfrom itertools import islice\n\nfeed = briskapi.connect(site="demo", codes=["7203"], upload=False)\n'
             'for quote in islice(feed.quotes("7203"), 3):\n    print(quote["time"], quote["indicative_price"], quote["volume"])\nfeed.close()'}),
     Method('python/feed_on_quote', 'Feed.on_quote', 'Feed.on_quote',
            'Call a function for each update, on the feed\'s thread. An exception in it stops the feed and is raised by '
@@ -459,12 +459,12 @@ FEED = [
            [P('callback', 'Callable[[dict], object]', 'Called with each quote.', required=True),
             P('codes', 'list[str] | str | None', 'Only these securities.'), P('raw', 'bool', 'BRiSK\'s own fields.')],
            'A function that unsubscribes.',
-           {'Python': 'import briskapi\n\nfeed = briskapi.connect(web=True, codes=["7203"], speed=0, upload=False)\nseen = []\n'
+           {'Python': 'import briskapi\n\nfeed = briskapi.connect(site="demo", codes=["7203"], speed=0, upload=False)\nseen = []\n'
             'stop = feed.on_quote(lambda q: seen.append(q["indicative_price"]), codes="7203")\nfeed.wait()\nprint(len(seen), seen[:3])'}),
     Method('python/feed_snapshot', 'Feed.snapshot', 'Feed.snapshot',
            'Every selected security\'s current quote on a live feed.',
            'feed.snapshot(\n    raw: bool = False,\n) -> Table', [P('raw', 'bool', 'BRiSK\'s own fields.')], 'A `Table`, one quote per security.',
-           {'Python': 'import briskapi\n\nfeed = briskapi.connect(web=True, codes=["7203", "6758"], upload=False)\n'
+           {'Python': 'import briskapi\n\nfeed = briskapi.connect(site="demo", codes=["7203", "6758"], upload=False)\n'
             'print(feed.snapshot().to_pandas()[["code", "indicative_price", "indicative_volume"]])\nfeed.close()'}),
 ]
 

@@ -68,8 +68,8 @@ Recording isn't a third API. The live calls record as they run, and `brisk live`
 | Command line | Python | Records | Kept on disk | Uploaded |
 | --- | --- | --- | --- | --- |
 | `brisk live --sbi` or `--site e-shiten` | `briskapi.connect(site="sbi")` | Your broker's live feed, one recording per trading day, until you stop it | Each finished day, with `--output DIR` (`output=`) | Each finished day, unless you opt out |
-| `brisk live --web` | `briskapi.connect(web=True)` | The demo replay, printed as JSON lines | With `--output DIR` | If the replay completes |
-| `brisk record --web --output DIR` | `briskapi.record(DIR, web=True)` | The demo replay | Always, in `DIR` | If the replay completes |
+| `brisk live --site demo` | `briskapi.connect(site="demo")` | The demo replay, printed as JSON lines | With `--output DIR` | If the replay completes |
+| `brisk record --output DIR` | `briskapi.record(DIR)` | The demo replay | Always, in `DIR` | If the replay completes |
 
 What you record is then read through the other two APIs:
 - **On your computer:** `briskapi.load("days/sbi_live_20261013_085800-153512")`, then `Ticker`
@@ -95,7 +95,7 @@ summary unless you opt out).
 ```python
 import briskapi
 
-feed = briskapi.connect(web=True, codes=["7203", "6758"])   # returns once initial state is in
+feed = briskapi.connect(site="demo", codes=["7203", "6758"])   # returns once initial state is in
 toyota = briskapi.Ticker("7203")
 toyota.quote()        # current quote, updated as each frame arrives
 toyota.auction()      # indicative price/volume and market-order imbalance
@@ -110,12 +110,12 @@ briskapi.Market().imbalances(top=10).to_pandas()
 feed.wait()           # or feed.close(); `with briskapi.connect(...) as feed:` also works
 ```
 
-`briskapi.connect()` takes one source, as `brisk live` does:
-- `web=True`: the public BRiSK Next demo. It isn't a live connection: the demo site serves a
+`briskapi.connect()` takes a site, as `brisk live --site` does:
+- `site="demo"`: the public BRiSK Next demo. It isn't a live connection: the demo site serves a
   recording of 27 September 2021 as files (BRiSK's decoder, the master, a snapshot and the
   stream), which are downloaded, checked against pinned hashes and replayed at their recorded
   pace (`speed`: `1` real time, `0` as fast as possible; `limit_frames` stops early).
-- `cache=DIR`: the same demo from a copy of those files downloaded before.
+  `cache=DIR` replays a copy of those files downloaded before instead.
 - `site="sbi"` or `site="e-shiten"`: your broker's live BRiSK ([below](#your-brokers-brisk)).
 
 Other options: `codes`, `history=True` (keep updates for `Ticker.history()`), `upload`,
@@ -130,7 +130,7 @@ cloud API returns. `briskapi.Live` is shaped like Databento's live client and ne
 sign-in: only the feed signs in to your broker.
 
 ```sh
-brisk live --sbi --quiet        # records, uploads and serves XTKS.BRISK until you stop it (--web: the demo, XTKS.BRISKDEMO)
+brisk live --sbi --quiet        # records, uploads and serves XTKS.BRISK until you stop it (--site demo: the demo, XTKS.BRISKDEMO)
 ```
 
 ```python
@@ -180,7 +180,7 @@ recordings = briskapi.recordings(source="historical_mock")   # yours only; no ac
 if recordings:
     briskapi.pull(recordings[0]["prefix"])      # verify, decode and cache; becomes the default
 else:
-    briskapi.record("recordings/my-session", web=True)   # record the demo (uploaded unless you opt out)
+    briskapi.record("recordings/my-session")   # record the demo (uploaded unless you opt out)
 # Or briskapi.load("recordings/my-session") for a local recording folder (or an older events.jsonl[.gz]).
 
 briskapi.Ticker("7203").quote(at="08:59:59.9999")             # available pre-open quote, in JST
@@ -369,7 +369,7 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 
 | Call | Returns |
 | --- | --- |
-| `briskapi.connect(web=True \| cache=DIR \| site=...)` | Live `Feed` of the demo or your broker's BRiSK; becomes the default source (`gateway=True` also serves it to `Live`) |
+| `briskapi.connect(site="demo" \| "sbi" \| "e-shiten")` | Live `Feed` of the demo or your broker's BRiSK; becomes the default source (`gateway=True` also serves it to `Live`) |
 | `briskapi.Live()` | Databento-style live records from the feed on this computer: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False)`, then iteration or `add_callback(fn)` / `add_stream(path)` with `start()` and `block_for_close(timeout)`; `stop()`, `symbology_map` ([above](#live-records-databento-style)) |
 | `Ticker(code).info()` | Name, lot size, tick type, base price and daily limits |
 | `Ticker(code).quote(at=None)` | Bid/ask with their quantities and orders, the ten best book levels per side (`bids`, `asks`) and of the closing-condition orders (`closing_bids`, `closing_asks`), the board's order totals, indicative price/volume, market-order and closing quantities, last trade, turnover, issue status and `special_quote` (side, price, when its timer ends) |
@@ -387,7 +387,7 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | `Feed.recordings` | A live feed's finished days: `trading_date`, `name`, `path`, `uploaded`, `timing_uploaded` |
 | `briskapi.recordings()` / `.pull()` / `.load()` | Your archive's listing, verified download, local file |
 | `briskapi.Archive().upload(dir)` / `.delete(prefix)` / `.deleted()` / `.restore(prefix)` / `.timing()` / `.owner` | Upload, delete, what you deleted in the last 30 days (with `deleted_at`, `restore_until`), bring one back, your timing reports, your owner ID |
-| `briskapi.record(output, web=True, ...)` | A recording of the demo, uploaded per your choice |
+| `briskapi.record(output, cache=None, ...)` | A recording of the demo, uploaded per your choice |
 | `briskapi.consent(...)` | Your upload choice |
 | `briskapi.Historical()` | The cloud API's client, Databento-style; your archive identity is the API key ([below](#querying-your-archive-in-the-cloud)) |
 | `Historical().timeseries.get_range(dataset, start, end=None, symbols='ALL_SYMBOLS', schema='trades', limit=None, path=None)` | A store of records from `XTKS.BRISK` (your recordings) or `XTKS.BRISKDEMO`: Databento's conversions: `to_df()` (indexed by `ts_recv`, or `ts_event` for bars), `to_ndarray()`, `to_csv(path)`, `to_json(path)`, `to_parquet(path)`, `to_file(path)`, `replay(callback)`, iteration, `len()` |
@@ -411,13 +411,13 @@ one security's history is read on its own.
 ## Command line
 
 ```sh
-brisk live --web --codes 7203,6758          # one JSON object per quote update (--raw for vendor fields)
+brisk live --site demo --codes 7203,6758    # one JSON object per quote update (--raw for vendor fields)
 brisk sites | enroll | login | forget       # sign in to your broker's BRiSK with a passkey through Chrome (experimental)
 brisk live --sbi --codes 7203               # BRiSK at SBI Securities; cookies from BRISK_SBI_COOKIES (JSON) or `brisk login`; --trace-protocol shows the handshake, wire details in BRISK_PROFILE
 brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; cookies from BRISK_ESHITEN_COOKIES (JSON) or `brisk login`
 brisk live --sbi --output days              # runs day after day; keeps each finished day in days/ (e.g. sbi_live_20261013_085800-153512) and prints a {"day": {...}} line on stderr
 brisk live --sbi --quiet                    # prints no quotes: records, uploads and serves briskapi.Live() (--no-gateway: serves nothing)
-brisk record --web --output recordings/s1   # record a replay (uploaded unless you opt out)
+brisk record --output recordings/s1         # record the demo (uploaded unless you opt out)
 brisk list --date 20210927 --source historical_mock   # your recordings (--timing: your timing reports; --deleted: what you deleted in the last 30 days)
 brisk pull PREFIX --output recordings/downloaded   # use a prefix returned by brisk list
 brisk delete PREFIX                         # remove one of your uploads from your archive (restorable for 30 days)
@@ -437,7 +437,7 @@ Each command is the command-line form of a Python call:
 
 | Command | Python |
 | --- | --- |
-| `brisk live --web` (or `--cache DIR`) | `briskapi.connect(web=True, gateway=True)` (`--no-gateway`: without `gateway`) |
+| `brisk live --site demo` (`--cache DIR`) | `briskapi.connect(site="demo", gateway=True)` (`cache=DIR`; `--no-gateway`: without `gateway`) |
 | `brisk live --sbi`, `--site e-shiten` | `briskapi.connect(site="sbi", gateway=True)` |
 | `brisk record` | `briskapi.record()` |
 | `brisk query` | `briskapi.Historical().timeseries.get_range()` |

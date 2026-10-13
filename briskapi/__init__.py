@@ -2,7 +2,7 @@
 
     import briskapi
 
-    feed = briskapi.connect(web=True)          # live: the demo replay (site="sbi" or "e-shiten": your broker's BRiSK)
+    feed = briskapi.connect(site="demo")       # live: the demo replay ("sbi" or "e-shiten": your broker's BRiSK)
     briskapi.Ticker("7203").quote()            # current auction quote
     for q in feed.quotes("7203"): ...          # or feed.on_quote(callback)
 
@@ -46,18 +46,19 @@ def current() -> Recording | Feed:
     return _current
 
 
-_DEMO_ONLY = {'speed': 1, 'limit_frames': None}
+_DEMO_ONLY = {'cache': None, 'speed': 1, 'limit_frames': None}
 _BROKER_ONLY = {'trace_protocol': False, 'profile': None, 'upload_market_data': None}
+SITES = ('demo', 'sbi', 'e-shiten')
 
 
-def connect(*, web=False, cache=None, site=None, codes=None, history=False, upload=None, output=None, on_day=None,
-            gateway=False, timeout=None, node='node', speed=1, limit_frames=None, trace_protocol=False, profile=None,
+def connect(*, site=None, codes=None, history=False, upload=None, output=None, on_day=None, gateway=False, timeout=None,
+            node='node', cache=None, speed=1, limit_frames=None, trace_protocol=False, profile=None,
             upload_market_data=None) -> Feed:
-    """Start a live feed and make it the default for Ticker and Market, as `brisk live` does. One source:
+    """Start a live feed and make it the default for Ticker and Market, as `brisk live --site SITE` does:
 
-    - web=True: the public BRiSK Next demo, a recording of 27 September 2021 that BRiSK's demo site
-      serves as files; they are downloaded and replayed at their recorded pace (`speed`, `limit_frames`).
-    - cache=DIR: the same demo from a copy downloaded before.
+    - site="demo": the public BRiSK Next demo. Not a live connection: a recording of 27 September 2021
+      that BRiSK's demo site serves as files, downloaded (or, with cache=DIR, a copy downloaded before)
+      and replayed at its recorded pace (`speed`; `limit_frames` stops early).
     - site="sbi" or "e-shiten": your broker's live BRiSK (experimental), signing in as login(site) does
       unless login already did (`trace_protocol`, `profile`, `upload_market_data`).
 
@@ -67,18 +68,19 @@ def connect(*, web=False, cache=None, site=None, codes=None, history=False, uplo
     briskapi.Live on this computer. `timeout` (default 60 s, 120 s for a broker) bounds the wait for the
     initial state.
     """
-    if sum(map(bool, (web, cache, site))) != 1:
-        raise ValueError('Choose one source: web=True or cache=DIR (the demo), or site="sbi" or "e-shiten" (your broker)')
+    if site not in SITES:
+        raise ValueError(f'Choose a site: {", ".join(map(repr, SITES))} (got {site!r})')
     common = dict(codes=codes, history=history, upload=upload, output=output, on_day=on_day, gateway=gateway, node=node)
-    given = dict(speed=speed, limit_frames=limit_frames, trace_protocol=trace_protocol, profile=profile,
+    given = dict(cache=cache, speed=speed, limit_frames=limit_frames, trace_protocol=trace_protocol, profile=profile,
                  upload_market_data=upload_market_data)
-    wrong = [name for name in (_DEMO_ONLY if site else _BROKER_ONLY) if given[name] != (_DEMO_ONLY | _BROKER_ONLY)[name]]
+    demo = site == 'demo'
+    wrong = [name for name, default in (_BROKER_ONLY if demo else _DEMO_ONLY).items() if given[name] != default]
     if wrong:
-        raise ValueError(f"{', '.join(wrong)}: only for {'the demo' if site else 'a broker site'}")
-    if site:
-        return load(_brisk._connect(site, timeout=timeout or 120, trace_protocol=trace_protocol, profile=profile,
-                                    upload_market_data=upload_market_data, **common))
-    return load(_connect(web=web, cache=cache, speed=speed, limit_frames=limit_frames, timeout=timeout or 60, **common))
+        raise ValueError(f"{', '.join(wrong)}: only for {'a broker site' if demo else 'the demo'}")
+    if demo:
+        return load(_connect(cache=cache, speed=speed, limit_frames=limit_frames, timeout=timeout or 60, **common))
+    return load(_brisk._connect(site, timeout=timeout or 120, trace_protocol=trace_protocol, profile=profile,
+                                upload_market_data=upload_market_data, **common))
 
 
 def login(site='sbi', *, cookies=None, remember=False) -> _brisk.Client:

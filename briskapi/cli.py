@@ -376,14 +376,14 @@ def export(source, nautilus=None, jsonl=None):
             out.write(encode(batch))
     return {'jsonl': str(jsonl)}
 
-def record_events(events, web=False, cache=None, codes=None, limit_frames=None, speed=1, binary=None, node='node'):
-    """Replay the pinned demo and save its decoded batches.
+def record_events(events, cache=None, codes=None, limit_frames=None, speed=1, binary=None, node='node'):
+    """Replay the pinned demo (downloaded, or a copy in `cache`) and save its decoded batches.
 
     Needs only Node. A Rust collector binary (`brisk_quote_ingest`) is optional; it
     records the same batches and adds its own state validation and latency display.
     """
     check_node(node)
-    options = ['--web'] if web else ['--cache', str(cache)]
+    options = ['--web'] if cache is None else ['--cache', str(cache)]
     options += ['--speed', str(speed)]
     if codes:
         options += ['--codes', codes if isinstance(codes, str) else ','.join(codes)]
@@ -402,15 +402,16 @@ def live(args):
     computer (unless --no-gateway); a complete session is uploaded per consent."""
     from briskapi import connect, login  # The API package builds on this module.
     codes = args.codes.split(',') if args.codes else None
-    if args.site:
+    if args.site != 'demo':
         login(args.site)  # Missing cookies fail before the notice, questions or decoder startup.
     consented(args.upload)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         report = lambda day: print(json.dumps({'day': day}), file=sys.stderr, flush=True)  # noqa: E731
-        source = (dict(site=args.site, trace_protocol=args.trace_protocol, upload_market_data=args.upload_market_data)
-                  if args.site else dict(web=args.web, cache=args.cache, speed=args.speed, limit_frames=args.limit_frames))
-        feed = connect(codes=codes, upload=args.upload, output=args.output, on_day=report, gateway=args.gateway, **source)
+        source = (dict(cache=args.cache, speed=args.speed, limit_frames=args.limit_frames) if args.site == 'demo' else
+                  dict(trace_protocol=args.trace_protocol, upload_market_data=args.upload_market_data))
+        feed = connect(site=args.site, codes=codes, upload=args.upload, output=args.output, on_day=report,
+                       gateway=args.gateway, **source)
     for warning in caught:
         print(warning.message, file=sys.stderr)
     if feed.gateway:
@@ -469,9 +470,8 @@ def _main(argv):
         p.add_argument('--upload', action=argparse.BooleanOptionalAction, default=None,
                        help='Upload to your private archive after packaging (default: yes once upload consent is saved)')
         if name == 'record':
-            group = p.add_mutually_exclusive_group(required=True)
-            group.add_argument('--web', action='store_true')
-            group.add_argument('--cache', type=Path)
+            p.add_argument('--cache', type=Path, metavar='DIR',
+                           help="Replay a copy of the demo's files downloaded before (default: download them)")
             p.add_argument('--codes')
             p.add_argument('--limit-frames', type=int)
             p.add_argument('--speed', type=float, default=1)
@@ -480,8 +480,8 @@ def _main(argv):
             p.add_argument('--events', type=Path, required=True)
     p = sub.add_parser('live', help='Stream live quote updates as JSON lines')
     group = p.add_mutually_exclusive_group(required=True)
-    group.add_argument('--web', action='store_true')
-    group.add_argument('--cache', type=Path)
+    p.add_argument('--cache', type=Path, metavar='DIR',
+                   help="With --site demo: replay a copy of the demo's files downloaded before (default: download them)")
     p.add_argument('--codes', help='Comma-separated security codes (default: whole market)')
     p.add_argument('--speed', type=float, default=1)
     p.add_argument('--limit-frames', type=int)
@@ -494,8 +494,9 @@ def _main(argv):
                    help='Keep each finished day here as SOURCE_YYYYMMDD_FROM-TO (its first and last clock, JST HHMMSS)')
     group.add_argument('--sbi', action='store_const', dest='site', const='sbi',
                        help='Live SBI BRiSK (experimental); cookies from BRISK_SBI_COOKIES, saved with briskapi.login(remember=True) or by `brisk login`')
-    group.add_argument('--site', choices=('sbi', 'e-shiten'),
-                       help='Live BRiSK of this broker (experimental); --site e-shiten for Tachibana e-shiten BRiSK Next, '
+    group.add_argument('--site', choices=('demo', 'sbi', 'e-shiten'),
+                       help="demo: the public BRiSK Next demo, a 2021 recording replayed here; sbi or e-shiten: your broker's "
+                            'live BRiSK (experimental); --site e-shiten for Tachibana e-shiten BRiSK Next, '
                             "cookies from BRISK_ESHITEN_COOKIES, saved with briskapi.login('e-shiten', remember=True) or by `brisk login`")
     p.add_argument('--trace-protocol', action='store_true',
                    help='With --sbi or --site: print the connection steps to stderr, every token redacted (wire details in BRISK_PROFILE)')
@@ -557,8 +558,10 @@ def _main(argv):
     group.add_argument('--accept', action='store_true')
     group.add_argument('--revoke', action='store_true')
     args = parser.parse_args(argv)
-    if args.command == 'live' and args.upload_market_data and not args.site:
-        parser.error('--upload-market-data requires --sbi or --site')
+    if args.command == 'live' and args.upload_market_data and args.site == 'demo':
+        parser.error('--upload-market-data is for a broker: --sbi or --site sbi|e-shiten')
+    if args.command == 'live' and args.cache and args.site != 'demo':
+        parser.error('--cache is for the demo: --site demo')
     config = settings(args.config)
     if args.command == 'consent':
         if args.accept:
@@ -575,7 +578,7 @@ def _main(argv):
         if args.command == 'record':
             with tempfile.TemporaryDirectory() as tmp:
                 events = Path(tmp) / 'events.jsonl'
-                record_events(events, args.web, args.cache, args.codes, args.limit_frames, args.speed, args.binary)
+                record_events(events, args.cache, args.codes, args.limit_frames, args.speed, args.binary)
                 if not uploading:
                     save_recording(events, args.output)
                     why = 'partial replays stay local' if partial else f'uploads are off (`{parser.prog} consent`)'

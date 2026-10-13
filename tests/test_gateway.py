@@ -204,7 +204,7 @@ def test_the_demo_through_connect_and_the_cli(decoder, monkeypatch, capsys):
     monkeypatch.setattr(_live, 'DECODER', script)
     monkeypatch.setattr(cli, 'package', lambda *a: 1 / 0)    # the gateway alone packages nothing
     errors = []
-    runner = threading.Thread(target=lambda: errors.append(cli.main(['live', '--cache', '.', '--quiet', '--no-upload'])))
+    runner = threading.Thread(target=lambda: errors.append(cli.main(['live', '--site', 'demo', '--cache', '.', '--quiet', '--no-upload'])))
     runner.start()
     wait_for(lambda: _gateway.gateway_path('XTKS.BRISKDEMO').exists())
     live = brisk.Live()
@@ -227,7 +227,7 @@ def test_the_demo_through_connect_and_the_cli(decoder, monkeypatch, capsys):
 
     script, release = decoder(market())
     monkeypatch.setattr(_live, 'DECODER', script)
-    cli.main(['live', '--cache', '.', '--no-gateway', '--no-upload'])
+    cli.main(['live', '--site', 'demo', '--cache', '.', '--no-gateway', '--no-upload'])
     printed = capsys.readouterr()
     assert 'briskapi.Live' not in printed.err and printed.out
 

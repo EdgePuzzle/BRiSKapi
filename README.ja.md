@@ -70,8 +70,8 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 | コマンドライン | Python | 記録するもの | ディスクに残るもの | アップロード |
 | --- | --- | --- | --- | --- |
 | `brisk live --sbi` または `--site e-shiten` | `briskapi.connect(site="sbi")` | 証券会社のライブフィード。止めるまで、取引日ごとに1つの記録 | `--output DIR`（`output=`）を指定すると、終わった日ごと | 終わった日ごと（オプトアウトした場合を除く） |
-| `brisk live --web` | `briskapi.connect(web=True)` | デモの再生（JSON の行として出力） | `--output DIR` を指定した場合 | 再生が最後まで終わった場合 |
-| `brisk record --web --output DIR` | `briskapi.record(DIR, web=True)` | デモの再生 | 常に `DIR` に | 再生が最後まで終わった場合 |
+| `brisk live --site demo` | `briskapi.connect(site="demo")` | デモの再生（JSON の行として出力） | `--output DIR` を指定した場合 | 再生が最後まで終わった場合 |
+| `brisk record --output DIR` | `briskapi.record(DIR)` | デモの再生 | 常に `DIR` に | 再生が最後まで終わった場合 |
 
 記録したものは、残りの2つの API で読みます。
 - **手元で:** `briskapi.load("days/sbi_live_20261013_085800-153512")` のあと `Ticker` と `Market`
@@ -97,7 +97,7 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 ```python
 import briskapi
 
-feed = briskapi.connect(web=True, codes=["7203", "6758"])   # 初期状態を受信してから戻る
+feed = briskapi.connect(site="demo", codes=["7203", "6758"])   # 初期状態を受信してから戻る
 toyota = briskapi.Ticker("7203")
 toyota.quote()        # 現在の気配（フレームが届くたびに更新）
 toyota.auction()      # 予想約定価格・数量と成行注文の売買差
@@ -112,12 +112,12 @@ briskapi.Market().imbalances(top=10).to_pandas()
 feed.wait()           # または feed.close()。`with briskapi.connect(...) as feed:` も使えます
 ```
 
-`briskapi.connect()` は、`brisk live` と同じく、データ源を1つ取ります。
-- `web=True`: 公開の BRiSK Next デモ。ライブの接続ではありません。デモサイトは2021年9月27日の記録を
+`briskapi.connect()` は、`brisk live --site` と同じく、サイトを1つ取ります。
+- `site="demo"`: 公開の BRiSK Next デモ。ライブの接続ではありません。デモサイトは2021年9月27日の記録を
   ファイル（BRiSK のデコーダー、マスター、スナップショット、ストリーム）として配信しており、それを
   ダウンロードし、固定したハッシュと照合して、記録されたペースで再生します（`speed`: `1` で実時間、
-  `0` で最速。`limit_frames` で途中で止める）。
-- `cache=DIR`: 以前ダウンロードした同じファイルのコピーから、同じデモを再生します。
+  `0` で最速。`limit_frames` で途中で止める）。`cache=DIR` を指定すると、以前ダウンロードした同じファイルの
+  コピーから再生します。
 - `site="sbi"` または `site="e-shiten"`: お使いの証券会社のライブの BRiSK（[下記](#お使いの証券会社の-brisk)）。
 
 そのほかのオプション: `codes`（銘柄コード）、`history=True`（`Ticker.history()` のために更新を保持）、
@@ -133,7 +133,7 @@ feed.wait()           # または feed.close()。`with briskapi.connect(...) as 
 キーもサインインも要りません。証券会社にサインインするのはフィードだけです。
 
 ```sh
-brisk live --sbi --quiet        # 止めるまで記録・アップロードし、XTKS.BRISK を配信（--web ならデモの XTKS.BRISKDEMO）
+brisk live --sbi --quiet        # 止めるまで記録・アップロードし、XTKS.BRISK を配信（--site demo ならデモの XTKS.BRISKDEMO）
 ```
 
 ```python
@@ -183,7 +183,7 @@ recordings = briskapi.recordings(source="historical_mock")   # 自分の記録�
 if recordings:
     briskapi.pull(recordings[0]["prefix"])      # 検証・展開・キャッシュし、既定のデータにする
 else:
-    briskapi.record("recordings/my-session", web=True)   # デモを記録（オプトアウトしない限りアップロード）
+    briskapi.record("recordings/my-session")   # デモを記録（オプトアウトしない限りアップロード）
 # または briskapi.load("recordings/my-session") でローカルの記録フォルダー（以前の events.jsonl[.gz] も可）を読む。
 
 briskapi.Ticker("7203").quote(at="08:59:59.9999")             # 寄り前の気配（日本時間）
@@ -374,7 +374,7 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 
 | 呼び出し | 戻り値 |
 | --- | --- |
-| `briskapi.connect(web=True \| cache=DIR \| site=...)` | デモまたは証券会社の BRiSK のライブの `Feed`（既定のデータ源になる。`gateway=True` で `Live` にも配信） |
+| `briskapi.connect(site="demo" \| "sbi" \| "e-shiten")` | デモまたは証券会社の BRiSK のライブの `Feed`（既定のデータ源になる。`gateway=True` で `Live` にも配信） |
 | `briskapi.Live()` | このコンピューターのフィードから Databento 風のライブのレコード: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False)` のあと、イテレーション、または `add_callback(fn)` / `add_stream(path)` と `start()`、`block_for_close(timeout)`。`stop()`、`symbology_map`（[上記](#ライブのレコードdatabento-風)） |
 | `Ticker(code).info()` | 銘柄名、売買単位、呼値の種別、基準値、値幅制限 |
 | `Ticker(code).quote(at=None)` | 買い・売り気配とその数量・件数、板の各側の上位10本（`bids`、`asks`）と引け条件付き注文の上位10本（`closing_bids`、`closing_asks`）、板全体の注文合計、予想約定価格・数量、成行・引け条件付きの数量、直近の約定、売買代金、銘柄の状態、`special_quote`（特別気配の側・価格・タイマーの終了時刻） |
@@ -392,7 +392,7 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | `Feed.recordings` | ライブフィードの終わった日の一覧：`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded` |
 | `briskapi.recordings()` / `.pull()` / `.load()` | 自分のアーカイブの一覧、検証付きダウンロード、ローカルファイル |
 | `briskapi.Archive().upload(dir)` / `.delete(prefix)` / `.deleted()` / `.restore(prefix)` / `.timing()` / `.owner` | アップロード、削除、過去30日間に削除したもの（`deleted_at`、`restore_until` 付き）、元に戻す、自分のタイミングレポート、自分の owner ID |
-| `briskapi.record(output, web=True, ...)` | デモの記録（設定に従ってアップロード） |
+| `briskapi.record(output, cache=None, ...)` | デモの記録（設定に従ってアップロード） |
 | `briskapi.consent(...)` | アップロードの設定 |
 | `briskapi.Historical()` | クラウド API のクライアント（Databento 風）。API キーは自分のアーカイブの ID（[下記](#クラウドでアーカイブを照会する)） |
 | `Historical().timeseries.get_range(dataset, start, end=None, symbols='ALL_SYMBOLS', schema='trades', limit=None, path=None)` | `XTKS.BRISK`（自分の記録）または `XTKS.BRISKDEMO` のレコードを返すストア：Databento と同じ変換：`to_df()`（`ts_recv` をインデックスにする。バーは `ts_event`）、`to_ndarray()`、`to_csv(path)`、`to_json(path)`、`to_parquet(path)`、`to_file(path)`、`replay(callback)`、反復、`len()` |
@@ -416,13 +416,13 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 ## コマンドライン
 
 ```sh
-brisk live --web --codes 7203,6758          # 気配の更新ごとに JSON を1行出力（--raw でベンダー形式）
+brisk live --site demo --codes 7203,6758    # 気配の更新ごとに JSON を1行出力（--raw でベンダー形式）
 brisk sites | enroll | login | forget       # Chrome 経由のパスキーで証券会社の BRiSK にサインイン（試験的）
 brisk live --sbi --codes 7203               # SBI証券の BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_PROFILE）
 brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）または `brisk login` が保存したもの
 brisk live --sbi --output days              # 日をまたいで動き続け、終わった日ごとに days/ に残し（例: sbi_live_20261013_085800-153512）、stderr に {"day": {...}} を1行出力
 brisk live --sbi --quiet                    # 気配を出力せず、記録・アップロードと briskapi.Live() への配信だけ（--no-gateway で配信しない）
-brisk record --web --output recordings/s1   # デモを記録（オプトアウトしない限りアップロード）
+brisk record --output recordings/s1         # デモを記録（オプトアウトしない限りアップロード）
 brisk list --date 20210927 --source historical_mock   # 自分の記録（--timing で自分のタイミングレポート、--deleted で過去30日間に削除したもの）
 brisk pull PREFIX --output recordings/downloaded   # brisk list が返した prefix を使う
 brisk delete PREFIX                         # 自分のアップロードを自分のアーカイブから削除（30日間は復元可能）
@@ -442,7 +442,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 
 | コマンド | Python |
 | --- | --- |
-| `brisk live --web`（または `--cache DIR`） | `briskapi.connect(web=True, gateway=True)`（`--no-gateway` なら `gateway` なし） |
+| `brisk live --site demo`（`--cache DIR`） | `briskapi.connect(site="demo", gateway=True)`（`cache=DIR`。`--no-gateway` なら `gateway` なし） |
 | `brisk live --sbi`、`--site e-shiten` | `briskapi.connect(site="sbi", gateway=True)` |
 | `brisk record` | `briskapi.record()` |
 | `brisk query` | `briskapi.Historical().timeseries.get_range()` |

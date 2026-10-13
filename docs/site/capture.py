@@ -3,7 +3,7 @@
     .venv/bin/python docs/site/capture.py --demo DIR [--only SLUG ...]
 
 Cloud examples query the public demo dataset (XTKS.BRISKDEMO) with a throwaway identity made here and never
-saved. Local examples read a demo recording at DIR (made by `brisk record --web --no-upload`), linked as
+saved. Local examples read a demo recording at DIR (made by `brisk record --no-upload`), linked as
 recordings/demo. Live-feed examples replay the public BRiSK Next demo from BRiSK's website. Nothing is uploaded:
 BRISK_UPLOAD=0 and a fresh, temporary configuration. Entries marked illustrative keep their written responses.
 Writes docs/site/responses.json.
@@ -82,7 +82,7 @@ def tidy(text, work, key):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    parser.add_argument('--demo', type=Path, required=True, help='A demo recording (brisk record --web --no-upload)')
+    parser.add_argument('--demo', type=Path, required=True, help='A demo recording (brisk record --no-upload)')
     parser.add_argument('--only', nargs='*', help='Capture only these method slugs, keeping the rest')
     args = parser.parse_args()
     responses = json.loads(OUT.read_text()) if OUT.exists() else {}
@@ -101,6 +101,8 @@ def main():
                 print(method.slug, file=sys.stderr)
                 responses[method.slug] = {}
                 for language, code in method.examples.items():
+                    if language in method.unrun:
+                        continue
                     work = Path(tmp) / f'{method.slug.replace("/", "-")}-{language}'
                     responses[method.slug][language] = tidy(run(language, code, work, env), work, key)
     responses['_captured'] = {'date': dt.date.today().isoformat(), 'briskapi': __version__}

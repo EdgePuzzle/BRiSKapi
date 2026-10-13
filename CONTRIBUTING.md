@@ -76,7 +76,7 @@ real output, kept in `docs/site/responses.json`; after changing an example, run 
 ```sh
 python3 -m venv .venv-docs && .venv-docs/bin/python -m pip install -r docs/site/requirements.txt
 .venv-docs/bin/python docs/site/build.py --serve      # http://127.0.0.1:8000; --strict, as in CI
-.venv/bin/brisk record --web --speed 0 --no-upload --output /tmp/brisk-demo
+.venv/bin/brisk record --speed 0 --no-upload --output /tmp/brisk-demo
 .venv/bin/python docs/site/capture.py --demo /tmp/brisk-demo --only python/ticker_quote
 ```
 

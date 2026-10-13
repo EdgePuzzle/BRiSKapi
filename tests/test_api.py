@@ -298,19 +298,17 @@ def test_stream(fake_decoder, tmp_path, capfd):
     batches = list(brisk.stream(cache=tmp_path, codes=['7203', 6758], speed=0))
     assert [b['type'] for b in batches] == ['bootstrap', 'quotes', 'quotes', 'quotes', 'end']
     assert '"--codes","7203,6758"' in capfd.readouterr().err
-    first = next(brisk.stream(web=True, codes='7203'))  # closing early stops the decoder
+    first = next(brisk.stream(codes='7203'))  # closing early stops the decoder
     assert first['type'] == 'bootstrap'
     with pytest.raises(brisk.BriskError, match='exited with 3'):
-        list(brisk.stream(web=True, limit_frames=2))
-    with pytest.raises(ValueError, match='exactly one'):
-        next(brisk.stream())
+        list(brisk.stream(limit_frames=2))
 
 
 @pytest.fixture
 def recorder(monkeypatch):
     calls = []
 
-    def record_events(events, web, cache, codes, limit_frames, speed, binary):
+    def record_events(events, cache, codes, limit_frames, speed, binary):
         calls.append(codes)
         Path(events).write_bytes(b''.join(map(schema.encode, schema.synthetic_recording())))
 
@@ -324,31 +322,31 @@ def test_record_uploads_by_default(recorder, tmp_path, monkeypatch):
     calls, uploads = recorder
     # Nothing decided: the recording uploads, and the process is told once.
     with pytest.warns(UserWarning, match='by default') as told:
-        rec = brisk.record(tmp_path / 'first', web=True, codes=['7203'])
+        rec = brisk.record(tmp_path / 'first', codes=['7203'])
     assert 'recovery code' in str(told[0].message) and 'upload=False' in str(told[0].message)
     assert calls == ['7203'] and rec.format == 'parquet' and brisk.current() is rec
     assert rec.uploaded == {'status': 'stored'} and uploads == [False]
     assert set(rec.manifest) == {'schema', 'sha256', 'bytes', 'summary'}
     with warnings.catch_warnings():
         warnings.simplefilter('error')
-        assert brisk.record(tmp_path / 'second', web=True).uploaded == {'status': 'stored'} and len(uploads) == 2
+        assert brisk.record(tmp_path / 'second').uploaded == {'status': 'stored'} and len(uploads) == 2
     # The opt-outs package as usual but keep it local.
-    rec = brisk.record(tmp_path / 'kept', web=True, upload=False)
+    rec = brisk.record(tmp_path / 'kept', upload=False)
     assert rec.uploaded is None and rec.manifest and len(uploads) == 2
     monkeypatch.setenv('BRISK_UPLOAD', '0')
-    assert brisk.record(tmp_path / 'env', web=True).uploaded is None
+    assert brisk.record(tmp_path / 'env').uploaded is None
     monkeypatch.delenv('BRISK_UPLOAD')
-    assert brisk.record(tmp_path / 'partial', web=True, limit_frames=5).manifest is None
+    assert brisk.record(tmp_path / 'partial', limit_frames=5).manifest is None
     with pytest.raises(brisk.BriskError, match='complete'):
-        brisk.record(tmp_path / 'p2', web=True, limit_frames=5, upload=True)
+        brisk.record(tmp_path / 'p2', limit_frames=5, upload=True)
     # Revoked: local only, and upload=True is refused.
     brisk.consent(revoke=True)
-    rec = brisk.record(tmp_path / 'local', web=True)
+    rec = brisk.record(tmp_path / 'local')
     assert rec.uploaded is None and rec.manifest is None and len(uploads) == 2
     with pytest.raises(brisk.BriskError, match='already exists'):
-        brisk.record(tmp_path / 'local', web=True, upload=False)
+        brisk.record(tmp_path / 'local', upload=False)
     with pytest.raises(brisk.BriskError, match='uploads on'):
-        brisk.record(tmp_path / 'x', web=True, upload=True)
+        brisk.record(tmp_path / 'x', upload=True)
 
 
 def test_module_entry_point(monkeypatch, capsys):
@@ -378,7 +376,7 @@ def gated_decoder(tmp_path, monkeypatch):
 
 def test_live_feed(gated_decoder, tmp_path):
     gate = gated_decoder()
-    with brisk.connect(cache=tmp_path, codes=['7203', '6758'], upload=False, history=True) as feed:
+    with brisk.connect(site='demo', cache=tmp_path, codes=['7203', '6758'], upload=False, history=True) as feed:
         assert feed.status == 'running' and brisk.current() is feed and 'running' in repr(feed)
         assert feed.codes == ['6758', '7203'] and feed.source == 'historical_mock' and feed.trading_date == '20210927'
         assert brisk.Market().summary()['start'] == brisk.Market().summary()['end']
@@ -417,7 +415,7 @@ def test_live_feed(gated_decoder, tmp_path):
 
 def test_feed_failures(gated_decoder, tmp_path):
     gate = gated_decoder(exit_code=3)
-    feed = brisk.connect(cache=tmp_path, upload=False)
+    feed = brisk.connect(site='demo', cache=tmp_path, upload=False)
     updates = feed.quotes()
     with pytest.raises(TimeoutError):
         list(feed.quotes(timeout=0.05))[2:]
@@ -433,7 +431,7 @@ def test_feed_failures(gated_decoder, tmp_path):
     gate.unlink()
 
     gated_decoder(market()[:-1])
-    feed = brisk.connect(cache=tmp_path, upload=False)
+    feed = brisk.connect(site='demo', cache=tmp_path, upload=False)
     gate.touch()
     with pytest.raises(brisk.BriskError, match='before replay completion'):
         feed.wait()
@@ -441,14 +439,14 @@ def test_feed_failures(gated_decoder, tmp_path):
 
     broken = market(); broken[2]['seq'] = 7
     gated_decoder(broken)
-    feed = brisk.connect(cache=tmp_path, upload=False)
+    feed = brisk.connect(site='demo', cache=tmp_path, upload=False)
     gate.touch()
     with pytest.raises(brisk.BriskError, match='sequence'):
         feed.wait()
     gate.unlink()
 
     gated_decoder()
-    feed = brisk.connect(cache=tmp_path, upload=False)
+    feed = brisk.connect(site='demo', cache=tmp_path, upload=False)
     feed.on_quote(lambda q: 1 / 0 if q['frame'] > 1 else None)
     gate.touch()
     with pytest.raises(brisk.BriskError, match='division'):
@@ -456,13 +454,13 @@ def test_feed_failures(gated_decoder, tmp_path):
     gate.unlink()
 
     gated_decoder()
-    feed = brisk.connect(cache=tmp_path, upload=False)
+    feed = brisk.connect(site='demo', cache=tmp_path, upload=False)
     feed.close()
     assert feed.status == 'closed' and feed.codes  # state read before closing stays readable
 
     gated_decoder(hold=True)
     with pytest.raises(TimeoutError):
-        brisk.connect(cache=tmp_path, upload=False, timeout=0.2)
+        brisk.connect(site='demo', cache=tmp_path, upload=False, timeout=0.2)
     feed = brisk.Feed(cache=tmp_path, upload=False)
     with pytest.raises(TimeoutError, match='still running'):
         feed.wait(timeout=0.05)
@@ -482,26 +480,26 @@ def test_feed_uploads_complete_sessions(gated_decoder, tmp_path, monkeypatch):
     monkeypatch.setattr(cli, 'package', package)
     monkeypatch.setattr(cli, 'upload', lambda directory, url, verify, out: {'status': 'stored', 'verify': verify})
     with pytest.warns(UserWarning, match='by default'):
-        feed = brisk.connect(cache=tmp_path).wait()
+        feed = brisk.connect(site='demo', cache=tmp_path).wait()
     assert feed.uploaded == {'status': 'stored', 'verify': False}
     assert packaged == [[json.dumps(b) for b in market()]]
-    assert brisk.connect(cache=tmp_path, limit_frames=2).wait().uploaded is None
-    assert brisk.connect(cache=tmp_path, upload=False).wait().uploaded is None and len(packaged) == 1
+    assert brisk.connect(site='demo', cache=tmp_path, limit_frames=2).wait().uploaded is None
+    assert brisk.connect(site='demo', cache=tmp_path, upload=False).wait().uploaded is None and len(packaged) == 1
     brisk.consent(revoke=True)
     with pytest.raises(brisk.BriskError, match='uploads on'):
         brisk.Feed(cache=tmp_path, upload=True)
-    assert brisk.connect(cache=tmp_path).wait().uploaded is None and len(packaged) == 1
+    assert brisk.connect(site='demo', cache=tmp_path).wait().uploaded is None and len(packaged) == 1
     brisk.consent(accept=True)
     monkeypatch.setattr(cli, 'package', lambda *a: 1 / 0)
     with pytest.warns(UserWarning, match='upload failed'):
-        assert brisk.connect(cache=tmp_path).wait().uploaded['status'] == 'failed'
+        assert brisk.connect(site='demo', cache=tmp_path).wait().uploaded['status'] == 'failed'
 
 
 def test_cli_live(gated_decoder, tmp_path, monkeypatch, capsys):
     gated_decoder().touch()
     monkeypatch.setattr(cli, 'package', lambda *a: None)
     monkeypatch.setattr(cli, 'upload', lambda *a, **k: {'status': 'stored'})
-    cli.main(['live', '--cache', str(tmp_path), '--codes', '7203'])
+    cli.main(['live', '--site', 'demo', '--cache', str(tmp_path), '--codes', '7203'])
     out = capsys.readouterr()
     lines = [json.loads(line) for line in out.out.splitlines()]
     # The ungated fake races ahead of the snapshot; per-code order and final state still hold.
@@ -514,7 +512,7 @@ def test_cli_live(gated_decoder, tmp_path, monkeypatch, capsys):
     assert 'on by default' in out.err and '"uploaded": {"status": "stored"}' in out.err
     monkeypatch.setattr(cli, 'interactive', lambda: True)
     monkeypatch.setattr(cli.sys, 'stdin', io.StringIO('\n'))
-    cli.main(['live', '--cache', str(tmp_path), '--raw'])
+    cli.main(['live', '--site', 'demo', '--cache', str(tmp_path), '--raw'])
     out = capsys.readouterr()
     assert 'private archive' in out.err and '"uploaded": {"status": "stored"}' in out.err
     assert all('last_price10' in json.loads(line) for line in out.out.splitlines())

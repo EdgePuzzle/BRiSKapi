@@ -173,7 +173,7 @@ Amazon S3 in Tokyo (`ap-northeast-1`). These services receive your IP address wi
   record infrastructure errors and are deleted after 14 days. S3 server access logging is
   not enabled.
 
-`--web` recording downloads the demo's assets from `https://next-demo.brisk.jp/`. That
+Recording the demo downloads its assets from `https://next-demo.brisk.jp/`. That
 request goes to BRiSK's servers and is covered by their policies, not this one.
 
 ## Storage, access and retention

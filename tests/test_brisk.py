@@ -223,14 +223,14 @@ def test_connect_signs_in_from_the_sites_variable_when_login_has_not(fake_host, 
     assert feed.source == 'sbi_live' and brisk._default().site == 'sbi'
 
 
-def test_connect_takes_one_source_and_only_its_options(tmp_path):
-    for sources in ({}, {'web': True, 'site': 'sbi'}, {'cache': tmp_path, 'web': True}):
-        with pytest.raises(ValueError, match='Choose one source'):
-            briskapi.connect(**sources)
-    with pytest.raises(ValueError, match='speed: only for the demo'):
-        briskapi.connect(site='sbi', speed=0)
+def test_connect_takes_a_site_and_only_its_options(tmp_path):
+    for site in (None, 'web', 'matsui'):
+        with pytest.raises(ValueError, match="Choose a site: 'demo', 'sbi', 'e-shiten'"):
+            briskapi.connect(site=site)
+    with pytest.raises(ValueError, match='cache, speed: only for the demo'):
+        briskapi.connect(site='sbi', cache=tmp_path, speed=0)
     with pytest.raises(ValueError, match='trace_protocol, upload_market_data: only for a broker site'):
-        briskapi.connect(cache=tmp_path, trace_protocol=True, upload_market_data=False)
+        briskapi.connect(site='demo', cache=tmp_path, trace_protocol=True, upload_market_data=False)
     with pytest.raises(TypeError, match='cookies by name'):
         briskapi.login({'session_bfaf77a2': 'v'})
 
@@ -553,5 +553,8 @@ def test_cli_asks_once_for_e_shiten_like_sbi(eshiten_host, monkeypatch, capsys, 
     cli.main(['live', '--site', 'e-shiten'])
     assert len(eshiten_host['timing']) == 2 * uploaded, 'the environment opt-out keeps even timing local'
     with pytest.raises(SystemExit):
-        cli.main(['live', '--web', '--upload-market-data'])
-    assert '--upload-market-data requires --sbi or --site' in capsys.readouterr().err
+        cli.main(['live', '--site', 'demo', '--upload-market-data'])
+    assert '--upload-market-data is for a broker' in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        cli.main(['live', '--sbi', '--cache', '.'])
+    assert '--cache is for the demo' in capsys.readouterr().err

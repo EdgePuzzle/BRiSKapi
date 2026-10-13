@@ -26,10 +26,9 @@ def _codes(codes):
     return codes if isinstance(codes, str) else ','.join(map(str, codes))
 
 
-def _decoder(web, cache, codes, speed, limit_frames, node):
-    if bool(web) == bool(cache):
-        raise ValueError('Select exactly one of web=True or cache=DIR')
-    command = [node, str(DECODER), *(['--web'] if web else ['--cache', str(cache)]), '--speed', str(speed)]
+def _decoder(cache, codes, speed, limit_frames, node):
+    """The demo's decoder: its files downloaded from BRiSK's demo site, or a copy in `cache`."""
+    command = [node, str(DECODER), *(['--web'] if cache is None else ['--cache', str(cache)]), '--speed', str(speed)]
     if codes:
         command += ['--codes', _codes(codes)]
     if limit_frames:
@@ -44,10 +43,11 @@ def _stop(process):
     process.wait()
 
 
-def stream(web=False, cache=None, codes=None, speed=1, limit_frames=None, node='node') -> Iterator[dict]:
-    """Yield raw decoded batches as each frame replays (bootstrap, quote deltas, end)."""
+def stream(cache=None, codes=None, speed=1, limit_frames=None, node='node') -> Iterator[dict]:
+    """Yield the demo's raw decoded batches as each frame replays (bootstrap, quote deltas, end): its files
+    downloaded from BRiSK's demo site, or a copy downloaded before (`cache`)."""
     cli.check_node(node)
-    process = _decoder(web, cache, codes, speed, limit_frames, node)
+    process = _decoder(cache, codes, speed, limit_frames, node)
     try:
         for line in process.stdout:
             yield json.loads(line)
@@ -79,7 +79,7 @@ def _consent(upload, limit_frames):
 class Feed:
     """Live auction state, updated in a background thread as the decoder emits frames.
 
-        with briskapi.connect(web=True, codes=["7203", "6758"]) as feed:
+        with briskapi.connect(site="demo", codes=["7203", "6758"]) as feed:
             feed.on_quote(lambda q: print(q["code"], q["indicative_price"]))
             for q in feed.quotes("7203"):        # blocks for each update
                 ...
@@ -96,7 +96,7 @@ class Feed:
     manifest = None
     gateway = None
 
-    def __init__(self, web=False, cache=None, codes=None, speed=1, limit_frames=None, upload=None,
+    def __init__(self, cache=None, codes=None, speed=1, limit_frames=None, upload=None,
                  history=False, node='node', *, command=None, env=None, timing=None, upload_market_data=None, output=None,
                  on_day=None, gateway=False):
         # A broker session (SBI, e-shiten) uploads its timing summary and its market recording;
@@ -134,7 +134,7 @@ class Feed:
         self._tmp = tempfile.TemporaryDirectory() if self._package or self._output or gateway else None
         self._worker = ThreadPoolExecutor(1, thread_name_prefix='brisk-day')
         self._process = (subprocess.Popen(command, stdout=subprocess.PIPE, env=env) if command
-                         else _decoder(web, cache, codes, speed, limit_frames, node))
+                         else _decoder(cache, codes, speed, limit_frames, node))
         if gateway:
             try:
                 # A broker's stream is XTKS.BRISK, as its recordings are in the cloud API; the demo's XTKS.BRISKDEMO.
@@ -440,12 +440,12 @@ class Feed:
             return {'status': 'failed', 'error': str(error)}
 
 
-def connect(web=False, cache=None, codes=None, speed=1, limit_frames=None, upload=None, history=False,
+def connect(cache=None, codes=None, speed=1, limit_frames=None, upload=None, history=False,
             node='node', timeout=60, output=None, on_day=None, gateway=False) -> Feed:
-    """Start a live feed and return once its bootstrap state is available. `output` keeps the finished
+    """briskapi.connect(site="demo"): start the demo's feed and return once its bootstrap state is available. `output` keeps the finished
     recording there (as SOURCE_YYYYMMDD_FROM-TO); `on_day(result)` is called once it is kept and uploaded.
     gateway=True also serves it to briskapi.Live on this computer."""
-    feed = Feed(web, cache, codes, speed, limit_frames, upload, history, node, output=output, on_day=on_day,
+    feed = Feed(cache, codes, speed, limit_frames, upload, history, node, output=output, on_day=on_day,
                 gateway=gateway)
     try:
         return feed.ready(timeout)
@@ -454,10 +454,11 @@ def connect(web=False, cache=None, codes=None, speed=1, limit_frames=None, uploa
         raise
 
 
-def record(output, web=False, cache=None, codes=None, speed=1, limit_frames=None, upload=None,
+def record(output, cache=None, codes=None, speed=1, limit_frames=None, upload=None,
            binary=None) -> Recording:
     """Record a demo replay into the directory `output` (Parquet tables, see briskapi._parquet) and
-    upload it to your private archive according to saved consent.
+    upload it to your private archive according to saved consent. The demo's files are downloaded from
+    BRiSK's demo site, or replayed from a copy downloaded before (`cache`).
 
     upload=None uploads by default or as you chose with `briskapi.consent()` (BRISK_UPLOAD=0 opts
     out), False keeps the recording local, True requires uploads on. Partial replays (limit_frames)
@@ -467,7 +468,7 @@ def record(output, web=False, cache=None, codes=None, speed=1, limit_frames=None
     packaged, upload = _consent(upload, limit_frames)
     with tempfile.TemporaryDirectory() as tmp:
         events = Path(tmp) / 'events.jsonl'
-        cli.record_events(events, web, cache, codes and _codes(codes), limit_frames, speed, binary)
+        cli.record_events(events, cache, codes and _codes(codes), limit_frames, speed, binary)
         if not packaged:
             if (output / _parquet.DEPTHS).exists():
                 raise BriskError(f'A recording already exists in {output}')

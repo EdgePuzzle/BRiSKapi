@@ -325,7 +325,7 @@ curl -L -u "$KEY:" -d dataset=XTKS.BRISK -d schema=ohlcv-1m -d symbols=7203 \
 - DynamoDB: 照会の上限（クォータ）は既存のテーブルで管理します。
 - `deploy.py` は両方の関数をデプロイし、`archive.json` に `query_url` を書き込みます。
   `--seed-demo PACKAGE` は、運営者として完全なデモの記録をアップロードし、`XTKS.BRISKDEMO` にデータを
-  持たせます（`brisk record --web --no-upload --output DIR` で作れます）。`cloud_smoke.py` は使い捨ての
+  持たせます（`brisk record --no-upload --output DIR` で作れます）。`cloud_smoke.py` は使い捨ての
   ID として `list_datasets` と `list_publishers` を呼び、キーのないリクエストが拒否されることを確認します。
   データの照会は行いません。合成データの確認用の記録は、どちらのデータセットにも属さないためです。
   デプロイ手順は [infra/README.md](../infra/README.md)（英語）にあります。

@@ -58,7 +58,7 @@ def test_every_entry_point_checks_node_first(tmp_path):
     with pytest.raises(briskapi.BriskError, match='not found'):
         briskapi.Feed(cache=tmp_path, node=missing)
     with pytest.raises(briskapi.BriskError, match='not found'):
-        briskapi.connect(cache=tmp_path, node=missing)
+        briskapi.connect(site='demo', cache=tmp_path, node=missing)
     with pytest.raises(briskapi.BriskError, match='not found'):
         cli.record_events(tmp_path / 'events.jsonl', cache=tmp_path, node=missing)
     briskapi.login(cookies={'session_bfaf77a2': 'v'})
@@ -70,7 +70,7 @@ def test_every_entry_point_checks_node_first(tmp_path):
 def test_cli_reports_errors_without_a_traceback(tmp_path, monkeypatch):
     monkeypatch.setenv('PATH', str(tmp_path))
     with pytest.raises(SystemExit) as stopped:
-        cli.main(['live', '--cache', str(tmp_path)])
+        cli.main(['live', '--site', 'demo', '--cache', str(tmp_path)])
     assert str(stopped.value.code).startswith('brisk: error: Node.js was not found')
 
 

@@ -35,7 +35,7 @@ jobs:
           python -m venv /tmp/wheel-venv
           /tmp/wheel-venv/bin/python -m pip install /tmp/dist/briskapi-*.whl
           /tmp/wheel-venv/bin/python -I -c "import briskapi.cli as c, briskapi.schema as s; assert c.DECODER.exists() and 'historical_mock' in s.REFERENCES"
-          /tmp/wheel-venv/bin/brisk live --cache /tmp/brisk-mock-cache --codes 7203 --speed 0 --limit-frames 3 > /tmp/live.jsonl
+          /tmp/wheel-venv/bin/brisk live --site demo --cache /tmp/brisk-mock-cache --codes 7203 --speed 0 --limit-frames 3 > /tmp/live.jsonl
           /tmp/wheel-venv/bin/python -c "import json; rows = [json.loads(l) for l in open('/tmp/live.jsonl')]; assert rows and all(r['code'] == '7203' for r in rows)"
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked --manifest-path rust/brisk_quote_ingest/Cargo.toml

@@ -128,7 +128,7 @@ under `central/`; none was ever built in this deployment, and nothing uses that 
 `XTKS.BRISKDEMO` reads the archive's copy of the demo replay under `reference/historical_mock/`
 and answers 404 until it exists. The first verified whole demo upload from any identity
 creates it. `--seed-demo PACKAGE` does so at deployment: after deploying it uploads PACKAGE
-(a complete demo recording with its `manifest.json`: `brisk record --web --no-upload
+(a complete demo recording with its `manifest.json`: `brisk record --no-upload
 --output DIR` writes one, except that with upload consent revoked it writes the tables alone)
 under the identity of the machine running `deploy.py`, sending the whole recording whether
 or not a copy exists, and adds the result as `seeded` to what it prints. That upload counts

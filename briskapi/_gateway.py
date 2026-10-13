@@ -541,7 +541,7 @@ class Live:
             raise ValueError('snapshot applies to mbp-10, imbalance and brisk-quotes')
         info = None if self._key and self._port else _read_file(gateway_path(dataset))
         if info is None and not (self._key and self._port):
-            how = '`brisk live --sbi` (or --site e-shiten)' if dataset == 'XTKS.BRISK' else '`brisk live --web`'
+            how = '`brisk live --sbi` (or --site e-shiten)' if dataset == 'XTKS.BRISK' else '`brisk live --site demo`'
             raise BriskError(f'No feed on this computer serves {dataset}: start one with {how}, '
                              'or briskapi.connect(..., gateway=True)')
         self._key, self._port = self._key or info['key'], self._port or info['port']

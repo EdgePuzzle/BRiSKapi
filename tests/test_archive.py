@@ -1081,7 +1081,7 @@ def test_cli(command, packaged, tmp_path, monkeypatch, capsys, harness):
     if command in {'package', 'record'}:
         args += ['--output', str(tmp_path / 'out'), '--upload']
         if command == 'package': args += ['--events', str(tmp_path / 'source.jsonl')]
-        else: args += ['--web', '--codes', '0000', '--speed', '0']
+        else: args += ['--codes', '0000', '--speed', '0']
     elif command == 'upload': args += [str(directory)]
     elif command == 'list': args += ['--source', 'synthetic_test']
     elif command == 'timing': args = ['list', '--timing']
@@ -1158,7 +1158,7 @@ def test_record_without_a_terminal_uploads_by_default(tmp_path, harness, capsys)
 def test_first_run_prompt(tmp_path, monkeypatch, harness, capsys, answer, uploaded):
     monkeypatch.setattr(cli, 'interactive', lambda: True)
     monkeypatch.setattr(cli.sys, 'stdin', io.StringIO(answer))
-    uploads = harness('record', '--web', '--output', str(tmp_path / 'r'))
+    uploads = harness('record', '--output', str(tmp_path / 'r'))
     out = capsys.readouterr()
     assert 'Only you can' in out.err and 'Upload automatically to your private archive?' in out.err
     assert 'Upload automatically' not in out.out
@@ -1168,26 +1168,26 @@ def test_first_run_prompt(tmp_path, monkeypatch, harness, capsys, answer, upload
     assert set(choice) == {'policy_version', 'enabled', 'decided_at'}
     # The question is asked once; later runs follow the saved choice silently.
     monkeypatch.setattr(cli.sys, 'stdin', io.StringIO(''))
-    assert bool(harness('record', '--web', '--output', str(tmp_path / 'again'))) == uploaded
+    assert bool(harness('record', '--output', str(tmp_path / 'again'))) == uploaded
 
 def test_consent_controls(tmp_path, monkeypatch, harness, capsys):
     harness('consent')
     assert json.loads(capsys.readouterr().out) == {'policy_version': cli.POLICY_VERSION, 'enabled': True, 'default': True}
     harness('consent', '--accept')
     assert json.loads(capsys.readouterr().out)['enabled'] is True
-    assert harness('record', '--web', '--output', str(tmp_path / 'a')) and (tmp_path / 'a/manifest.json').exists()
-    assert len(harness('record', '--web', '--no-upload', '--output', str(tmp_path / 'b'))) == 1
+    assert harness('record', '--output', str(tmp_path / 'a')) and (tmp_path / 'a/manifest.json').exists()
+    assert len(harness('record', '--no-upload', '--output', str(tmp_path / 'b'))) == 1
     assert (tmp_path / 'b/manifest.json').exists()
     monkeypatch.setenv('BRISK_UPLOAD', '0')
     assert len(harness('package', '--events', str(tmp_path / 'source.jsonl'), '--output', str(tmp_path / 'c'))) == 1
     monkeypatch.delenv('BRISK_UPLOAD')
-    assert len(harness('record', '--web', '--limit-frames', '2', '--output', str(tmp_path / 'd'))) == 1
+    assert len(harness('record', '--limit-frames', '2', '--output', str(tmp_path / 'd'))) == 1
     assert (tmp_path / 'd' / _parquet.DEPTHS).exists()
     with pytest.raises(ValueError, match='complete'):
-        harness('record', '--web', '--limit-frames', '2', '--upload', '--output', str(tmp_path / 'e'))
+        harness('record', '--limit-frames', '2', '--upload', '--output', str(tmp_path / 'e'))
     harness('consent', '--revoke')
     assert json.loads(capsys.readouterr().out.splitlines()[-1])['enabled'] is False
-    assert len(harness('record', '--web', '--output', str(tmp_path / 'f'))) == 1
+    assert len(harness('record', '--output', str(tmp_path / 'f'))) == 1
     assert cli.consent_path().name == 'uploads.json'
     cli.consent_path().write_text('{"policy_version": 0, "enabled": true}')
     assert cli.load_consent() is None
@@ -1202,7 +1202,7 @@ def test_record_events_command(monkeypatch, tmp_path):
     cmd, stdout = calls[0]
     assert cmd[:2] == ['node', str(cli.DECODER)] and stdout is not None and cli.DECODER.exists()
     assert cmd[cmd.index('--codes') + 1] == '7203,6758' and '--limit-frames' in cmd and '--cache' in cmd
-    cli.record_events(tmp_path / 'r.jsonl', web=True, binary=tmp_path / 'collector')
+    cli.record_events(tmp_path / 'r.jsonl', binary=tmp_path / 'collector')
     cmd, stdout = calls[1]
     assert cmd[0] == str(tmp_path / 'collector') and cmd[cmd.index('--decoder') + 1] == str(cli.DECODER)
     assert '--web' in cmd and stdout is None
