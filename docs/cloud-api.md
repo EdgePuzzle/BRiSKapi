@@ -212,7 +212,7 @@ non-empty key and any https gateway.
 
 ## Infrastructure changes
 
-- A second function, `brisk-recorder-query`, with its own role, memory (2–4 GB), reserved
+- A second function, `brisk-recorder-query`, with its own role, memory (up to the account's 3,008 MB), reserved
   concurrency and function URL. Ingest is unchanged.
 - Bucket: a `results/` prefix with a one-day lifecycle; the query role reads `archive/` and
   `reference/` and writes `results/`.

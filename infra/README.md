@@ -57,7 +57,7 @@ alone. The synthetic probe of `cloud_smoke.py` leaves its own copy under
 out of it. pyarrow and numpy come from a layer the deployer builds from their pinned
 manylinux arm64 wheels (`LAYER_REQUIREMENTS`; pip downloads them from PyPI) and
 publishes as a layer version through the bucket's `deploy/` prefix, once per distinct layer.
-The function has 4,096 MB: verifying a complete demo replay holds its decoded
+The function has 3,008 MB, the most this account's Lambda allows: verifying a complete demo replay holds its decoded
 columns in memory (about 2.2 GB at peak) and takes under a minute, a timing-only upload
 included, since the service verifies the assembled recording in full either way. Each validated staging upload, and any extra upload made
 with an already-used ticket, is deleted on arrival. The deployer creates a random

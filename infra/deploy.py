@@ -164,8 +164,9 @@ def deploy(bucket):
         existing={}
     # Keyed IP hashing for rate limits; keep the key across redeploys.
     salt=existing.get('QUOTA_SALT') or secrets.token_hex(32)
-    # Verifying a complete replay holds its decoded columns in memory: about 2.2 GB for the demo.
-    config=dict(Runtime='python3.12',Role=role_arn,Handler='archive_service.handler',Timeout=600,MemorySize=4096,
+    # Verifying a complete replay holds its decoded columns in memory: about 2.2 GB for the demo. 3008 MB is the
+    # most this account's Lambda allows.
+    config=dict(Runtime='python3.12',Role=role_arn,Handler='archive_service.handler',Timeout=600,MemorySize=3008,
                 Layers=[publish_layer(lam,s3,bucket)],
                 Environment={'Variables':{'ARCHIVE_BUCKET':bucket,'QUOTA_TABLE':NAME,'QUOTA_SALT':salt}},
                 EphemeralStorage={'Size':512})
