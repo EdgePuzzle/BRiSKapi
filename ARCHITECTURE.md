@@ -182,21 +182,26 @@ to the broker; a session needs the gateway's key and nothing else.
   (a killed feed) is replaced by the next one; while one answers, a second feed for the same
   dataset serves nothing, with a warning. Closing the feed removes the file. A broker feed is
   `XTKS.BRISK`, the demo `XTKS.BRISKDEMO`, as in the cloud API.
-- **Protocol.** Newline-delimited JSON. The session asks for symbols (or all), a replay and a
-  snapshot. The gateway answers `{"gateway": "session"}` with the day's bootstrap (its master,
-  without quotes and trades) and, if asked, each security's latest quote; then, if asked and
-  the day is running, the day so far; then `{"gateway": "live"}`; then each batch as it
-  arrives; and last `{"gateway": "closed", "status", "error"}` when the feed ends. Batches are
-  the decoder's own lines: unchanged for a session that asked for all symbols, and rewritten
-  with only its codes' master entries, quotes and trades (a batch left empty is skipped) for
-  one that named symbols.
+- **Protocol.** Newline-delimited JSON. After `{"gateway": "session"}` acknowledges the key, the
+  session may send subscriptions at any time: `{"subscribe": [ids], "symbols", "replay",
+  "snapshot"}` (`start()` sends those made before it as one). Each is answered in the stream:
+  `{"gateway": "subscribed", "id"}`, with the day's bootstrap (master, without quotes and
+  trades) if the session lacks it and, if asked, those symbols' latest quotes; then, if asked
+  and the day is running, the day so far and `{"gateway": "live", "id"}`. Every batch follows as
+  it arrives, and last `{"gateway": "closed", "status", "error"}` when the feed ends. Batches
+  are the decoder's own lines: unchanged once a session asked for all symbols, otherwise
+  rewritten with only the quotes and trades of the symbols subscribed so far (the master
+  whole; a batch left empty is skipped).
 - **No batch missed or repeated.** `Feed._run` writes and flushes each line to the day's file,
   applies it, then calls `Gateway.publish`, which updates the gateway's own bootstrap, latest
-  quotes and the file's length, and queues the batch for every session, all under one lock.
-  A new session takes its bootstrap, its snapshot and the file's length, opens the file and
-  registers under that lock, so its replay (the file up to that length, sent with `sendfile`)
-  and its queue meet exactly. At a day's end the gateway stops offering replays: the worker
-  packages and deletes the file, and a session already replaying holds it open.
+  quotes and the file's length, and queues the batch for every session, all under one lock. A
+  subscription widens the session's symbols, takes the bootstrap, the latest quotes and the
+  file's length and opens the file under that lock, and queues its answer (written out, with
+  the replay sent by `sendfile`, on the session's thread). So its answer comes after every batch
+  the session got without its symbols and before every batch with them, and a replay meets
+  the live batches exactly; batches that arrive meanwhile wait behind it. At a day's end the
+  gateway stops offering replays: the worker packages and deletes the file, and a session
+  already replaying holds it open.
 - **Slow sessions.** Each session has its own sending thread and queue. The feed never waits
   for one: a session more than `MAX_BEHIND` (1 GiB) behind has its queue dropped, is sent an
   error and is disconnected (after 10 seconds if it still reads nothing), so a stalled program
@@ -213,8 +218,28 @@ to the broker; a session needs the gateway's key and nothing else.
   symbols skips, unparsed, replayed lines that mention none of its codes. Records come per
   batch, sorted within it as the cloud API sorts (`ts_event`, `instrument_id`, `sequence`);
   across batches, in arrival order. `start` filters on `ts_event`; definitions (stamped at
-  JST midnight) are given at a session's start, or by a replayed bootstrap, and at each new
-  day. A snapshot is projected as a bootstrap batch (`seq` 0), so `mbp-10` flags it 32.
+  JST midnight) are given when a subscription starts, or by a replayed bootstrap, and at each
+  new day. A snapshot is projected as a bootstrap batch (`seq` 0), so `mbp-10` flags it 32. A
+  replay goes to its own subscriptions only, projected against a day of its own (fresh trade
+  IDs), while the others wait for the live batches behind it.
+- **Bars.** Each bar subscription aggregates its trades per (code, bar start) as the cloud's
+  `build_bars` does: the open is the first trade by (`ts_event`, frame, place in the frame), the
+  close the last, with high, low and summed size. A bar goes out once BRiSK's clock reaches its
+  end, with no allowance for trades stamped earlier than the clock: a trade arriving after its
+  own bar has ended (by the clock the bars were last given to) goes into the next bar still
+  open, so its volume counts and no bar for a past interval goes out late. The cloud places such
+  a trade by its own time, so the two can differ there. That clock is the
+  latest batch's, or, between batches, this computer's less the feed's delay: `_Latency` keeps,
+  for each live batch, when the session took it in less BRiSK's stamp (network, the gateway's
+  hop and any clock difference) and allows for the largest of the last 10 seconds, and
+  `Live._tick` wakes when the next bar is due. Without that, a session that named a few
+  symbols, which receives only their batches, would hold a quiet symbol's bar until its next
+  update. The tick pauses during a replay, whose live batches are still queued. Bars obey the
+  cloud's coverage rule (`records.session_pieces`, shared): a bar is given only if its whole
+  span within the trading sessions lies between where the session's trades begin (the day's
+  bootstrap when it saw the day from the start, by replay or a new day; else its first batch)
+  and the clock, so a bar is never partial; a replay of the demo, whose cloud bars have no such
+  rule, gives every bar. The day's `end` batch gives what remains.
 - **Delivery.** Callbacks and streams run on the session's thread; a callback's exception goes
   to its `exception_callback` or a warning. Iteration uses a bounded queue (10,000 records)
   that blocks the session's reader, and through TCP the gateway's queue, never the feed.
@@ -1006,7 +1031,8 @@ in the [README](README.md).
 The engine and the service are server side, like `archive_service.py`, which imports the
 engine to keep owners' bars in step: the wheel ships only `briskapi/`, and `package()` in
 `deploy.py` puts them, with `briskapi/schema.py`, `_parquet.py` and `records.py`, in the one
-zip both functions run. OHLCV bars therefore come only from the cloud.
+zip both functions run. `Historical`'s OHLCV bars therefore come only from the cloud;
+`briskapi.Live` builds its own from the stream (see [Live gateway](#live-gateway)).
 
 ### Datasets and requests
 

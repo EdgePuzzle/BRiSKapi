@@ -3,7 +3,9 @@
 Shared by the cloud API's engine (query_engine.py, over stored recordings) and briskapi.Live (over the
 feed running on this computer), so a record is the same whether it comes from history or live. Each
 projection takes a recording's tables as briskapi._parquet writes them (order_book_depths, trades and
-equity) and returns exactly the columns FIELDS lists. OHLCV bars are built only in the cloud.
+equity) and returns exactly the columns FIELDS lists. OHLCV bars are built from trades where they are
+served: in the cloud from an owner's stored recordings, and by briskapi.Live from the stream; never by
+Historical from files on your computer.
 """
 from __future__ import annotations
 
@@ -23,8 +25,10 @@ DAY_NS = 86400 * 10**9
 DATASETS = {'XTKS.BRISK': (1, 'Tokyo Stock Exchange via BRiSK'),
             'XTKS.BRISKDEMO': (2, 'Tokyo Stock Exchange, BRiSK Next demo replay')}
 BARS = {'ohlcv-1s': 10**9, 'ohlcv-1m': 60 * 10**9, 'ohlcv-1h': 3600 * 10**9, 'ohlcv-1d': DAY_NS}
-LIVE_SCHEMAS = ('trades', 'mbp-10', 'definition', 'imbalance', 'brisk-quotes')
-SCHEMAS = (*LIVE_SCHEMAS, *BARS)
+SCHEMAS = ('trades', 'mbp-10', 'definition', 'imbalance', 'brisk-quotes', *BARS)
+# The Tokyo Stock Exchange's trading sessions since 2024-11-05, as [start, end) seconds after JST midnight;
+# the end second holds the closing auction's prints.
+SESSIONS = ((9 * 3600, 11 * 3600 + 30 * 60 + 1), (12 * 3600 + 30 * 60, 15 * 3600 + 30 * 60 + 1))
 MAX_SYMBOLS = 2000
 # The times a request may name, as UTC nanoseconds: 2000 to 2100.
 EARLIEST, LATEST = 946_684_800 * 10**9, 4_102_444_800 * 10**9
@@ -72,6 +76,16 @@ def symbols_of(symbols):
 def instrument_id(code: str) -> int:
     """A stable uint32 per JPX code: digits-only codes are their number, others 100,000 plus their base-36 value."""
     return int(code) if code.isdigit() else 100_000 + int(code, 36)
+
+
+def session_pieces(begin, end):
+    """[begin, end) (numpy arrays of UTC ns) clipped to each trading session of its JST day; a span outside the
+    sessions keeps its whole self. A bar is covered when every non-empty piece is."""
+    day = (begin + JST_NS) // DAY_NS * DAY_NS - JST_NS
+    pieces = [(np.maximum(begin, day + low * 10**9), np.minimum(end, day + high * 10**9)) for low, high in SESSIONS]
+    # A bar longer than a day (none) or outside every session is judged on its whole span.
+    outside = np.all([high <= low for low, high in pieces], axis=0)
+    return [(np.where(outside, begin, low), np.where(outside, end, high)) for low, high in pieces]
 
 
 # Projections

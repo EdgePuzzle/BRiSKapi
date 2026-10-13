@@ -9,15 +9,18 @@ A feed started with a gateway (`brisk live` does by default; briskapi.connect(ga
 decoded batches to Live clients on this computer only. It listens on 127.0.0.1 and admits a client only
 with the key it writes, with its port, to an owner-only file (~/.config/brisk/gateway/DATASET.json), which
 Live reads. Each client turns the batches into the records the cloud API returns (briskapi.records), so
-a record is the same live as in history. Only the feed signs in to the broker.
+a record is the same live as in history, and builds OHLCV bars from the trades it receives. Only the feed
+signs in to the broker.
 
-The protocol (newline-delimited JSON, version 1): the client sends {"version", "key", "dataset", "symbols",
-"replay", "snapshot"}; the gateway answers {"gateway": "session", ...} with the trading day's bootstrap
-(its master, without quotes) and, if asked, each security's current quote; then, if asked and the day
-is running, the day so far exactly as the decoder wrote it; then {"gateway": "live"}; then each batch as
-it arrives (only the asked symbols' master entries, quotes and trades), and last {"gateway": "closed"}.
-A client that falls more than MAX_BEHIND bytes behind the feed is sent {"gateway": "error"} and dropped,
-so a slow reader never slows the feed or its recording.
+The protocol (newline-delimited JSON, version 1). The client sends {"version", "key", "dataset"} and the
+gateway answers {"gateway": "session"}. Then, at any time, the client sends {"subscribe": [ids], "symbols",
+"replay", "snapshot"}, and the gateway answers in its stream, in order: {"gateway": "subscribed", "id",
+"bootstrap", "snapshot", "replay"} with the trading day's bootstrap (master, no quotes) if the session lacks
+it and, if asked, those symbols' current quotes; then, if asked and the day is running, the day so far
+exactly as the decoder wrote it, and {"gateway": "live", "id"}. Every batch is passed on as it arrives,
+with only the quotes and trades of the symbols subscribed so far, and last {"gateway": "closed"}. A client
+that falls more than MAX_BEHIND bytes behind the feed is sent {"gateway": "error"} and dropped, so a slow
+reader never slows the feed or its recording.
 """
 from __future__ import annotations
 
@@ -31,7 +34,8 @@ import queue
 import secrets
 import socket
 import threading
-from typing import Callable, NamedTuple
+import time
+from typing import Callable
 import warnings
 
 import numpy as np
@@ -47,7 +51,8 @@ HOST = '127.0.0.1'
 MAX_BEHIND = 1024**3
 MAX_CLIENTS = 32
 MAX_REQUEST = 1 << 20
-_LIVE = b'{"gateway":"live"}\n'
+# How far back a session looks for the feed's delay: the largest in this window is the one it allows for.
+LATENCY_WINDOW_NS = 10 * 10**9
 _END = object()
 
 
@@ -134,6 +139,8 @@ class Gateway:
                 self._day = None   # the feed packages and removes the day's file
             for client in self._clients:
                 client.send(batch, line)
+                if batch['type'] == 'bootstrap':
+                    client.known = self._bootstrap
 
     def close(self, status='closed', error=None):
         """End every session with the feed's status and stop serving."""
@@ -159,11 +166,12 @@ class Gateway:
         self._server.close()
 
     def _serve(self, sock):
-        client = replay = None
+        client = None
         try:
             sock.settimeout(10)
+            reader = sock.makefile('rb')
             try:
-                request = _read_line(sock.makefile('rb'), MAX_REQUEST)
+                request = _read_line(reader, MAX_REQUEST)
             except ValueError:
                 request = None
             sock.settimeout(None)
@@ -172,36 +180,23 @@ class Gateway:
                 return sock.sendall(_line({'gateway': 'error', 'error': refused}))
             if request.get('probe'):
                 return sock.sendall(_line({'gateway': 'probe', 'dataset': self.dataset}))
-            try:
-                codes = records.symbols_of(request.get('symbols'))
-            except (TypeError, ValueError) as error:
-                return sock.sendall(_line({'gateway': 'error', 'error': str(error)}))
             with self._lock:
                 if self._closed:
                     return sock.sendall(self._closed)
                 if len(self._clients) >= MAX_CLIENTS:
                     return sock.sendall(_line({'gateway': 'error', 'error': f'At most {MAX_CLIENTS} Live sessions at once'}))
-                # What the client is told, and the batches it is sent after, are taken under the lock that
-                # publish() holds: no batch is missed or sent twice.
-                bootstrap, quotes = self._bootstrap, list(self._quotes.values()) if request.get('snapshot') else None
-                if request.get('replay') and self._day:
-                    replay = (open(self._day[0], 'rb'), self._day[1])
-                client = _Client(sock, codes)
+                client = _Client(sock)
+                client.put(_line({'gateway': 'session', 'version': VERSION, 'dataset': self.dataset}))
                 self._clients.append(client)
-            if bootstrap is not None and codes is not None:
-                bootstrap = dict(bootstrap, master=[m for m in bootstrap['master'] if m['code'] in codes])
-            snapshot = None if quotes is None or bootstrap is None else \
-                sorted((q for q in quotes if codes is None or q['code'] in codes), key=lambda q: q['issue_id'])
-            client.run(_line({'gateway': 'session', 'version': VERSION, 'dataset': self.dataset, 'bootstrap': bootstrap,
-                              'snapshot': snapshot, 'replay': replay is not None}), replay)
-        except (OSError, ValueError, ConnectionError):
+            threading.Thread(target=self._listen, args=(client, reader), name='brisk-gateway-requests', daemon=True).start()
+            client.run()
+        except (OSError, ValueError):
             pass
         finally:
             if client:
                 with self._lock:
                     self._clients.remove(client)
-            if replay:
-                replay[0].close()
+                client.discard()
             sock.close()
 
     def _refuse(self, request):
@@ -213,11 +208,35 @@ class Gateway:
             return f'This gateway serves {self.dataset}'
         return None
 
+    def _listen(self, client, reader):
+        """A session's subscriptions, as it sends them; its leaving ends its sending too."""
+        try:
+            while True:
+                message = _read_line(reader, MAX_REQUEST)
+                ids = message.get('subscribe') if isinstance(message, dict) else None
+                if not (isinstance(ids, list) and ids and all(type(i) is int for i in ids)):
+                    return client.put(_line({'gateway': 'error', 'error': 'Expected {"subscribe": [ids], ...}'}), last=True)
+                try:
+                    codes = records.symbols_of(message.get('symbols'))
+                except (TypeError, ValueError) as error:
+                    return client.put(_line({'gateway': 'error', 'error': str(error)}), last=True)
+                with self._lock:
+                    # Taken under the lock that publish() holds: the answer comes after every batch the
+                    # session had without these symbols, and before every batch it gets with them.
+                    client.widen(codes)
+                    bootstrap = self._bootstrap if client.known is not self._bootstrap else None
+                    client.known = self._bootstrap
+                    quotes = list(self._quotes.values()) if message.get('snapshot') and self._bootstrap else None
+                    replay = (open(self._day[0], 'rb'), self._day[1]) if message.get('replay') and self._day else None
+                    client.put(_Subscribed(ids, codes, bootstrap, quotes, replay))
+        except (OSError, ValueError):
+            client.end()
+
 
 def _filtered(batch, codes):
-    """A batch's line with only these codes' master entries, quotes and trades; None when nothing is left."""
+    """A batch's line with only these codes' quotes and trades (the master whole); None when nothing is left."""
     out = dict(batch)
-    for name in ('master', 'quotes', 'trades'):
+    for name in ('quotes', 'trades'):
         if name in batch:
             out[name] = [item for item in batch[name] if item['code'] in codes]
     if batch['type'] in ('quotes', 'history') and not out.get('quotes') and not out.get('trades'):
@@ -225,34 +244,82 @@ def _filtered(batch, codes):
     return _line(out)
 
 
+class _Subscribed:
+    """The gateway's answer to a subscription, written out on the session's thread: the line saying so (with
+    the bootstrap and quotes it needs), then the replay, if any."""
+
+    def __init__(self, ids, codes, bootstrap, quotes, replay):
+        self.ids, self.codes, self.bootstrap, self.quotes, self.replay = ids, codes, bootstrap, quotes, replay
+
+    def send(self, sock):
+        snapshot = None if self.quotes is None else \
+            sorted((q for q in self.quotes if self.codes is None or q['code'] in self.codes), key=lambda q: q['issue_id'])
+        sock.sendall(_line({'gateway': 'subscribed', 'id': self.ids, 'bootstrap': self.bootstrap, 'snapshot': snapshot,
+                            'replay': self.replay is not None}))
+        if self.replay:
+            try:
+                sock.sendfile(self.replay[0], 0, self.replay[1])
+            finally:
+                self.close()
+            sock.sendall(_line({'gateway': 'live', 'id': self.ids}))
+
+    def close(self):
+        if self.replay:
+            self.replay[0].close()
+
+
 class _Client:
     """One session's outbox: what publish() hands it is sent on the session's own thread."""
 
-    def __init__(self, sock, codes):
-        self.sock, self.codes = sock, codes
+    def __init__(self, sock):
+        self.sock, self.codes, self.known = sock, set(), None   # the symbols so far; the bootstrap it has
         self._items, self._behind, self._last = deque(), 0, False
         self._ready = threading.Condition()
+
+    def widen(self, codes):
+        self.codes = None if codes is None or self.codes is None else self.codes | codes
 
     def send(self, batch, line):
         data = line if self.codes is None else _filtered(batch, self.codes)
         if data:
             self.put(data)
 
-    def put(self, data, last=False):
+    def put(self, item, last=False):
+        size = len(item) if isinstance(item, bytes) else 0
         with self._ready:
             if self._last:
+                if isinstance(item, _Subscribed):
+                    item.close()
                 return
-            if self._behind + len(data) > MAX_BEHIND and not last:
+            if self._behind + size > MAX_BEHIND and not last:
                 # A slow reader is dropped, never waited for: the feed and its recording go on.
-                self._items.clear()
-                self._behind = 0
-                data, last = _line({'gateway': 'error', 'error': 'This session fell more than '
-                                    f'{MAX_BEHIND // 1024**2} MB behind the feed and was dropped'}), True
+                self._clear()
+                item, size, last = _line({'gateway': 'error', 'error': 'This session fell more than '
+                                          f'{MAX_BEHIND // 1024**2} MB behind the feed and was dropped'}), 0, True
                 threading.Timer(10, self._stop).start()
-            self._items.append(data)
-            self._behind += len(data)
+            self._items.append(item)
+            self._behind += size
             self._last = last
             self._ready.notify()
+
+    def end(self):
+        """The session left: send nothing more."""
+        with self._ready:
+            self._clear()
+            self._items.append(None)
+            self._last = True
+            self._ready.notify()
+
+    def discard(self):
+        with self._ready:
+            self._clear()
+
+    def _clear(self):
+        for item in self._items:
+            if isinstance(item, _Subscribed):
+                item.close()
+        self._items.clear()
+        self._behind = 0
 
     def _stop(self):
         try:
@@ -260,18 +327,20 @@ class _Client:
         except OSError:
             pass
 
-    def run(self, header, replay):
-        self.sock.sendall(header)
-        if replay:
-            self.sock.sendfile(replay[0], 0, replay[1])
-        self.sock.sendall(_LIVE)
+    def run(self):
         while True:
             with self._ready:
                 self._ready.wait_for(lambda: self._items)
-                data = self._items.popleft()
-                self._behind -= len(data)
+                item = self._items.popleft()
+                if isinstance(item, bytes):
+                    self._behind -= len(item)
                 last = self._last and not self._items
-            self.sock.sendall(data)
+            if item is None:
+                return
+            if isinstance(item, bytes):
+                self.sock.sendall(item)
+            else:
+                item.send(self.sock)
             if last:
                 return
 
@@ -298,11 +367,106 @@ class Record(dict):
         return f'Record({self.schema!r}, {dict.__repr__(self)})'
 
 
-class _Subscription(NamedTuple):
-    schema: str
-    symbols: set | None
-    start: int | None
-    snapshot: bool
+class _Subscription:
+    def __init__(self, id, schema, symbols, start, snapshot):
+        self.id, self.schema, self.symbols, self.start, self.snapshot = id, schema, symbols, start, snapshot
+        self.active = False    # gets the live batches (once the gateway has confirmed it, after any replay)
+        self.bars = _Bars(records.BARS[schema]) if schema in records.BARS else None
+
+
+class _Bars:
+    """One subscription's OHLCV bars in progress, built from its trades as the cloud builds them: the open is the
+    first trade by (ts_event, frame, place in the frame), the close the last. A bar is given as soon as the
+    feed's clock reaches its end, and only if the trades it saw cover it as the cloud's rule asks: its whole
+    span within the trading sessions lies between `first` (where they begin, UTC ns) and the clock. With
+    `first` None (a replay of the demo, whose cloud bars have no such rule) every bar is given. The clock is
+    the latest batch's, or this computer's less the feed's delay (Live._tick). A trade that arrives after its
+    own bar has ended goes into the next bar still open, so every trade counts and bars come in order (the
+    cloud's bars place it by its own time)."""
+
+    def __init__(self, length):
+        self.length = length
+        self.begin(None)
+        self.started = False
+
+    def begin(self, first):
+        self.first, self.started = first, True
+        self.open = {}         # bar start -> {code: [open key, open, high, low, close key, close, volume]}
+        self.horizon = None    # the clock the bars have been given to
+        self._spans = {}
+
+    def add(self, trades):
+        """Rows of the trades schema."""
+        if not self.started or not trades.num_rows:
+            return
+        times = pc.cast(trades.column('ts_event'), pa.int64()).to_pylist()
+        for code, ts, frame, trade, price, size in zip(trades.column('symbol').to_pylist(), times,
+                                                      trades.column('sequence').to_pylist(),
+                                                      trades.column('trade_id').to_pylist(),
+                                                      trades.column('price').to_pylist(), trades.column('size').to_pylist()):
+            start = (ts + records.JST_NS) // self.length * self.length - records.JST_NS
+            while self.horizon is not None and self._span(start)[0] <= self.horizon:
+                start += self.length    # its bar has ended: the next one still open
+            key = (ts, frame, int(trade.split('-')[1]))
+            bar = self.open.setdefault(start, {}).get(code)
+            if bar is None:
+                self.open[start][code] = [key, price, price, price, key, price, size]
+                continue
+            if key < bar[0]:
+                bar[0], bar[1] = key, price
+            if key >= bar[4]:
+                bar[4], bar[5] = key, price
+            bar[2], bar[3], bar[6] = max(bar[2], price), min(bar[3], price), bar[6] + size
+
+    def _span(self, start):
+        """Where a bar ends for its trades, and its session pieces ((low, high), UTC ns; None without the rule)."""
+        if start not in self._spans:
+            if self.first is None:
+                self._spans[start] = start + self.length, None
+            else:
+                pieces = [(int(low[0]), int(high[0])) for low, high in
+                          records.session_pieces(np.array([start]), np.array([start + self.length])) if high[0] > low[0]]
+                self._spans[start] = max(high for _, high in pieces), pieces
+        return self._spans[start]
+
+    def due(self):
+        """When the next bar ends (UTC ns, BRiSK's clock), or None."""
+        return min((self._span(start)[0] for start in self.open), default=None)
+
+    def ready(self, clock, final=False):
+        """[(bar start, code, (open, high, low, close, volume))] for the bars done by `clock` (UTC ns), or, with
+        `final` (the day's end), for every bar left."""
+        self.horizon = clock if self.horizon is None else max(self.horizon, clock)
+        out = []
+        for start in sorted(self.open):
+            end, pieces = self._span(start)
+            covered = pieces is None or all(self.first <= low and high <= clock + 1 for low, high in pieces)
+            if final or clock >= end:
+                bars = self.open.pop(start)
+                if covered:
+                    out += [(start, code, (b[1], b[2], b[3], b[5], b[6])) for code, b in bars.items()]
+        return out
+
+
+class _Latency:
+    """How far the feed's clock runs behind this computer's: for each live batch, when the session took it
+    in less BRiSK's stamp (the network's delay, the hop through the gateway, and the two clocks' difference).
+    The largest over the last LATENCY_WINDOW_NS is allowed for (a sliding maximum); once quiet, the last."""
+
+    def __init__(self):
+        self._ages = deque()   # (taken in, age), ages decreasing
+
+    def add(self, taken, clock):
+        age = taken - clock
+        while self._ages and self._ages[-1][1] <= age:
+            self._ages.pop()
+        self._ages.append((taken, age))
+        while self._ages[0][0] < taken - LATENCY_WINDOW_NS:
+            self._ages.popleft()
+
+    def clock(self, now):
+        """The feed's clock as it stands here at `now` (UTC ns), or None before any live batch."""
+        return now - self._ages[0][1] if self._ages else None
 
 
 class _Day:
@@ -311,19 +475,26 @@ class _Day:
 
     def __init__(self, bootstrap):
         self.header = {**bootstrap, 'master': [], 'quotes': [], 'trades': []}
+        self.date = bootstrap['trading_date']
         self.equity = _parquet.equity_table(bootstrap)
-        self.midnight = _parquet.midnight_ns(bootstrap['trading_date'])
+        self.midnight = _parquet.midnight_ns(self.date)
+        self.first = self.midnight + bootstrap['source_time_us'] * 1000
         self.carry = {}
+
+    def clock(self, batch):
+        return self.midnight + batch['source_time_us'] * 1000
 
 
 class Live:
     """Databento-style live records from the feed on this computer (see the module docstring).
 
-    Names follow databento.Live: subscribe() before start(), then iterate, or add_callback() / add_stream()
-    and block_for_close(). Records are briskapi.records' schemas, as Historical returns them, in the order
-    the feed receives them (within a batch, as Historical orders them). `start` replays the feed's trading
-    day from that time before going live (as far back as the feed has it: from its start, and the day's
-    trades its snapshot restored); `snapshot=True` begins with each security's current quote.
+    Names follow databento.Live: subscribe(), then iterate, or add_callback() / add_stream(), start() and
+    block_for_close(); subscribe() also works once the session runs. Records are briskapi.records' schemas, as
+    Historical returns them, OHLCV bars included, in the order the feed receives them (within a batch, as
+    Historical orders them). `start` replays the feed's trading day from that time first (as far back as the
+    feed has it: from its own start, plus the day's trades its snapshot restored); `snapshot=True` begins with
+    each security's current quote. A bar subscription gives the bars its trades cover: with `start`, from the
+    feed's start; without, those that begin after it joined.
     """
 
     def __init__(self, key: str | None = None, gateway: str = HOST, port: int | None = None):
@@ -338,6 +509,11 @@ class Live:
         self._thread = None
         self._error = None
         self._day = None
+        self._needles = ()
+        self._replay = None              # while one runs: [the subscriptions it is for, its own day]
+        self._latency = _Latency()
+        self._busy = threading.Lock()    # one batch, or one tick, at a time
+        self._write = threading.Lock()
         self._stopping = False
         self._done = threading.Event()
 
@@ -346,18 +522,17 @@ class Live:
         return f'Live(dataset={self.dataset!r}, {state})'
 
     def subscribe(self, dataset, schema, symbols='ALL_SYMBOLS', stype_in='raw_symbol', start=None, snapshot=False):
-        """Ask for `schema`'s records of `symbols` (JPX codes). `start` (a time, a date or UTC ns; 0 for all the
-        feed has) replays from then; `snapshot` starts mbp-10, imbalance or brisk-quotes with the current quotes."""
-        if self._thread:
-            raise BriskError('Subscribe before start(): a session streams the subscriptions it started with')
+        """Ask for `schema`'s records of `symbols` (JPX codes), before or during the session. `start` (a time, a
+        date or UTC ns; 0 for all the feed has) replays from then; `snapshot` starts mbp-10, imbalance or
+        brisk-quotes with the current quotes."""
+        if self._done.is_set():
+            raise BriskError('This session has ended; start another Live')
         if dataset not in records.DATASETS:
             raise ValueError(f'Unknown dataset {dataset!r}; one of {", ".join(records.DATASETS)}')
         if self.dataset not in (None, dataset):
             raise ValueError(f'This session streams {self.dataset}; use another Live for {dataset}')
-        if schema in records.BARS:
-            raise ValueError('OHLCV bars come only from the cloud API (briskapi.Historical)')
-        if schema not in records.LIVE_SCHEMAS:
-            raise ValueError(f'Unknown schema {schema!r}; one of {", ".join(records.LIVE_SCHEMAS)}')
+        if schema not in records.SCHEMAS:
+            raise ValueError(f'Unknown schema {schema!r}; one of {", ".join(records.SCHEMAS)}')
         if stype_in not in (None, '', 'raw_symbol'):
             raise ValueError('Only stype_in=raw_symbol (JPX codes) is supported')
         if snapshot and start is not None:
@@ -371,8 +546,11 @@ class Live:
                              'or briskapi.connect(..., gateway=True)')
         self._key, self._port = self._key or info['key'], self._port or info['port']
         self.dataset = dataset
-        self._subscriptions.append(_Subscription(schema, records.symbols_of(symbols),
-                                                 None if start is None else records.timestamp(start), bool(snapshot)))
+        subscription = _Subscription(len(self._subscriptions), schema, records.symbols_of(symbols),
+                                     None if start is None else records.timestamp(start), bool(snapshot))
+        self._subscriptions.append(subscription)
+        if self._thread:
+            self._ask([subscription])
 
     def add_callback(self, record_callback: Callable, exception_callback: Callable | None = None):
         """Call `record_callback(record)` for each record, on the session's thread; an exception it raises goes to
@@ -390,14 +568,9 @@ class Live:
             raise BriskError('This session has started; a Live streams once')
         if not self._subscriptions:
             raise BriskError('Subscribe to something first')
-        wanted = [s.symbols for s in self._subscriptions]
-        request = {'version': VERSION, 'key': self._key, 'dataset': self.dataset,
-                   'symbols': None if None in wanted else sorted(set().union(*wanted)),
-                   'replay': any(s.start is not None for s in self._subscriptions),
-                   'snapshot': any(s.snapshot for s in self._subscriptions)}
         try:
             self._sock = socket.create_connection((self._host, self._port), timeout=10)
-            self._sock.sendall(_line(request))
+            self._sock.sendall(_line({'version': VERSION, 'key': self._key, 'dataset': self.dataset}))
             self._lines = self._sock.makefile('rb')
             header = _read_line(self._lines)
         except (OSError, ValueError) as error:
@@ -410,10 +583,25 @@ class Live:
             raise BriskError('The feed has ended' if header.get('gateway') == 'closed'
                              else f'The feed refused the session: {header.get("error")}')
         self._sock.settimeout(None)
-        self._needles = None if request['symbols'] is None else \
-            tuple(f'"code":"{code}"'.encode() for code in request['symbols'])
-        self._thread = threading.Thread(target=self._run, args=(header,), name='brisk-live', daemon=True)
+        self._thread = threading.Thread(target=self._run, name='brisk-live', daemon=True)
         self._thread.start()
+        threading.Thread(target=self._tick, name='brisk-live-bars', daemon=True).start()
+        self._ask(self._subscriptions)
+
+    def _ask(self, subscriptions):
+        """Send subscriptions (one request: one replay at most); replayed lines of other symbols are skipped
+        unread."""
+        wanted = [s.symbols for s in self._subscriptions]
+        self._needles = None if None in wanted else tuple(f'"code":"{c}"'.encode() for c in sorted(set().union(*wanted)))
+        symbols = [s.symbols for s in subscriptions]
+        try:
+            with self._write:
+                self._sock.sendall(_line({'subscribe': [s.id for s in subscriptions],
+                                          'symbols': None if None in symbols else sorted(set().union(*symbols)),
+                                          'replay': any(s.start is not None for s in subscriptions),
+                                          'snapshot': any(s.snapshot for s in subscriptions)}))
+        except OSError:
+            raise BriskError('This session has ended; start another Live') from None
 
     def __iter__(self):
         if self._queue is None:
@@ -454,42 +642,36 @@ class Live:
 
     # The session's thread
 
-    def _run(self, header):
-        replaying, subs, ended = header['replay'], self._subscriptions, False
+    def _run(self):
+        ended = False
         try:
-            if header['bootstrap'] is not None:
-                self._new_day(header['bootstrap'])
-                live = subs if not replaying else [s for s in subs if s.start is None]
-                self._deliver(self._definitions(live))
-                if header['snapshot'] is not None:
-                    self._deliver(self._project(dict(self._day.header, quotes=header['snapshot']),
-                                                [s for s in subs if s.snapshot], snapshot=True))
             for line in self._lines:
+                taken = time.time_ns()
                 if line.startswith(b'{"gateway"'):
                     control = json.loads(line)
-                    if control['gateway'] == 'live':
-                        replaying = False
-                        continue
                     if control['gateway'] == 'error' or control.get('status') == 'failed':
                         raise BriskError(f'The feed ended the session: {control.get("error")}')
-                    ended = True
-                    break
+                    if control['gateway'] == 'closed':
+                        ended = True
+                        break
+                    with self._busy:
+                        if control['gateway'] == 'subscribed':
+                            self._replay = self._subscribed(control)
+                        else:   # live: the replay is over
+                            for s in self._replay[0]:
+                                s.active = True
+                            self._replay = None
+                    continue
                 if self._needles and line.startswith((b'{"type":"quotes"', b'{"type":"history"')) \
                         and not any(needle in line for needle in self._needles):
                     continue
-                batch = json.loads(line)
-                if batch['type'] == 'bootstrap':
-                    self._new_day(batch)
-                if self._day is None:
-                    continue
-                takers = [s for s in subs if s.start is not None] if replaying else subs
-                found = self._definitions(takers) if batch['type'] == 'bootstrap' else []
-                if batch['type'] != 'end':
-                    found += self._project(batch, takers)
-                self._deliver(found)
+                with self._busy:
+                    self._take(json.loads(line), taken)
             if not ended and not self._stopping:
                 raise BriskError('The feed closed the connection without ending the session')
         except Exception as error:  # noqa: BLE001 - every failure ends the session visibly
+            if isinstance(error, OSError):   # a reset, as when the feed's process is killed
+                error = BriskError(f'The feed closed the connection without ending the session ({error})')
             if not self._stopping:
                 self._error = error if isinstance(error, BriskError) else BriskError(f'Live session failed: {error!r}')
         finally:
@@ -501,45 +683,107 @@ class Live:
             if self._queue is not None:
                 self._put(_END, always=True)
 
+    def _take(self, batch, taken):
+        """One batch: the records and bars it gives, to the subscriptions it is for."""
+        replay = self._replay
+        if replay is not None:
+            if batch['type'] == 'bootstrap':
+                replay[1] = _Day(batch)
+            day, takers = replay[1], replay[0]
+        else:
+            if batch['type'] == 'bootstrap':
+                self._new_day(batch)
+            day, takers = self._day, [s for s in self._subscriptions if s.active]
+        if day is None:
+            return
+        if replay is None:
+            self._latency.add(taken, day.clock(batch))
+        whole = replay is not None or batch['type'] == 'bootstrap'
+        for s in takers:
+            if s.bars and (batch['type'] == 'bootstrap' or not s.bars.started):
+                # Seen from the day's start (a replay, or a new day), bars are covered as the cloud's (the
+                # demo's: every bar); joined later, from the first batch seen.
+                s.bars.begin(None if whole and self.dataset == 'XTKS.BRISKDEMO' else day.first if whole else day.clock(batch))
+        self._deliver((self._definitions(takers, day) if batch['type'] == 'bootstrap' else [])
+                      + self._project(batch, takers, day, replayed=replay is not None))
+
+    def _tick(self):
+        """Give the bars whose end the feed's clock has passed by this computer's, allowing for the feed's delay,
+        when no later batch has said so: a quiet symbol's bar is not held until its next update."""
+        wait = 0.25
+        while not self._done.wait(wait):
+            wait = 0.25
+            with self._busy:
+                bars = [s for s in self._subscriptions if s.bars and s.active and s.bars.started]
+                clock = self._latency.clock(time.time_ns())
+                if self._replay is not None or self._day is None or clock is None or not bars:
+                    continue   # during a replay, live batches wait behind it: the clock says nothing of them
+                publisher, found = records.DATASETS[self.dataset][0], []
+                for index, s in enumerate(bars):
+                    found += _ordered(_bar_table(s.bars.ready(clock), publisher), s, index)
+                found.sort(key=lambda item: item[:3])
+                self._deliver([item[3] for item in found])
+                due = [d for d in (s.bars.due() for s in bars) if d is not None]
+                if due:
+                    wait = min(0.25, max(0.001, (min(due) - clock) / 1e9))
+
+    def _subscribed(self, control):
+        """Take the gateway's answer to a subscription: what the subscriptions start with, and the replay to come."""
+        group = [self._subscriptions[i] for i in control['id']]
+        if control['bootstrap'] is not None:
+            self._new_day(control['bootstrap'])
+        replaying = [s for s in group if s.start is not None] if control['replay'] else []
+        live = [s for s in group if s not in replaying]
+        for s in live:
+            s.active = True
+        found = self._definitions(live, self._day)
+        if control['snapshot'] is not None and self._day is not None:
+            found += self._project(dict(self._day.header, quotes=control['snapshot']),
+                                   [s for s in group if s.snapshot], self._day, snapshot=True)
+        self._deliver(found)
+        return [replaying, None] if replaying else None
+
     def _new_day(self, bootstrap):
         self._day = _Day(bootstrap)
         self.symbology_map = {records.instrument_id(m['code']): m['code'] for m in bootstrap['master']}
 
-    def _definitions(self, takers):
+    def _definitions(self, takers, day):
         wanted = [s for s in takers if s.schema == 'definition']
-        if not wanted or self._day is None:
+        if not wanted or day is None:
             return []
-        table = records.definition(self._day.equity, self._day.midnight, records.DATASETS[self.dataset][0]) \
+        table = records.definition(day.equity, day.midnight, records.DATASETS[self.dataset][0]) \
             .sort_by([('instrument_id', 'ascending')])
         return [Record(row, 'definition') for s in wanted for row in _only(table, s.symbols).to_pylist()]
 
-    def _project(self, batch, takers, snapshot=False):
-        """The records of one batch for these subscriptions, ordered as Historical orders them."""
-        day = self._day
-        depths_wanted = any(s.schema in ('mbp-10', 'imbalance', 'brisk-quotes') for s in takers)
-        # Trades are read whenever a subscription wants them, so trade IDs continue exactly after a replay.
-        trades_wanted = not snapshot and any(s.schema == 'trades' for s in self._subscriptions)
-        if not (batch.get('quotes') or batch.get('trades')) or not (depths_wanted or trades_wanted):
-            return []
-        batches = [dict(batch, master=[])] if batch['type'] == 'bootstrap' else [day.header, batch]
-        depths, trades = _parquet.stream_tables(batches, None if snapshot else day.carry, depths_wanted, trades_wanted)
+    def _project(self, batch, takers, day, snapshot=False, replayed=False):
+        """One batch's records for these subscriptions, ordered as Historical orders them, and the bars it
+        completes."""
+        quoted = ('mbp-10', 'imbalance', 'brisk-quotes')
+        depths_wanted = any(s.schema in quoted for s in takers)
+        # Trades are read whenever a subscription wants them (on the live day, any), so trade IDs carry on exactly.
+        traders = takers if replayed else self._subscriptions
+        trades_wanted = not snapshot and any(s.schema == 'trades' or s.bars for s in traders)
         publisher = records.DATASETS[self.dataset][0]
-        received = batch.get('received_unix_ms') if self.dataset == 'XTKS.BRISK' else None
         found = []
-        for index, s in enumerate(takers):
-            if s.schema == 'definition' or (snapshot and not s.snapshot):
-                continue
-            table = trades if s.schema == 'trades' else depths
-            if table is None or not table.num_rows:
-                continue
-            ts_recv = pa.array(np.full(table.num_rows, received * 10**6), records.TIME) if received else None
-            out = _only(records.project(s.schema, table, publisher, ts_recv, day.equity), s.symbols)
-            if s.start is not None:
-                out = out.filter(pc.greater_equal(pc.cast(out.column('ts_event'), pa.int64()), s.start))
-            out = out.sort_by([('ts_event', 'ascending'), ('instrument_id', 'ascending'), ('sequence', 'ascending')])
-            times = pc.cast(out.column('ts_event'), pa.int64()).to_pylist()
-            ids = out.column('instrument_id').to_pylist()
-            found += [(t, i, index, Record(row, s.schema)) for t, i, row in zip(times, ids, out.to_pylist())]
+        if (batch.get('quotes') or batch.get('trades')) and (depths_wanted or trades_wanted):
+            batches = [dict(batch, master=[])] if batch['type'] == 'bootstrap' else [day.header, batch]
+            depths, trades = _parquet.stream_tables(batches, None if snapshot else day.carry, depths_wanted, trades_wanted)
+            received = batch.get('received_unix_ms') if self.dataset == 'XTKS.BRISK' else None
+            for index, s in enumerate(takers):
+                table = trades if s.schema == 'trades' or s.bars else depths if s.schema in quoted else None
+                if table is None or not table.num_rows or (snapshot and not s.snapshot):
+                    continue
+                ts_recv = pa.array(np.full(table.num_rows, received * 10**6), records.TIME) if received else None
+                out = _only(records.project('trades' if s.bars else s.schema, table, publisher, ts_recv, day.equity), s.symbols)
+                if s.bars:
+                    s.bars.add(out)
+                    continue
+                found += _ordered(out, s, index)
+        if not snapshot:
+            clock = day.clock(batch)
+            for index, s in enumerate(takers):
+                if s.bars:
+                    found += _ordered(_bar_table(s.bars.ready(clock, final=batch['type'] == 'end'), publisher), s, index)
         if len(takers) > 1:
             found.sort(key=lambda item: item[:3])
         return [item[3] for item in found]
@@ -578,6 +822,32 @@ class Live:
 
 def _only(table, symbols):
     return table if symbols is None else table.filter(pc.is_in(table.column('symbol'), value_set=pa.array(sorted(symbols))))
+
+
+def _bar_table(bars, publisher):
+    """Bars from _Bars.ready as records of an OHLCV schema."""
+    starts, codes, values = zip(*bars) if bars else ((), (), ())
+    opens, highs, lows, closes, volumes = zip(*values) if bars else ((),) * 5
+    return pa.table({'ts_event': pa.array(starts, records.TIME), 'publisher_id': pa.array([publisher] * len(starts), pa.uint16()),
+                     'instrument_id': pa.array([records.instrument_id(c) for c in codes], pa.uint32()),
+                     'open': pa.array(opens, pa.float64()), 'high': pa.array(highs, pa.float64()),
+                     'low': pa.array(lows, pa.float64()), 'close': pa.array(closes, pa.float64()),
+                     'volume': pa.array(volumes, pa.uint64()), 'symbol': pa.array(codes, pa.string())})
+
+
+def _ordered(table, subscription, index):
+    """(ts_event, instrument_id, subscription index, record) for a subscription's records from `start` on, in
+    Historical's order."""
+    if not table.num_rows:
+        return []
+    if subscription.start is not None:
+        table = table.filter(pc.greater_equal(pc.cast(table.column('ts_event'), pa.int64()), subscription.start))
+    keys = [('ts_event', 'ascending'), ('instrument_id', 'ascending')]
+    table = table.sort_by(keys + ([('sequence', 'ascending')] if 'sequence' in table.column_names else []))
+    times = pc.cast(table.column('ts_event'), pa.int64()).to_pylist()
+    schema = subscription.schema
+    return [(t, i, index, Record(row, schema))
+            for t, i, row in zip(times, table.column('instrument_id').to_pylist(), table.to_pylist())]
 
 
 def _report(on_error, error, where):

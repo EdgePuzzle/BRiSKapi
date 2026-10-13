@@ -7,8 +7,9 @@ briskapi が返す Parquet（および CSV と JSON）の中身を、列ごと�
 
 - **クラウド API**（`briskapi.Historical`、`brisk query`）：Databento の形のレコードで、
   リクエストごとに1つのスキーマ。[クラウド API のレコード](#クラウド-api-のレコード)。`briskapi.Live` は
-  バーを除く同じレコードを、お使いのコンピューターのフィードからライブで返します。同じセッションなら、
-  列、型、値は同じです。
+  同じレコードを、お使いのコンピューターのフィードからライブで返します。同じセッションなら、列、型、値は
+  同じです（ただし、バーが終わった後にこのコンピューターに届いた約定は、ライブでは次のバーに数えられ、
+  クラウドではその約定自身の時刻で置かれます）。
 - **お使いのコンピューター上の記録**（`brisk record`、`brisk pull`、`brisk live --output`）：
   NautilusTrader v2 の構成の Parquet テーブル4つのフォルダーで、デコーダーが出力したすべてを
   含みます。[記録](#記録)。
@@ -221,7 +222,8 @@ Databento の名前に従います。
 | `stocks()`: `name`, `lot_size`, `base_price`, `limit_up`, `limit_down`, `tick_type`, `issue_type` | `definition`: `name`, `min_lot_size_round_lot`, `base_price`, `high_limit_price`, `low_limit_price`, `tick_type`, `issue_type` | |
 | その他の気配の項目（`last_price`、`volume`、`turnover` など） | `brisk-quotes`、同じ名前 | |
 
-OHLCV バーはクラウドにしかありません（`ohlcv-1s` 〜 `ohlcv-1d`）。`Ticker.candles()` は別のもので、
+OHLCV バー（`ohlcv-1s` 〜 `ohlcv-1d`）は、クラウド API から、または `briskapi.Live` でライブで得られ、
+手元にはありません。`Ticker.candles()` は別のもので、
 証券会社の BRiSK 自身のバーです。
 
 ## 記録

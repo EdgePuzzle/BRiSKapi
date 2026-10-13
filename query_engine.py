@@ -36,9 +36,6 @@ DEMO_SOURCE = 'historical_mock'
 ENCODINGS = {'parquet': ('application/vnd.apache.parquet', 'parquet'), 'csv': ('text/csv', 'csv'),
              'json': ('application/x-ndjson', 'json')}
 MAX_DAYS = 31
-# The Tokyo Stock Exchange's trading sessions since 2024-11-05, as [start, end) seconds after JST midnight;
-# the end second holds the closing auction's prints.
-SESSIONS = ((9 * 3600, 11 * 3600 + 30 * 60 + 1), (12 * 3600 + 30 * 60, 15 * 3600 + 30 * 60 + 1))
 BARS_ROOT = 'bars'    # bars/OWNER/YYYYMMDD/ohlcv-*.parquet
 
 
@@ -370,7 +367,7 @@ def covered(bars, length, recs):
     if not bars.num_rows:
         return bars
     starts = pc.cast(bars.column('ts_event'), pa.int64()).to_numpy()
-    pieces = _session_pieces(starts, starts + length)
+    pieces = records.session_pieces(starts, starts + length)
     symbols = bars.column('symbol')
     # Securities in the same recordings share their windows (usually every security is in every recording), so
     # each such group is one vectorized pass, not one per security.
@@ -401,15 +398,6 @@ def _merge(windows):
         else:
             merged.append([low, high])
     return merged
-
-
-def _session_pieces(begin, end):
-    """[begin, end) clipped to each trading session of its JST day; a bar outside the sessions keeps its span."""
-    day = (begin + JST_NS) // DAY_NS * DAY_NS - JST_NS
-    pieces = [(np.maximum(begin, day + low * 10**9), np.minimum(end, day + high * 10**9)) for low, high in SESSIONS]
-    # A bar longer than a day (none) or outside every session is judged on its whole span.
-    outside = np.all([high <= low for low, high in pieces], axis=0)
-    return [(np.where(outside, begin, low), np.where(outside, end, high)) for low, high in pieces]
 
 
 def _dedupe(table, keys):

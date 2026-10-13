@@ -15,7 +15,7 @@ import briskapi as brisk
 import briskapi.cli as cli
 from briskapi import _gateway, _live, records
 from test_api import market
-from test_query import OWNER, archive, at, isolated, query, session  # noqa: F401
+from test_query import OPEN_US, OWNER, archive, at, isolated, query, session, trades_at  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -55,15 +55,16 @@ def broker_feed(script, **options):
 
 
 def test_live_records_are_the_cloud_apis(archive, decoder):
-    """Replayed from the day's start, then live: every schema's records equal the cloud API's for that session."""
+    """Replayed from the day's start, then live: every schema's records, bars included, equal the cloud API's for
+    that session."""
     s3, _, put = archive
-    batches = session(0, 40)
+    batches = session(0, 150)
     put(batches)
-    script, release = decoder(batches, holds=[20])
+    script, release = decoder(batches, holds=[70])
     feed = broker_feed(script)
-    wait_for(lambda: feed.seq == 19)
+    wait_for(lambda: feed.seq == 69)
     whole, part = brisk.Live(), brisk.Live()
-    for schema in records.LIVE_SCHEMAS:
+    for schema in records.SCHEMAS:
         whole.subscribe(dataset='XTKS.BRISK', schema=schema, start=0)
     part.subscribe(dataset='XTKS.BRISK', schema='trades', symbols=['167A'], start=at(25))
     got = collections.defaultdict(list)
@@ -72,13 +73,14 @@ def test_live_records_are_the_cloud_apis(archive, decoder):
     later = []
     reader = threading.Thread(target=lambda: later.extend(part))
     reader.start()
-    release(20)
+    release(70)
     whole.block_for_close(timeout=30)
     reader.join(30)
     feed.wait()
-    for schema in records.LIVE_SCHEMAS:
+    for schema in records.SCHEMAS:
         expected = query(s3, OWNER, dataset='XTKS.BRISK', schema=schema, start='2026-10-13').to_pylist()
-        assert expected and got[schema] == expected, schema
+        assert (expected or schema in {'ohlcv-1h', 'ohlcv-1d'}) and got[schema] == expected, schema
+    assert [bar['ts_event'].minute for bar in got['ohlcv-1m']] == [0, 0, 1, 1]   # 09:02 is not covered
     expected = query(s3, OWNER, dataset='XTKS.BRISK', schema='trades', symbols='167A', start=at(25)).to_pylist()
     assert expected and [dict(r) for r in later] == expected
     assert later[0].schema == 'trades' and later[0].price == later[0]['price'] and later[0].symbol == '167A'
@@ -109,6 +111,75 @@ def test_a_session_joining_later_starts_from_now(decoder):
     assert (update.flags, update.sequence) == (0, 3)
     # Broker records carry the local receipt time.
     assert update.ts_recv == dt.datetime.fromtimestamp(1632700800, dt.timezone.utc) != update.ts_event
+
+
+def test_subscriptions_join_a_running_session(decoder):
+    """Subscribing during a session: new symbols, a replay of the day for that subscription alone, and bars that
+    begin once it has joined."""
+    batches = session(0, 200)
+    script, release = decoder(batches, holds=[1, 100])
+    feed = broker_feed(script)
+    live = brisk.Live()
+    live.subscribe('XTKS.BRISK', 'trades', symbols='7203')
+    got = collections.defaultdict(list)
+    live.add_callback(lambda r: got[r.schema, r.symbol].append(r))
+    live.start()
+    wait_for(lambda: live._subscriptions[0].active)
+    release(1)
+    wait_for(lambda: len(got['trades', '7203']) == 9)
+    live.subscribe('XTKS.BRISK', 'trades', symbols='167A', start=0)       # the day so far, for 167A alone
+    live.subscribe('XTKS.BRISK', 'ohlcv-1m', symbols='7203')             # bars beginning after it joined
+    live.subscribe('XTKS.BRISK', 'imbalance', symbols='167A', snapshot=True)
+    release(100)
+    live.block_for_close(timeout=30)
+    feed.wait()
+    assert [t.trade_id for t in got['trades', '167A']] == [f'{s + 1}-0' for s in range(30, 201, 30)]
+    assert [t.sequence for t in got['trades', '7203']] == [s + 1 for s in range(10, 201, 10)]   # each once
+    # Joined at 09:01:40: the 09:02 bar is the first it covers, and 09:03 is not, ending at 09:03:20.
+    minute = [(price10 / 10, size) for s in range(120, 180) for i, price10, size in trades_at(s) if i == 0]
+    assert [(b.ts_event.minute, b.open, b.close, b.volume) for b in got['ohlcv-1m', '7203']] == \
+        [(2, minute[0][0], minute[-1][0], sum(size for _, size in minute))]
+    assert got['imbalance', '167A'] == []    # no auction after the open; the snapshot's quote has none either
+    assert live.symbology_map[154694] == '167A'
+
+
+def test_a_quiet_bar_closes_on_this_computers_clock(decoder, monkeypatch):
+    """No later batch need say a bar has ended: this computer's clock, less the feed's delay, does."""
+    monkeypatch.setattr(_gateway, 'LATENCY_WINDOW_NS', 0)    # allow for the latest delay only
+    script, release = decoder(session(0, 30), holds=[1, 11])
+    feed = broker_feed(script)
+    live = brisk.Live()
+    live.subscribe('XTKS.BRISK', 'ohlcv-1s', symbols='7203')
+    bars = []
+    live.add_callback(bars.append)
+    live.start()
+    wait_for(lambda: live._subscriptions[0].active)
+    release(1)      # up to 09:00:10, whose trade opens the 09:00:10 bar; then the feed is quiet
+    wait_for(lambda: bars, timeout=5)
+    assert feed.seq == 10 and [(b.ts_event.second, b.open, b.volume) for b in bars] == [(10, 3001.0, 200)]
+    release(11)
+    live.block_for_close(timeout=30)
+    feed.wait()
+    assert [b.ts_event.second for b in bars] == [10, 20]     # 09:00:30's bar ends after the session does
+
+
+def test_a_late_trade_goes_into_the_next_open_bar(decoder):
+    """A trade stamped 09:00:19.5 that arrives with the 09:00:21 batch: its own bar has ended, so it counts in the
+    next one still open (09:00:20), whose open it is by time."""
+    batches = session(0, 30)
+    late = {'issue_id': 0, 'code': '7203', 'frame': 22, 'time_us': OPEN_US + 19_500_000, 'price10': 31000,
+            'quantity': 100, 'side': 1}
+    batches[21] = dict(batches[21], trades=[*batches[21]['trades'], late])
+    script, release = decoder(batches, holds=[1])
+    feed = broker_feed(script)
+    live = brisk.Live()
+    live.subscribe('XTKS.BRISK', 'ohlcv-1s', symbols='7203')
+    live.start()
+    wait_for(lambda: live._subscriptions[0].active)
+    release(1)
+    bars = [(b.ts_event.second, b.open, b.high, b.low, b.close, b.volume) for b in live]
+    feed.wait()
+    assert bars == [(10, 3001.0, 3001.0, 3001.0, 3001.0, 200), (20, 3100.0, 3100.0, 3002.0, 3002.0, 400)]
 
 
 def test_one_session_spans_trading_days(decoder):
@@ -168,22 +239,36 @@ def test_the_gateway_admits_only_its_key_on_this_computer():
     if os.name == 'posix':
         assert gateway.path.stat().st_mode & 0o777 == 0o600
 
-    def ask(request, port=gateway.port):
-        with socket.create_connection(('127.0.0.1', port), timeout=5) as sock:
-            sock.sendall(request if isinstance(request, bytes) else json.dumps(request).encode() + b'\n')
-            return json.loads(sock.makefile('rb').readline())
+    def connect(*messages, port=gateway.port):
+        sock = socket.create_connection(('127.0.0.1', port), timeout=5)
+        for message in messages:
+            sock.sendall(message if isinstance(message, bytes) else json.dumps(message).encode() + b'\n')
+        return sock, sock.makefile('rb')
+
+    def ask(*messages, port=gateway.port, lines=1):
+        sock, reader = connect(*messages, port=port)
+        with sock:
+            answers = [json.loads(reader.readline()) for _ in range(lines)]
+        return answers[0] if lines == 1 else answers
     good = {'version': 1, 'key': gateway.key, 'dataset': 'XTKS.BRISK'}
     assert ask({**good, 'key': 'guess'}) == {'gateway': 'error', 'error': 'Wrong key'}
     assert ask({**good, 'version': 2})['error'].startswith('This gateway speaks version 1')
     assert ask({**good, 'dataset': 'XTKS.BRISKDEMO'})['error'] == 'This gateway serves XTKS.BRISK'
-    assert ask({**good, 'symbols': ['../x']})['error'] == "Invalid symbol '../x'"
     assert ask(b'not json\n') == {'gateway': 'error', 'error': 'This gateway speaks version 1; update briskapi'}
     assert ask({**good, 'probe': True}) == {'gateway': 'probe', 'dataset': 'XTKS.BRISK'}
-    session = ask(good)
-    assert session['gateway'] == 'session' and session['bootstrap'] is None and session['replay'] is False
+    assert ask(good) == {'gateway': 'session', 'version': 1, 'dataset': 'XTKS.BRISK'}
+    assert ask(good, {'subscribe': [0], 'symbols': ['../x']}, lines=2)[1] == {'gateway': 'error', 'error': "Invalid symbol '../x'"}
+    assert ask(good, {'subscribe': 'all'}, lines=2)[1]['error'] == 'Expected {"subscribe": [ids], ...}'
+    # Before the feed's first batch: nothing to give yet, and no replay.
+    assert ask(good, {'subscribe': [0], 'symbols': None, 'replay': True, 'snapshot': True}, lines=2)[1] == \
+        {'gateway': 'subscribed', 'id': [0], 'bootstrap': None, 'snapshot': None, 'replay': False}
+    held, reader = connect(good)
+    assert json.loads(reader.readline())['gateway'] == 'session'
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(_gateway, 'MAX_CLIENTS', 1)
+        wait_for(lambda: len(gateway._clients) == 1)
         assert ask(good)['error'] == 'At most 1 Live sessions at once'
+    held.close()
     with pytest.raises(brisk.BriskError, match='Wrong key'):
         live = brisk.Live(key='guess', port=gateway.port)
         live.subscribe('XTKS.BRISK', 'trades')
@@ -205,7 +290,7 @@ def test_the_gateway_admits_only_its_key_on_this_computer():
     replaced = _gateway.Gateway('XTKS.BRISK')
     assert json.loads(replaced.path.read_text())['key'] == replaced.key != stale['key']
     replaced.close('completed')
-    assert ask({'version': 1, 'key': replaced.key, 'dataset': 'XTKS.BRISK'}, replaced.port)['status'] == 'completed'
+    assert ask({'version': 1, 'key': replaced.key, 'dataset': 'XTKS.BRISK'}, port=replaced.port)['status'] == 'completed'
     wait_for(lambda: replaced._server.fileno() == -1)     # and soon stops listening
 
 
@@ -219,8 +304,9 @@ def test_a_slow_session_is_dropped_not_waited_for(monkeypatch):
     monkeypatch.setattr(_gateway, 'MAX_BEHIND', 4 * 1024**2)
     gateway = _gateway.Gateway('XTKS.BRISKDEMO')
     sock = socket.create_connection(('127.0.0.1', gateway.port))
-    sock.sendall(json.dumps({'version': 1, 'key': gateway.key, 'dataset': 'XTKS.BRISKDEMO'}).encode() + b'\n')
-    wait_for(lambda: gateway._clients)
+    sock.sendall(json.dumps({'version': 1, 'key': gateway.key, 'dataset': 'XTKS.BRISKDEMO'}).encode() + b'\n'
+                 + json.dumps({'subscribe': [0], 'symbols': None}).encode() + b'\n')
+    wait_for(lambda: gateway._clients and gateway._clients[0].codes is None)
     line = b'{"type":"quotes"' + b' ' * 1024**2 + b'}\n'
     started = time.monotonic()
     for _ in range(64):          # 64 MB to a session that reads nothing
@@ -237,8 +323,8 @@ def test_live_api_errors_and_controls(decoder, tmp_path):
     script, release = decoder(market(), holds=[1, 3])
     feed = broker_feed(script)
     live = brisk.Live()
-    for args, message in ((('XTKS.NOPE', 'trades'), 'Unknown dataset'), (('XTKS.BRISK', 'ohlcv-1m'), 'only from the cloud'),
-                          (('XTKS.BRISK', 'tbbo'), 'Unknown schema'), (('XTKS.BRISK', 'trades', 'ALL_SYMBOLS', 'isin'), 'raw_symbol')):
+    for args, message in ((('XTKS.NOPE', 'trades'), 'Unknown dataset'), (('XTKS.BRISK', 'tbbo'), 'Unknown schema'),
+                          (('XTKS.BRISK', 'trades', 'ALL_SYMBOLS', 'isin'), 'raw_symbol')):
         with pytest.raises(ValueError, match=message):
             live.subscribe(*args)
     with pytest.raises(ValueError, match='not both'):
@@ -260,16 +346,17 @@ def test_live_api_errors_and_controls(decoder, tmp_path):
         live.add_stream(written)
     with pytest.warns(UserWarning, match='Live callback failed: ZeroDivisionError'):
         live.start()
-        with pytest.raises(brisk.BriskError, match='Subscribe before start'):
-            live.subscribe('XTKS.BRISK', 'trades')
         with pytest.raises(brisk.BriskError, match='streams once'):
             live.start()
+        wait_for(lambda: live._subscriptions[0].active)
         release(1)
         wait_for(lambda: written.read_text().count('\n') == 1)
     assert len(failures) == 1 and live.is_connected() and 'streaming' in repr(live)
     live.block_for_close(timeout=0.1)        # stops it: the feed goes on
     assert not live.is_connected() and feed.status == 'running'
     assert [json.loads(line)['sequence'] for line in written.read_text().splitlines()] == [2]
+    with pytest.raises(brisk.BriskError, match='has ended'):
+        live.subscribe('XTKS.BRISK', 'trades')
     release(3)
     feed.wait()
 
