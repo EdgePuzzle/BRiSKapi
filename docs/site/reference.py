@@ -242,7 +242,8 @@ PYTHON = [
             P('output', 'str | Path | None', 'Also keep each finished day here, as `SOURCE_YYYYMMDD_FROM-TO`.'),
             P('on_day', 'Callable | None', 'Called with each finished day\'s result (kept, uploaded).'),
             P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).'),
-            P('timeout', 'float | None', 'Seconds to wait for the initial state (default 60, or 120 for a broker).'),
+            P('timeout', 'float | None', 'Seconds to wait for the initial state (default 60, or 120 for a broker; a broker '
+              'feed with no session to join waits for the next trading day\'s).'),
             P('cache', 'str | Path | None', 'The demo from a copy of its files downloaded before (default: download them).'),
             P('speed', 'float', 'The demo\'s replay speed: 1 is the recorded pace, 0 as fast as possible.'),
             P('limit_frames', 'int | None', 'Stop the demo after this many frames (a partial replay is never uploaded).'),
@@ -534,7 +535,8 @@ BROKER = [
             P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).'),
             P('trace_protocol', 'bool', 'Print the connection steps, tokens redacted.'),
             P('profile', 'dict | None', 'Unverified Socket.IO parameters, should the server open with Socket.IO.'),
-            P('timeout', 'float | None', 'Seconds to wait for the initial state (default 120).')],
+            P('timeout', 'float | None', 'Seconds to wait for the initial state (default 120). With no session to join '
+              '(after the close, on a holiday), the feed waits for the next trading day\'s however long that is.')],
            'A [`Feed`](/reference/python/feed_quotes.md).',
            {'Python': 'import briskapi\n\nfeed = briskapi.connect(site="sbi", codes=["7203"], output="days")\n'
             'for quote in feed.quotes("7203"):\n    print(quote["time"], quote["last_price"])',

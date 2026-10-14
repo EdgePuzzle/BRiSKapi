@@ -252,10 +252,12 @@ toyota.quote()                              # same calls as any feed
 ```
 
 A broker feed records continuously, one recording per trading day, and keeps running across
-days. When the site starts serving the next trading date (checked every 10 minutes), or the
-server closes the stream after the market, the day ends: it is packaged and uploaded (its
-market recording and timing summary, unless you opt out) while the next day records from a
-fresh snapshot. `output=DIR` (`briskapi.connect(output=...)`, `brisk live --output DIR`)
+days. When the site's session is done or it starts serving the next trading date (checked every
+10 minutes), or the server closes the stream after the market, the day ends: it is packaged and
+uploaded (its market recording and timing summary, unless you opt out) while the feed waits for
+the next session and records it from a fresh snapshot. Started when no session is running
+(after the close, on a holiday), the feed waits for the next trading day's: `connect()` returns
+once that day has begun (`feed.status` is `"waiting"` meanwhile). `output=DIR` (`briskapi.connect(output=...)`, `brisk live --output DIR`)
 also keeps each finished day in DIR, in a folder named
 `SOURCE_YYYYMMDD_FROM-TO` (the day's first and last source clock, JST HHMMSS), such as
 `sbi_live_20261013_085800-153512`. `feed.recordings` lists the finished days (`trading_date`,
@@ -468,7 +470,7 @@ Each command is the command-line form of a Python call:
 | `brisk export`, `brisk identity` | Command line only |
 
 `brisk live --site sbi` and `--site e-shiten` run until you stop them, one recording per trading
-day. Unless you opt out, they upload each finished day's market recording and timing summary
+day; started after the close or on a holiday, they say so and wait for the next trading day. Unless you opt out, they upload each finished day's market recording and timing summary
 without asking; `--no-upload-market-data` stops uploading the recordings and `--no-upload` both
 (add `--output DIR` to keep them on disk). `brisk list --source sbi_live` (or `eshiten_live`) lists
 your broker recordings. Every `brisk live` also serves its feed to `briskapi.Live()` on this computer

@@ -97,9 +97,12 @@ const STREAM_PROTOCOL = 'flex';
 const HEARTBEAT_MS = 10000;
 
 // A recording covers one trading day. The host asks the site for its trading date every ten minutes;
-// when the site serves the next day (or the stream's clock goes back, as a new day's would), the day's
-// session ends cleanly and the next one starts from a fresh boot, master and snapshot.
+// when the site's session is done or it serves the next day (or the stream's clock goes back, as a new day's
+// would), the day's session ends cleanly and the next one starts from a fresh boot, master and snapshot.
 const DAY_CHECK_MS = 10 * 60 * 1000;
+// Waiting for a session once the next one is due (the boot's next_date), how often the boot is asked again
+// (the vendor app's own check of the date is every minute).
+const STREAM_CHECK_MS = 60 * 1000;
 const NEW_DAY_US = 3600e6;  // a clock an hour behind the last frame's belongs to another day
 
 // Fetch the frames between the snapshot and the stream's first frame. Mirrors the vendor
@@ -210,18 +213,32 @@ const fatal = error => FATAL.test(error.message);
 async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImpl = WebSocket, startTimeoutMs = 60000,
   protocolVersion, profile: overrides = {}, trace = null, catchUp = null, heartbeatMs = HEARTBEAT_MS,
   staleSeconds = 90, connectTimeoutMs = 15000, catchUpBackoffMs, site: siteId = 'sbi', after = null,
-  dayCheckMs = DAY_CHECK_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), onBoot = null,
-  resumable = false, stop = null }) {
+  dayCheckMs = DAY_CHECK_MS, streamCheckMs = STREAM_CHECK_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), onBoot = null,
+  resumable = false, stop = null, log = null }) {
   const where = site(siteId);
   const profile = resolveProfile(overrides);
   const session = new Session(cookies, fetchImpl, where);
+  if (stop) stop.end = null;  // no day to end yet (a failed setup may have left the last one's): a stop just exits (see main)
   let frontend = await session.get('/api/frontend/boot');
   session.token = frontend.api_token;
   let app = await session.get('/api/app/boot');
-  // After a recorded day, wait for the site to serve the next one.
-  while (after !== null && String(app.date) <= after) {
-    trace?.(`boot: still ${app.date}; waiting for the next trading day`);
-    await sleep(dayCheckMs);
+  // Wait for a session to join. After a recorded day the site serves that day until the next one. The vendor
+  // app opens the stream only while session_status is "running"; after the close it is "done" (and the boot has
+  // no ws_url), and the app reloads a minute after next_date, which the boot gives with its own time (unix
+  // seconds), so the wait is taken from the server's clock. Python is told once, outside the days' records.
+  let waiting = false;
+  for (;;) {
+    const sameDay = after !== null && String(app.date) <= after;
+    if (!sameDay && app.ws_url && (app.session_status ?? 'running') === 'running') break;
+    const why = sameDay ? `${app.date} is recorded` : `no session is running (${app.date}, status ${app.session_status ?? 'none'})`;
+    trace?.(`boot: ${why}; waiting for the next trading day`);
+    if (!waiting) {
+      waiting = true;
+      log?.(`[brisk] ${where.name}: ${why}; waiting for the next trading day`);
+      await emit({ type: 'waiting', date: String(app.date), session_status: app.session_status ?? null });
+    }
+    const due = (Number(app.next_date) - Number(app.time) + 60) * 1000;
+    await sleep(due > 0 ? Math.min(due, dayCheckMs) : sameDay ? dayCheckMs : streamCheckMs);
     try {
       frontend = await session.get('/api/frontend/boot');
       session.token = frontend.api_token;
@@ -373,6 +390,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
       try {
         const now = await session.get('/api/app/boot');
         if (String(now.date) !== String(app.date)) endDay(`the site serves ${now.date}`);
+        else if (now.session_status === 'done') endDay('the session is done');  // as the vendor app stops reconnecting
       } catch (error) { trace?.(`day check failed: ${error.message}`); }  // the stream's own checks catch a dead session
     }, dayCheckMs);
     // Cookies go only to the host that set them (elsewhere the session in ws_url authenticates);
@@ -407,9 +425,10 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
 const RETRY_MS = [5000, 10000, 30000, 60000, 120000];
 
 // One session per trading day, back to back, until `days` have been recorded (the command line: until
-// stopped). Each emits its own bootstrap ... end, which the Python feed keeps as that day's recording. A
-// connection lost once the recording has begun ends that segment cleanly (Interrupted), and a new connection
-// starts the next from a fresh snapshot, so only the gap is missing; failures before anything was recorded,
+// stopped). Each emits its own bootstrap ... end, which the Python feed keeps as that day's recording. A day
+// ends when the site's session is done, and a start with no session running (after the close, on a holiday)
+// waits for the next trading day's (see live). A connection lost once the recording has begun ends that
+// segment cleanly (Interrupted), and a new connection starts the next from a fresh snapshot, so only the gap is missing; failures before anything was recorded,
 // and those another connection cannot mend (fatal), stop it. `stop.requested` (see main) ends it after the
 // session's day, ended where it was.
 async function record({ days = Infinity, retryMs = RETRY_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
@@ -418,7 +437,7 @@ async function record({ days = Infinity, retryMs = RETRY_MS, sleep = ms => new P
   for (let day = 0; day < days;) {
     let booted = null;
     try {
-      await live({ ...options, sleep, after, stop, resumable: true, onBoot: date => { booted = date; } });
+      await live({ ...options, sleep, log, after, stop, resumable: true, onBoot: date => { booted = date; } });
       after = booted; day++; recorded = true; failures = 0;
       if (stop?.requested) return;
       continue;

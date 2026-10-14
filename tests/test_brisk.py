@@ -18,7 +18,7 @@ import pytest
 import briskapi
 import briskapi.cli as cli
 import briskapi.schema as schema
-from briskapi import _parquet, _spool, brisk
+from briskapi import _live, _parquet, _spool, brisk
 from briskapi._recording import JST, NotFoundError
 
 CHECK_SESSION = brisk._check_session  # stubbed for every test below; the session tests put it back
@@ -273,6 +273,15 @@ def test_cli_live_sbi(fake_host, monkeypatch, capsys):
     assert lines[-1]['last_price'] == 10160.0 and 'timing summary' in out.err and 'decoded market recording' in out.err
     assert cli.load_consent()['enabled'] and sent[0]['source'] == 'sbi_live' and len(market) == 1
     assert not {'quotes', 'master', 'code', 'price'} & set(json.dumps(sent[0]).replace('"', ' ').split())
+
+
+def test_cli_live_stopped_while_waiting_for_a_session_says_so_without_a_traceback(monkeypatch, capsys):
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
+    def waiting(**options):
+        raise KeyboardInterrupt   # Ctrl-C while connect() waits for the next trading day's session
+    monkeypatch.setattr(briskapi, 'connect', waiting)
+    cli.main(['live', '--site', 'sbi', '--no-upload'])
+    assert capsys.readouterr().err.strip().endswith('Stopped before a trading day began')
 
 
 def test_cli_trace_protocol_reaches_the_sbi_host(fake_host, monkeypatch, capfd):
@@ -570,6 +579,35 @@ def test_a_feed_keeps_and_uploads_each_trading_day_as_it_ends(tmp_path, monkeypa
     two_days(tmp_path, monkeypatch, second=sbi_session()[:3] + sbi_session())
     with pytest.raises(briskapi.BriskError, match='sequence error'):
         briskapi.connect(site='sbi', upload=False).wait()
+
+
+def test_a_feed_with_no_session_to_join_waits_for_the_next_trading_days(tmp_path, monkeypatch):
+    # The host says, outside the days' records, that the site has no session now (after the close, on a holiday);
+    # that is kept nowhere, and the feed waits past its start timeout for the next day's session.
+    first = sbi_session()
+    second = [{**b, 'trading_date': '20260312'} if b['type'] == 'bootstrap' else b for b in sbi_session(frames=20)]
+    script = tmp_path / 'waiting.cjs'
+    script.write_text(
+        f"const say = b => console.log(JSON.stringify(b));\n"
+        f"say({json.dumps({'type': 'waiting', 'date': '2026-03-10', 'session_status': 'done'})});\n"
+        f"setTimeout(() => {{ {json.dumps(first)}.forEach(say); "
+        f"say({json.dumps({'type': 'waiting', 'date': '2026-03-11', 'session_status': 'done'})}); "
+        f"{json.dumps(second)}.forEach(say); }}, 1500);\n")
+    monkeypatch.setattr(brisk, 'DECODER', script)
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    feed = _live.Feed(command=['node', str(script)], upload=False, output=tmp_path / 'days', gateway=True)
+    with feed._changed:
+        assert feed._changed.wait_for(lambda: feed.status == 'waiting', 10)
+    assert feed.waiting == {'date': '2026-03-10', 'session_status': 'done'} and feed.seq == -1
+    assert feed.ready(timeout=0.2) is feed and feed.status == 'running'
+    feed.wait()
+    assert [day['name'] for day in feed.recordings] == ['sbi_live_20260311_090000-090016', 'sbi_live_20260312_090000-090002']
+    assert feed.trading_date == '20260312' and feed.waiting is None
+    # A host that stops while waiting fails the start as any other would.
+    script.write_text(f"console.log(JSON.stringify({json.dumps({'type': 'waiting', 'date': '2026-03-10'})}));\n"
+                      "setTimeout(() => process.exit(1), 300);\n")
+    with pytest.raises(briskapi.BriskError, match='before bootstrap'):
+        briskapi.connect(site='sbi', upload=False, timeout=0.1)
 
 
 def test_e_shiten_has_its_own_address_cookies_and_variable(monkeypatch):

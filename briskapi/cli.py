@@ -421,21 +421,26 @@ def live(args):
     if args.site != 'demo':
         login(args.site)  # Missing cookies fail before the notice, questions or decoder startup.
     consented(args.upload)
+    # `kill` and a shutdown stop it as Ctrl-C does: the running day ends where it is, and is kept and uploaded.
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, _interrupt)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         report = lambda day: print(json.dumps({'day': day}), file=sys.stderr, flush=True)  # noqa: E731
         source = (dict(cache=args.cache, speed=args.speed, limit_frames=args.limit_frames) if args.site == 'demo' else
                   dict(trace_protocol=args.trace_protocol, upload_market_data=args.upload_market_data))
-        feed = connect(site=args.site, codes=codes, upload=args.upload, output=args.output, on_day=report,
-                       gateway=args.gateway, **source)
+        try:
+            # With no session to join (after the close, on a holiday), a broker feed waits here for the next one's.
+            feed = connect(site=args.site, codes=codes, upload=args.upload, output=args.output, on_day=report,
+                           gateway=args.gateway, **source)
+        except KeyboardInterrupt:  # connect() has stopped the feed: no day had begun
+            print('Stopped before a trading day began', file=sys.stderr)
+            return
     for warning in caught:
         print(warning.message, file=sys.stderr)
     if feed.gateway:
         print(f'Serving {feed.gateway.dataset} to briskapi.Live() on this computer only '
               f'(127.0.0.1:{feed.gateway.port}; --no-gateway turns this off)', file=sys.stderr, flush=True)
-    # `kill` and a shutdown stop it as Ctrl-C does: the running day ends where it is, and is kept and uploaded.
-    if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, _interrupt)
     try:
         if not args.quiet:
             for quote in feed.quotes(raw=args.raw):

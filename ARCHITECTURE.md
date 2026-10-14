@@ -579,9 +579,8 @@ profile can also name another catch-up format (`catchUp`).
 `--trace-protocol` prints the connection with every token redacted, so a first
 attempt shows what the server answers. Anything wrong ends in an explicit error (a
 stream that never initializes, a refused namespace, a rejected catch-up, an
-implausible stock view or master) rather than guessed data. Not implemented: reconnecting
-within a day. A lost connection, or any other failure, ends the recording: the feed fails
-(the days it had finished are kept and uploaded) and needs a restart.
+implausible stock view or master) rather than guessed data. A connection lost once a day
+has begun reconnects ([Trading days](#trading-days)); other failures end the recording.
 
 ### Trading days
 
@@ -589,9 +588,9 @@ A recording covers one trading day, and `record()` in `brisk.cjs` runs one `live
 session after another (`brisk live` until it is stopped). A day ends, with an `end`
 batch, when:
 
-- the site's boot serves a new date: the host asks `/api/app/boot` every `DAY_CHECK_MS`
-  (ten minutes) and compares its date with the day's. A failed check is only traced,
-  since the stream's own checks catch a dead session;
+- the site's boot serves a new date, or says the session is `done` (`session_status`; the vendor
+  app stops reconnecting then): the host asks `/api/app/boot` every `DAY_CHECK_MS` (ten
+  minutes). A failed check is only traced, since the stream's own checks catch a dead session;
 - the stream's clock goes back by more than an hour (`NEW_DAY_US`), as a new day's
   would. A smaller step back is not a new day, and a recording with one fails the
   archive's market-clock check;
@@ -612,16 +611,27 @@ connection cannot mend stops it with the error (`fatal`: an expired session, ano
 session for the user, a host or site layout that changed, unknown codes), and so does any
 failure before the first segment started.
 
-The next day begins by asking the boot, every ten minutes, until the site serves a
-later date than the one just recorded, then boots afresh: the frontend and app boots,
-the decoder, master and snapshot, and the catch-up. Its batches are numbered from 0,
+The next day begins by asking the boot until the site serves a later date than the one
+just recorded, with its session running, then boots afresh: the frontend and app boots, the
+decoder, master and snapshot, and the catch-up. A start when no session is running waits the
+same way. The vendor app opens the stream only while `session_status` is `running`; after the
+close it is `done` and the boot has no `ws_url` (the host used to resolve the missing URL to
+`/undefined` and fail). As the app reloads a minute after `next_date` (both it and the boot's
+`time` in unix seconds, so the wait is on the server's clock), the boot is asked again then, or
+in ten minutes if that is sooner; once it is due, every minute (`STREAM_CHECK_MS`). The
+host says so once per wait, on stderr and to Python as an out-of-band line
+`{"type": "waiting", "date", "session_status"}` (no `seq`): the feed keeps it nowhere (not in
+the spool, a recording or the gateway), shows it as `feed.waiting`, and until the first
+bootstrap has the status `waiting`, during which `ready()` and `connect()` wait past their
+timeout. A stop while waiting (Ctrl-C, `feed.close()`) just exits: there is no day to end. Its batches are numbered from 0,
 so each day is its own `bootstrap ... end`, and the Python feed keeps it as its own
 recording. The wait is plain HTTP, so a session that expires meanwhile, or any other
 failed request, ends the recording with that error instead of waiting on; how long a
 broker's session cookie lasts is not known. The wait, the roll and reconnecting are tested
 offline against fake servers (a server that closes after the first day, a site that serves
-the next date at a later check, a connection that drops mid-session, boots that fail and a
-session that expires before reconnecting). The clock rule has no test, and none of it has run
+the next date at a later check, boots with no session running before a day and after one, a
+connection that drops mid-session, boots that fail and a session that expires before
+reconnecting). The clock rule has no test, and none of it has run
 against a live session.
 
 ### Tachibana e-shiten BRiSK Next

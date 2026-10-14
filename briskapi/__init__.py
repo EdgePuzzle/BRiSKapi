@@ -66,7 +66,8 @@ def connect(*, site=None, codes=None, history=False, upload=None, output=None, o
     (upload=False); `output` also keeps each day on disk, `on_day(result)` is called with each,
     `history=True` keeps every update for Ticker.history(), and gateway=True also serves the feed to
     briskapi.Live on this computer. `timeout` (default 60 s, 120 s for a broker) bounds the wait for the
-    initial state.
+    initial state. A broker feed started with no session to join (after the close, on a holiday) waits for
+    the next trading day's, however long that is (status 'waiting'; `feed.waiting` says which day was over).
     """
     if site not in SITES:
         raise ValueError(f'Choose a site: {", ".join(map(repr, SITES))} (got {site!r})')

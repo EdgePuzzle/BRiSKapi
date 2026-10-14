@@ -313,9 +313,10 @@ def _connect(site, codes=None, history=False, node='node', timeout=120, upload=N
     clean end. upload_market_data=False uploads no market recording, and upload=False or BRISK_UPLOAD=0
     nothing (`output` keeps the recordings on disk). Cookies, tokens and connection diagnostics are never uploaded.
 
-    The feed records one trading day after another until closed: when the site serves a new trading
-    date (or the server closes the stream after the market), the day is finished and the next one
-    starts from a fresh snapshot. Each finished day is packaged on a worker thread, kept in `output`
+    The feed records one trading day after another until closed: when the site's session is done (or the
+    server closes the stream after the market) or it serves a new trading date, the day is finished, and the
+    next one starts from a fresh snapshot once the site's session is running. Started with no session
+    running (after the close, on a holiday), it waits for the next trading day's. Each finished day is packaged on a worker thread, kept in `output`
     (a folder named SOURCE_YYYYMMDD_FROM-TO, FROM and TO its first and last source clock, JST HHMMSS)
     if given, and uploaded as chosen; `on_day(result)` is then called and `feed.recordings` lists it.
     gateway=True also serves the feed to briskapi.Live on this computer, as dataset XTKS.BRISK.

@@ -130,6 +130,8 @@ class Feed:
         self._changed = threading.Condition()
         self._closing = False
         self.status, self.error, self.seq, self.uploaded = 'starting', None, -1, None
+        # A broker host with no session to join says so (date, session_status) and waits for the next trading day's.
+        self.waiting: dict | None = None
         # Each segment's batches go to disk as they arrive (briskapi._spool): to package it, to keep what a stop
         # or a crash cuts short, and for a gateway's replays.
         self._spooling, self._broker = bool(self._package or self._output or gateway), command is not None
@@ -223,10 +225,13 @@ class Feed:
 
     # Live consumption.
     def ready(self, timeout=60) -> Feed:
-        """Wait until the bootstrap (master and initial quotes) has been applied."""
+        """Wait until the bootstrap (master and initial quotes) has been applied. A broker feed started with no
+        session to join (after the close, on a holiday; status 'waiting') waits for the next trading day's,
+        however long `timeout` is."""
         with self._changed:
-            if not self._changed.wait_for(lambda: self._bootstrap is not None or self.status in {'failed', 'closed', 'completed'}, timeout):
-                raise TimeoutError('Feed did not start in time')
+            while not self._changed.wait_for(lambda: self._bootstrap is not None or self.status in {'failed', 'closed', 'completed'}, timeout):
+                if self.status != 'waiting':
+                    raise TimeoutError('Feed did not start in time')
         if self._bootstrap is None:
             raise BriskError(f'Feed {self.status} before bootstrap: {self.error}')
         return self
@@ -323,6 +328,13 @@ class Feed:
         try:
             for line in self._process.stdout:
                 batch = json.loads(line)
+                if batch.get('type') == 'waiting':  # out of band, not a day's record: kept nowhere
+                    with self._changed:
+                        self.waiting = {key: batch.get(key) for key in ('date', 'session_status')}
+                        if self._bootstrap is None:
+                            self.status = 'waiting'
+                        self._changed.notify_all()
+                    continue
                 # Each day runs bootstrap ... end, numbered from its own bootstrap; a new day follows an end.
                 first = batch.get('type') == 'bootstrap'
                 if batch.get('seq') != (0 if first else self.seq + 1) or first != (self.seq < 0 or ended):
@@ -375,7 +387,7 @@ class Feed:
                     self._history.clear()
             if batch['type'] == 'bootstrap':
                 self._bootstrap = {k: v for k, v in batch.items() if k != 'quotes'}
-                self.status = 'running'
+                self.status, self.waiting = 'running', None
             self._quotes.update((q['issue_id'], q) for q in quotes)
             if self._history is not None:
                 for q in quotes:

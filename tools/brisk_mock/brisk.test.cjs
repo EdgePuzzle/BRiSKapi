@@ -145,11 +145,59 @@ test('the host records one day after another, each its own bootstrap ... end, ro
     dayCheckMs: 20, sleep: async ms => { waits.push(ms); served = '2021-09-28'; } });
   assert.deepEqual(batches.filter(b => b.type === 'bootstrap').map(b => b.trading_date), ['20210927', '20210928']);
   assert.deepEqual(waits, [20], 'day two waited for the site to serve the next date');
-  // Each day runs bootstrap ... end, numbered from its own bootstrap.
+  // Each day runs bootstrap ... end, numbered from its own bootstrap; between them, the wait is said once.
   const second = batches.findIndex((b, i) => i && b.type === 'bootstrap');
   assert.equal(batches[second].seq, 0);
-  assert.equal(batches[second - 1].type, 'end');
+  assert.deepEqual(batches[second - 1], { type: 'waiting', date: '2021-09-27', session_status: null });
+  assert.equal(batches[second - 2].type, 'end');
   assert.equal(batches.at(-1).type, 'end');
+});
+
+test('started with no session running (after the close), the host says so once and waits for the next day\'s',
+  { skip: !cache }, async () => {
+  const { files, chunks } = demo();
+  const boots = [
+    { date: '2021-09-24', series: 0, session_status: 'done' },
+    { date: '2021-09-24', series: 0, session_status: 'done', time: 1000, next_date: 1120 },
+    { date: '2021-09-27', series: 0, master: 'm1', snapshot: 's1', ws_url: '/realtime/0?session=abc', session_status: 'before' },
+    { date: '2021-09-27', series: 0, master: 'm1', snapshot: 's1', ws_url: '/realtime/0?session=abc', session_status: 'running' },
+  ];
+  let boot = 0, sockets = 0;
+  const { fetchImpl } = server(files, { '/api/app/boot': () => JSON.stringify(boots[Math.min(boot++, boots.length - 1)]) });
+  const batches = [], waits = [], logged = [];
+  await record({ days: 1, cookies: { s: 'v' }, codes: ['7203'], emit: async b => batches.push(b), fetchImpl,
+    WebSocketImpl: class { constructor(...a) { sockets++; return new (socketFrom(chunks))(...a); } }, protocolVersion: 16000,
+    streamCheckMs: 60e3, dayCheckMs: 600e3, sleep: async ms => { waits.push(ms); }, log: line => logged.push(line) });
+  assert.deepEqual(batches[0], { type: 'waiting', date: '2021-09-24', session_status: 'done' });
+  assert.equal(batches.filter(b => b.type === 'waiting').length, 1);
+  assert.equal(batches[1].type, 'bootstrap');
+  assert.equal(batches[1].seq, 0);
+  assert.equal(batches[1].trading_date, '20210927');
+  assert.equal(batches.at(-1).type, 'end');
+  assert.equal(sockets, 1, 'no connection is tried without a stream');
+  assert.equal(socketFrom.last.url.pathname, '/realtime/0');
+  // Each minute with no next session announced; then until a minute after it is due, by the boot's own clock;
+  // a stream that is not running is not joined.
+  assert.deepEqual(waits, [60e3, 180e3, 60e3]);
+  assert.deepEqual(logged, ['[brisk] SBI BRiSK: no session is running (2021-09-24, status done); '
+    + 'waiting for the next trading day']);
+});
+
+test('a day ends when the site\'s session is done, and the next starts with the next session',
+  { skip: !cache }, async () => {
+  const { files, chunks } = demo();
+  let date = '2021-09-27', open = true;
+  const { fetchImpl } = server(files, { '/api/app/boot': () => JSON.stringify(open
+    ? { date, series: 0, master: 'm1', snapshot: 's1', ws_url: '/realtime/0?session=abc', session_status: 'running' }
+    : { date, series: 0, session_status: 'done' }) });
+  const batches = [], traces = [];
+  const emit = async b => { batches.push(b); if (b.type === 'bootstrap') open = false; };
+  await record({ days: 2, cookies: { s: 'v' }, codes: ['7203'], emit, fetchImpl, WebSocketImpl: heldSocket(chunks),
+    protocolVersion: 16000, dayCheckMs: 20, trace: line => traces.push(line), log: () => {},
+    sleep: async () => { date = '2021-09-28'; open = true; } });
+  assert.deepEqual(batches.filter(b => b.type !== 'quotes' && b.type !== 'history').map(b => b.type + (b.trading_date ?? b.date ?? '')),
+    ['bootstrap20210927', 'end', 'waiting2021-09-27', 'bootstrap20210928', 'end']);
+  assert.equal(traces.filter(line => line === 'day over: the session is done').length, 2);
 });
 
 test('a connection lost mid-session ends that segment cleanly, and a new connection records on from a fresh snapshot',
