@@ -465,20 +465,41 @@ UNDER sum every row above and below the window read, and the market row holds th
 orders and, in its closing groups, the market-on-close orders. Its layout is the same in
 both builds, which return byte-identical books for every issue of the demo's snapshot. A
 quote keeps each side's ten best prices that hold orders, and the quantity and order count
-at its own bid and ask. Each call sums the whole board for OVER and UNDER, and that is its
-cost: on Toyota's book a call takes about 26 µs with light 1 and 37 µs with light 0, for 1 row
-or 400 alike. So the host reads a quote's book in as few calls as it can. One window, from 64
-rows below the quote's bid to 64 above its ask, with light 0 (which keeps the closing groups),
-gives the market row; each group's board totals (`bid_total_quantity` and the rest: OVER,
-plus the window's rows, plus UNDER); and usually every level of both sides. A side whose
-best price lies outside it (a spread wider than 128 ticks, or no price on that side) gets a
-window of its own. A side reads on toward worse prices, 64 rows a call, until it has ten
-levels or nothing lies beyond. When OVER (UNDER for sells) shows orders at better prices, as
-in crossed auction books, it first reads every row beyond, in one call. The
-closing-condition limit orders (引け条件付) form a book of their own, read the same way, and
-only where its total shows orders. On the demo's data all of this equals reading the whole
-board on every issue at several times, in both builds. At the demo's opening it takes about
-1.4 calls and 25 µs per quote; walking 32 rows a call took 4.2 calls and 70 µs.
+at its own bid and ask.
+
+`_getItaRows` is a rendering helper for the board on screen, and costly: it looks up the issue's
+board object, rebuilds it if a frame changed it (0.3-0.5 µs), then walks every tick of the
+ladder for OVER and UNDER, converting each to a price through the issue's tick bands and adding
+notional columns (quantity × price) on the way. A call costs the same for 1 row or 400, about
+10 µs on average and 28 µs on Toyota's 3,521 ticks. So the decoder reads books itself
+(`BoardReader`) and uses `_getItaRows` only to check it, or in its place when it cannot be used:
+
+- **Where the ladder lies.** Each board holds its ladder in a `std::deque` of 72-byte levels, 56
+  to a block, one per tick from a first tick index the board keeps. A level holds the quantities
+  (f64) of its bids and closing-condition bids at +8 and +16, their order counts (u32) at +24 and
+  +28, and the same for the asks at +40, +48, +56 and +60; the market orders are a level of their
+  own in the board, just before the deque. The builds lay the board out differently (the demo's
+  deque at +92, SBI's of March 2026 at +100), so `boardCalls` reads `_getItaRows`' code for what it
+  calls: the board lookup (a slot of the function table and a registry address, called through
+  `dynCall_iiii`), the flag that marks a board rebuilt, and the rebuild (`dynCall_vi`). Then
+  `locate()` finds the deque's block map, first slot, length and first tick index in the board
+  object, and its market level, by matching issues' levels to `_getItaRows`' rows.
+- **What it reads.** The board totals are summed by a kernel of ours, `board.wat` (SIMD,
+  assembled into `decoder.cjs`), which shares the decoder's memory: `create()` makes the memory the
+  glue would (its import's size) and hands it over. Each side's ten levels are read from the best
+  end of the ladder, and their prices from `_getTickPrice10ToIndex` (the lowest price at that
+  index, remembered per tick type). A quantity `_getItaRows` could not convert is a trap here
+  too.
+- **Checks.** At start every issue's book must equal `_getItaRows`'; every 4,096th book after
+  that is checked again; anything amiss, or a build whose code does not read as expected, and
+  the decoder reads books through `_getItaRows` for the rest of its life (the host's
+  `--trace-protocol` says which). With no orders on any board yet (before the pre-open), it is
+  looked for again as books are read.
+
+Both builds' books are the same both ways: the demo's whole replay (its reference digests), every
+book through the demo's opening auction, and the 2026 build with the demo's snapshot against the
+demo decoder through `_getItaRows`. A book now costs about 3 µs and a quote 11 µs (70 µs when the
+ladder was walked 32 rows at a time).
 
 Trades come from the decoder's QR records, which it keeps on the host side: for each
 execution it calls the imported `_qr_emplace(stock, type, time, price10, lots, lot, frame)`
@@ -491,7 +512,13 @@ prevailing ask (93%) and type 2 at or below the bid (89%); type 0 is the first t
 1,508 issues around 09:00:00.09 and 22 later prints, so it looks like an auction
 execution. The record's time is the same clock as the quotes', 0-30 ms (median 2.8 ms)
 before the quote that shows it. The host takes the records after each frame; one
-withdrawn after it was emitted ends the session (none is withdrawn on the demo). Records a
+withdrawn after it was emitted ends the session (none is withdrawn on the demo). The decoder
+reads back only an issue's count of records (`_qr_size`) and the last one's price, so an issue
+keeps the prices of all its records but the records themselves only while one could still be
+withdrawn from those not yet taken: after the open a snapshot restores the day's trades so far
+(about 4.6 million on 2026-10-12), which kept whole took some 460 MB in every decoder (now 51
+MB), and quote workers let the restored trades go. They are appended one at a time (spread
+into one call, millions overflowed the stack). Records a
 snapshot restores (a live session's could hold the whole day so far) come after the
 bootstrap in `history` batches of at most 50,000, by issue; the snapshot's quotes already
 count them, so they stay out of the volume check.
@@ -621,7 +648,7 @@ recording in about a second, while reading its 731,251 quotes takes about 20 s. 
 opening auction the whole market changes within seconds (a live open has sent some 130,000
 quote updates a second), so for a selection of 500 issues or more (a recording is the whole
 market) the host reads quotes with worker threads (`workers.cjs`). By default there are as
-many as the computer has cores less four, from two to twelve; `BRISK_WORKERS` sets the number,
+many as the computer has cores less four, from two to eight; `BRISK_WORKERS` sets the number,
 and 0 turns them off. When the feed serves a gateway, a quarter of them (at least one) read the
 fast lane's quotes instead ([Live gateway](#live-gateway)).
 
@@ -645,10 +672,10 @@ time (up to 1 MB), `PARSERS` threads (up to four) parse the chunks, and the feed
 applies the batches in order; the spool writes its Parquet parts on a thread of its own. With
 the GIL, the lines are read and parsed one at a time, and the spool's thread takes turns with
 the reader. On an M5 Pro, the demo's whole replay, served as fast as it is taken, goes through
-it all (the host and its workers, the feed recording to disk and serving the gateway) at
-113,000 quote updates a second with 4 workers, 138,000 with 6 and 159,000 with 8. The same with
-the GIL and the host reading alone took 31,000. Slower cores take fewer: there the opening can
-fall a few seconds behind, which the status line of `brisk live` shows in its data time.
+it all (the host and its workers, the feed recording to disk and serving the gateway) at about
+61,000 quote updates a second without workers and 236,000 with 4 (more do not add); a live
+open sends some 130,000. Slower cores take fewer: there the opening can fall a few seconds
+behind, which the status line of `brisk live` shows in its data time.
 
 ### Trading days
 

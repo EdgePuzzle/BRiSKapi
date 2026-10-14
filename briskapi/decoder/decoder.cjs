@@ -12,6 +12,10 @@ const BUFFER = 4 * 1024 * 1024;
 const LEVELS = 10;   // price levels kept on each side of a quote's book
 const WINDOW = 64;   // book rows either side of the best prices read per call (a call costs the same for 1 row or 400)
 const HISTORY = 50000;   // trades per history batch (those a snapshot restores)
+const BOARD_CHECK_EVERY = 4096;   // ladder reads between checks against _getItaRows (see BoardReader)
+const BOARD_RETRY_EVERY = 20000;  // books read before a BoardReader is looked for again, while no board had orders
+// board.wat, assembled (wat2wasm): the board totals summed in the decoder's memory.
+const BOARD_KERNEL = 'AGFzbQEAAAABCAFgBH9/f38AAg8BA2VudgZtZW1vcnkCAAEDAgEABwcBA3N1bQAACtMBAdABAgV/BHsCQANAIAQgAk8NASABIARqIQVBOCAFQThwayEGIAYgAiAEa0sEQCACIARrIQYLIAAgBUE4bkECdGooAgAgBUE4cEHIAGxqIQcgByAGQcgAbGohCANAIAkgB/0AAwj98AEhCSAKIAf9AAMo/fABIQogCyAH/V0CGP3JAf3OASELIAwgB/1dAjj9yQH9zgEhDCAHQcgAaiEHIAcgCEkNAAsgBCAGaiEEDAALCyADIAn9CwMAIAMgCv0LAxAgAyAL/QsDICADIAz9CwMwCw==';
 // The order groups of a _getItaRows row (204 bytes): quantity (u64) and order count (u64) word offsets.
 const GROUPS = {
   bid: { name: 'bid', buy: true, closing: false, quantity: 5, orders: 9 },
@@ -263,15 +267,23 @@ class Decoder {
       crypto: crypto.webcrypto, TextDecoder, TextEncoder, setTimeout, clearTimeout,
     });
     vm.runInContext(assets['fita.js'].toString('utf8'), context, { filename: 'brisk-demo-fita.js' });
+    // The memory the glue would make (its import's size), made here, so that BoardReader can share it.
+    let memory;
+    try { memory = new WebAssembly.Memory(moduleOf(assets['fita.wasm']).memory); } catch { memory = undefined; }
     // A special quote the decoder can't place is reported only on stderr, so that line is counted.
     const stderr = { invalidIssueCode: 0 };
     const { wasm } = await new Promise((resolve, reject) => {
-      context.module.exports({ wasmBinary: assets['fita.wasm'], print() {},
+      context.module.exports({ wasmBinary: assets['fita.wasm'], ...(memory && { wasmMemory: memory }), print() {},
         printErr: line => { if (String(line).includes('Invalid Issue Code')) stderr.invalidIssueCode++; }, onAbort: reject,
       }).then(wasm => resolve({ wasm }));
     });
     options.check?.(wasm);
-    return new Decoder(wasm, assets, { ...options, stderr, qrm: context.qrm });
+    const decoder = new Decoder(wasm, assets, { ...options, stderr, qrm: context.qrm });
+    if (options.board !== false) {
+      Object.assign(decoder, { memory, wasmBytes: assets['fita.wasm'] });
+      decoder.discoverBoard();
+    }
+    return decoder;
   }
 
   // options.schedule: the boot's schedule_info. Used only by decoders that take one (the 2026
@@ -280,6 +292,9 @@ class Decoder {
     stderr = { invalidIssueCode: 0 }, qrm = new QuoteHistory() } = {}) {
     this.w = w;
     this.stderr = stderr;
+    this.board = null;         // the BoardReader that reads books from the ladder, if it could be used
+    this.boardSkipped = null;  // why it is not (or no longer)
+    this.boardRetry = null;    // books read since it was last looked for, while that might still succeed
     this.qrm = qrm;
     this.stocks = new Map();   // stock object (QR container) -> issue
     this.restored = [];        // QR records a snapshot restored
@@ -628,7 +643,38 @@ class Decoder {
   // groups. Every call sums the whole board for OVER and UNDER, which costs more than the rows it returns, so a
   // book is read in as few calls as it can be: one window from WINDOW rows below the bid to WINDOW above the
   // ask, with the closing groups, usually holds all of it (and with OVER and UNDER, the board's totals).
+  // Use a BoardReader if one can be (see there); books are read through _getItaRows meanwhile. With no orders
+  // on any board yet (a session started before the pre-open), it is tried again as books are read.
+  discoverBoard() {
+    try {
+      this.board = BoardReader.discover(this, this.wasmBytes, this.memory);
+      this.boardSkipped = this.boardRetry = null;
+    } catch (error) {
+      this.boardSkipped = error.message;
+      this.boardRetry = error instanceof NoOrdersYet ? 0 : null;
+    }
+    return Boolean(this.board);
+  }
+
   book(issue_id, m, quote) {
+    if (!this.board && this.boardRetry !== null && ++this.boardRetry % BOARD_RETRY_EVERY === 0) this.discoverBoard();
+    if (!this.board) return this.walkBook(issue_id, m, quote);
+    const book = this.board.book(issue_id, m, quote);
+    // Now and then the ladder read is checked against the decoder's own: a difference ends it for this decoder.
+    if (++this.board.reads % BOARD_CHECK_EVERY === 0) {
+      const walked = this.walkBook(issue_id, m, quote);
+      if (JSON.stringify(walked) !== JSON.stringify(book)) {
+        this.boardSkipped = `its book of ${m.code} differed from _getItaRows' after ${this.board.reads} reads`;
+        this.board = null;
+        return walked;
+      }
+    }
+    return book;
+  }
+
+  // The book as _getItaRows gives it (see book()): the way every book was read before BoardReader, and is read
+  // when it cannot be used.
+  walkBook(issue_id, m, quote) {
     const index = price => this.w._getTickPrice10ToIndex(this.id, m.tick_type, price);
     const low = index(m.limit_down10), high = index(m.limit_up10);
     const inside = price => price >= m.limit_down10 && price <= m.limit_up10;
@@ -808,7 +854,342 @@ async function main(argv) {
     } });
 }
 
-module.exports = { Decoder, QuoteHistory, frames, u64, looseU64, readMasterRecord, masterLayout, MASTER_LAYOUT, SCHEDULE_FIELDS, scheduleArgs,
+// Read a module's code just enough to find what _getItaRows calls: the board object it looks up (an indirect
+// call through invoke_iiii, with the table slot and the registry as constants, then the decoder ID and the
+// issue), and the rebuild it runs (through invoke_vi, on that object) when a byte flag in the object is clear.
+// A WebAssembly binary: sections of (id, size), the code section's bodies of (size, locals, instructions).
+function moduleOf(bytes) {
+  let at = 0;
+  const byte = () => bytes[at++];
+  const uleb = () => { let r = 0, shift = 0, b; do { b = bytes[at++]; r += (b & 0x7f) * 2 ** shift; shift += 7; } while (b & 0x80); return r; };
+  const sleb = () => {
+    let r = 0n, shift = 0n, b;
+    do { b = BigInt(bytes[at++]); r |= (b & 0x7fn) << shift; shift += 7n; } while (b & 0x80n);
+    if (b & 0x40n) r -= 1n << shift;
+    return Number(r);
+  };
+  const name = () => { const n = uleb(); const s = Buffer.from(bytes.subarray(at, at + n)).toString(); at += n; return s; };
+  if (Buffer.from(bytes.subarray(0, 4)).toString('latin1') !== '\0asm') throw new Error('not a WebAssembly module');
+  at = 8;
+  const imported = new Map(), exported = new Map();
+  let functions = 0, code = null, memory = null;
+  while (at < bytes.length) {
+    const id = byte(), size = uleb(), end = at + size;
+    if (id === 2) {
+      for (let n = uleb(); n--;) {
+        name(); const field = name(), kind = byte();
+        if (kind === 0) { uleb(); imported.set(field, functions++); }
+        else if (kind === 1) { byte(); const flags = uleb(); uleb(); if (flags & 1) uleb(); }
+        else if (kind === 2) { const flags = uleb(); memory = { initial: uleb() }; if (flags & 1) memory.maximum = uleb(); }
+        else if (kind === 3) { byte(); byte(); }
+      }
+    } else if (id === 7) {
+      for (let n = uleb(); n--;) { const field = name(), kind = byte(), index = uleb(); if (kind === 0) exported.set(field, index); }
+    } else if (id === 10) {
+      code = at;
+    }
+    at = end;
+  }
+  return { imported, exported, functions, code, memory };
+}
+
+function boardCalls(bytes) {
+  const { imported, exported, functions, code } = moduleOf(bytes);
+  let at = 0;
+  const byte = () => bytes[at++];
+  const uleb = () => { let r = 0, shift = 0, b; do { b = bytes[at++]; r += (b & 0x7f) * 2 ** shift; shift += 7; } while (b & 0x80); return r; };
+  const sleb = () => {
+    let r = 0n, shift = 0n, b;
+    do { b = BigInt(bytes[at++]); r |= (b & 0x7fn) << shift; shift += 7n; } while (b & 0x80n);
+    if (b & 0x40n) r -= 1n << shift;
+    return Number(r);
+  };
+  const target = exported.get('_getItaRows'), lookup = imported.get('invoke_iiii'), rebuild = imported.get('invoke_vi');
+  if (target === undefined || code === null || lookup === undefined || rebuild === undefined) {
+    throw new Error('_getItaRows or the invoke imports not found');
+  }
+  at = code;
+  for (let n = uleb(), i = 0; i < n; i++) {
+    const size = uleb();
+    if (i !== target - functions) { at += size; continue; }
+    const end = at + size;
+    for (let groups = uleb(); groups--;) { uleb(); byte(); }
+    // The MVP instruction set's immediates, enough to step through an Emscripten body.
+    const ops = [];
+    while (at < end) {
+      const op = byte(), ins = { op };
+      if (op === 0x02 || op === 0x03 || op === 0x04) { if (bytes[at] === 0x40 || bytes[at] >= 0x7b) byte(); else sleb(); }
+      else if (op === 0x0c || op === 0x0d || (op >= 0x20 && op <= 0x24) || op === 0x10) ins.arg = uleb();
+      else if (op === 0x0e) { for (let k = uleb(); k--;) uleb(); uleb(); }
+      else if (op === 0x11) { uleb(); uleb(); }
+      else if (op >= 0x28 && op <= 0x3e) { uleb(); ins.offset = uleb(); }
+      else if (op === 0x3f || op === 0x40) byte();
+      else if (op === 0x41 || op === 0x42) ins.arg = sleb();
+      else if (op === 0x43) at += 4;
+      else if (op === 0x44) at += 8;
+      else if (op === 0xfc) { const sub = uleb(); if (sub >= 8 && sub <= 17) { uleb(); if (sub === 8 || sub === 10 || sub === 12 || sub === 14) uleb(); } }
+      else if (op === 0xfd) throw new Error('SIMD in _getItaRows: not the build this reads');
+      ops.push(ins);
+    }
+    const is = (k, op, arg) => ops[k]?.op === op && (arg === undefined || ops[k].arg === arg);
+    let found = null, flag = null, rebuildSlot = null, board = null;
+    for (let k = 0; k < ops.length; k++) {
+      // i32.const slot; i32.const registry; local.get 0; local.get 1; call invoke_iiii; local.set board
+      if (!found && is(k, 0x41) && is(k + 1, 0x41) && is(k + 2, 0x20, 0) && is(k + 3, 0x20, 1) && is(k + 4, 0x10, lookup)) {
+        found = [ops[k].arg, ops[k + 1].arg];
+        const set = ops[k + 5];
+        if (set?.op === 0x21 || set?.op === 0x22) board = set.arg;
+      }
+      // local.get board; i32.const F; i32.add; i32.load8_s
+      if (found && flag === null && is(k, 0x20, board) && is(k + 1, 0x41) && is(k + 2, 0x6a) && is(k + 3, 0x2c)) {
+        flag = ops[k + 1].arg + ops[k + 3].offset;
+      }
+      // i32.const slot; local.get board; call invoke_vi
+      if (flag !== null && rebuildSlot === null && is(k, 0x41) && is(k + 1, 0x20, board) && is(k + 2, 0x10, rebuild)) {
+        rebuildSlot = ops[k].arg;
+      }
+    }
+    if (!found || flag === null || rebuildSlot === null) throw new Error('_getItaRows does not read its board as expected');
+    return { lookup: found, flag, rebuild: rebuildSlot };
+  }
+  throw new Error('_getItaRows has no code');
+}
+
+// A quote's book read from the decoder's own price ladder, without _getItaRows (see book()). _getItaRows looks
+// up the issue's board, rebuilds it if a frame changed it (cheap), then walks every tick of the ladder for the
+// totals above and below the rows asked for, converting each to a price and adding notional columns on the way:
+// most of a quote's cost. Here the board is looked up and rebuilt as it does (boardCalls), the ladder is read
+// where it lies, a std::deque of 72-byte levels found in the board object by matching _getItaRows' rows, and
+// its totals are summed by board.wat's kernel in the decoder's memory. Only the 72-byte level and the 56-level
+// block are assumed: discover() checks the book of every issue against _getItaRows before it is used.
+class NoOrdersYet extends Error {}
+
+// A ladder quantity as _getItaRows converts it (i64.trunc_f64_u, then u64()).
+function quantity(value, m) {
+  if (!(value >= 0) || value >= 2 ** 64) {
+    throw Object.assign(new Error(`The book of ${m.code}: the decoder trapped (float unrepresentable in integer range); its state `
+      + 'is inconsistent, as after a lost, repeated or reordered update or one applied without the snapshot under it'), { trap: true });
+  }
+  const integer = Math.trunc(value);
+  if (!Number.isSafeInteger(integer)) throw new Error('Unsafe 64-bit quantity/timestamp');
+  return integer;
+}
+
+class BoardReader {
+  static discover(decoder, wasmBytes, memory) {
+    if (!(memory instanceof WebAssembly.Memory) || memory.buffer !== decoder.w.HEAPU8.buffer) {
+      throw new Error('the decoder\'s memory is not reachable');
+    }
+    const w = decoder.w;
+    if (typeof w.dynCall_iiii !== 'function' || typeof w.dynCall_vi !== 'function') throw new Error('no dynCall exports');
+    const kernel = new WebAssembly.Instance(new WebAssembly.Module(Buffer.from(BOARD_KERNEL, 'base64')), { env: { memory } });
+    const reader = new BoardReader(decoder, boardCalls(wasmBytes), memory, kernel.exports.sum);
+    reader.locate();
+    reader.check();
+    return reader;
+  }
+
+  constructor(decoder, calls, memory, sum) {
+    Object.assign(this, { decoder, calls, memory, sum, reads: 0, prices: new Map(), sums: decoder.w._malloc(64) });
+  }
+
+  views() {
+    if (this.u?.buffer !== this.memory.buffer) {
+      this.u = new Uint32Array(this.memory.buffer);
+      this.i = new Int32Array(this.memory.buffer);
+      this.f = new Float64Array(this.memory.buffer);
+    }
+  }
+
+  // The issue's board, rebuilt if a frame changed it, as _getItaRows has it.
+  board(issue_id) {
+    const { w, id } = this.decoder, p = w.dynCall_iiii(this.calls.lookup[0], this.calls.lookup[1], id, issue_id);
+    if (!w.HEAPU8[p + this.calls.flag]) w.dynCall_vi(this.calls.rebuild, p);
+    return p;
+  }
+
+  // Where the board object keeps the ladder (the deque's block map, first slot and length, which follow one
+  // another, and the first level's tick index) and its market orders: found from issues with orders, by
+  // matching their levels to _getItaRows' rows.
+  locate() {
+    const d = this.decoder, refs = [];
+    for (const m of d.master) {
+      const ladder = this.walked(m);
+      if (ladder && ladder.rows.size >= 3) refs.push(ladder);
+      if (refs.length >= 8) break;
+    }
+    if (!refs.length) throw new NoOrdersYet('no issue with orders to locate the ladder by');
+    // A board left inconsistent (as by updates applied without the snapshot under them) may not read as a
+    // ladder; the layout is taken from one that does and must hold for every other that does, two at least.
+    for (const first of refs) {
+      this.views();
+      const { u, i } = this, p = this.board(first.m.issue_id);
+      for (let at = 0; at < 4096 && !this.layout; at += 4) {
+        const map = u[(p + at) >> 2], end = u[(p + at + 4) >> 2], start = u[(p + at + 12) >> 2], size = u[(p + at + 16) >> 2];
+        const blocks = (end - map) / 4;
+        if (!map || !Number.isInteger(blocks) || blocks < 1 || blocks > 65536 || size < 1 || start + size > blocks * 56) continue;
+        if (end >= this.memory.buffer.byteLength) continue;
+        const layout = { map: at, start: at + 12, size: at + 16 };
+        const base = this.baseOf(p, layout, first);
+        if (base === null) continue;
+        for (let b = 0; b < 4096; b += 4) {
+          if (i[(p + b) >> 2] !== base) continue;
+          const candidate = { ...layout, base: b, market: at - 4 - 72 };
+          const readable = refs.filter(ref => this.levelsOf(this.board(ref.m.issue_id), candidate) !== null);
+          if (readable.length >= 2 && readable.every(ref => this.matches(ref, candidate))) { this.layout = candidate; break; }
+        }
+      }
+      if (this.layout) break;
+    }
+    if (!this.layout) throw new Error('the ladder was not found in the board object');
+  }
+
+  // An issue's whole ladder as _getItaRows gives it: the nonzero rows by tick index, and the market row.
+  walked(m) {
+    const d = this.decoder, w = d.w;
+    const index = price => w._getTickPrice10ToIndex(d.id, m.tick_type, price);
+    const low = index(m.limit_down10), count = index(m.limit_up10) - low + 1;
+    if (!(count > 0) || 612 + 204 * count > BUFFER) return null;
+    let rows;
+    try {
+      rows = call(w, `The ladder of ${m.code}`, () => d.rows(m.issue_id, low, count, true).rows);
+    } catch (error) {
+      if (error.trap) return null;
+      throw error;
+    }
+    const market = new Uint32Array(w.HEAPU8.buffer, d.buf, 51);
+    const groups = row => Object.values(GROUPS).map(g => row[g.name]).flat();
+    const nonzero = new Map();
+    rows.forEach((row, k) => { if (groups(row).some(Boolean)) nonzero.set(low + k, row); });
+    return { m, rows: nonzero, market: [u64(market, 5), u64(market, 16), u64(market, 28), u64(market, 39)] };
+  }
+
+  // The tick index of the deque's first level, if its nonzero levels are the walked ladder's rows.
+  baseOf(p, layout, ref) {
+    const levels = this.levelsOf(p, layout);
+    if (levels === null || levels.length !== ref.rows.size) return null;
+    const ticks = [...ref.rows.keys()];
+    const base = ticks[0] - levels[0].slot;
+    return levels.every((level, k) => level.slot + base === ticks[k]) ? base : null;
+  }
+
+  // The deque's nonzero levels, in order (null if it does not read as one).
+  levelsOf(p, layout) {
+    this.views();
+    const { u, f } = this, map = u[(p + layout.map) >> 2], start = u[(p + layout.start) >> 2], size = u[(p + layout.size) >> 2];
+    if (size > 100000) return null;
+    const levels = [];
+    for (let s = 0; s < size; s++) {
+      const e = this.level(map, start, s);
+      if (!e || e + 72 > this.memory.buffer.byteLength) return null;
+      const values = [f[(e + 8) >> 3], u[(e + 24) >> 2], f[(e + 16) >> 3], u[(e + 28) >> 2], f[(e + 40) >> 3], u[(e + 56) >> 2],
+        f[(e + 48) >> 3], u[(e + 60) >> 2]];
+      if (values.some(v => !Number.isFinite(v) || v < 0)) return null;
+      if (values.some(Boolean)) levels.push({ slot: s, values });
+    }
+    return levels;
+  }
+
+  level(map, start, s) {
+    const k = start + s;
+    return this.u[(map >> 2) + Math.floor(k / 56)] + (k % 56) * 72;
+  }
+
+  matches(ref, layout) {
+    const p = this.board(ref.m.issue_id), levels = this.levelsOf(p, layout);
+    if (levels === null || levels.length !== ref.rows.size) return false;
+    const base = this.i[(p + layout.base) >> 2];
+    const sameLevels = levels.every(({ slot, values }) => {
+      const row = ref.rows.get(base + slot);
+      return row && JSON.stringify(values) === JSON.stringify([...row.bid, ...row.bid_closing, ...row.ask, ...row.ask_closing]);
+    });
+    const { f } = this, mk = p + layout.market;
+    return sameLevels && JSON.stringify([f[(mk + 8) >> 3], f[(mk + 16) >> 3], f[(mk + 40) >> 3], f[(mk + 48) >> 3]]) === JSON.stringify(ref.market);
+  }
+
+  // Every issue's book against _getItaRows', as it stands (the snapshot's): any difference and it is not used.
+  check() {
+    const d = this.decoder, w = d.w;
+    for (const m of d.master) {
+      if (!w._getStockView(d.id, m.issue_id, d.buf)) continue;
+      const view = parseStockView(new Uint32Array(w.HEAPU8.buffer, d.buf, d.viewWords), d.ohlc, d.layoutShift);
+      let walked;
+      try {
+        walked = d.walkBook(m.issue_id, m, view);
+      } catch (error) {
+        if (error.trap) continue;
+        throw error;
+      }
+      if (JSON.stringify(this.book(m.issue_id, m, view)) !== JSON.stringify(walked)) {
+        throw new Error(`its book of ${m.code} differs from _getItaRows'`);
+      }
+    }
+  }
+
+  // The price of a tick index for this tick type: the lowest price _getTickPrice10ToIndex gives it, remembered.
+  price(m, index) {
+    let cache = this.prices.get(m.tick_type);
+    if (!cache) this.prices.set(m.tick_type, cache = new Map());
+    let price = cache.get(index);
+    if (price === undefined) {
+      const { w, id } = this.decoder;
+      let lo = 0, hi = 2 * m.limit_up10 + 1;   // a level with orders lies between the limits
+      while (lo < hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        if (w._getTickPrice10ToIndex(id, m.tick_type, mid) < index) lo = mid + 1; else hi = mid;
+      }
+      cache.set(index, price = lo);
+    }
+    return price;
+  }
+
+  // As walkBook() gives it, key for key. A quantity _getItaRows could not convert to an integer (a board in an
+  // inconsistent state) is a trap here as there, and one beyond 2^53 the same error.
+  book(issue_id, m, quote) {
+    const p = this.board(issue_id);
+    this.views();
+    const { u, i, f, layout } = this, q = at => quantity(f[at >> 3], m);
+    const map = u[(p + layout.map) >> 2], start = u[(p + layout.start) >> 2], size = u[(p + layout.size) >> 2];
+    const base = i[(p + layout.base) >> 2], mk = p + layout.market;
+    const book = { market_buy_quantity: q(mk + 8), market_sell_quantity: q(mk + 40),
+      closing_market_buy_quantity: q(mk + 16), closing_market_sell_quantity: q(mk + 48) };
+    this.sum(map, start, size, this.sums);
+    const sums = this.sums, orders = k => u[(sums + 32 + 8 * k) >> 2] + 4294967296 * u[(sums + 36 + 8 * k) >> 2];
+    const totals = { bid_total_quantity: q(sums), bid_total_orders: orders(0), bid_closing_total_quantity: q(sums + 8),
+      bid_closing_total_orders: orders(1), ask_total_quantity: q(sums + 16), ask_total_orders: orders(2),
+      ask_closing_total_quantity: q(sums + 24), ask_closing_total_orders: orders(3) };
+    // A side's best LEVELS prices with orders: the bids from the top of the ladder down, the asks from the bottom up.
+    const levels = (quantity, count, buy) => {
+      const out = [];
+      for (let k = 0; k < size && out.length < LEVELS; k++) {
+        const slot = buy ? size - 1 - k : k, e = this.level(map, start, slot);
+        if (f[(e + quantity) >> 3]) out.push([this.price(m, base + slot), q(e + quantity), u[(e + count) >> 2]]);
+      }
+      return out;
+    };
+    const bid_levels = levels(8, 24, true), ask_levels = levels(40, 56, false);
+    const bid_closing_levels = totals.bid_closing_total_quantity ? levels(16, 28, true) : [];
+    const ask_closing_levels = totals.ask_closing_total_quantity ? levels(48, 60, false) : [];
+    const inside = price => price >= m.limit_down10 && price <= m.limit_up10;
+    const at = (side, price, quantity, count, buy) => {
+      const level = side.find(([x]) => x === price);
+      if (level) return level.slice(1);
+      // A price the walk passed, or every order on the side having been read, means none there.
+      const passed = side.length < LEVELS || (buy ? price >= side.at(-1)[0] : price <= side.at(-1)[0]);
+      if (!price || !inside(price) || passed) return [0, 0];
+      const slot = this.decoder.w._getTickPrice10ToIndex(this.decoder.id, m.tick_type, price) - base;
+      if (slot < 0 || slot >= size) return [0, 0];
+      const e = this.level(map, start, slot);
+      return [q(e + quantity), u[(e + count) >> 2]];
+    };
+    const [bid_quantity, bid_orders] = at(bid_levels, quote.bid_price10, 8, 24, true);
+    const [ask_quantity, ask_orders] = at(ask_levels, quote.ask_price10, 40, 56, false);
+    return { ...book, bid_quantity, bid_orders, ask_quantity, ask_orders, bid_levels, ask_levels, bid_closing_levels,
+      ask_closing_levels, ...totals };
+  }
+}
+
+module.exports = { Decoder, BoardReader, boardCalls, BOARD_KERNEL, QuoteHistory, frames, u64, looseU64, readMasterRecord, masterLayout, MASTER_LAYOUT, SCHEDULE_FIELDS, scheduleArgs,
   parseMasterFile, checkMasterFile, loadAssets, replay, main, parseStockView, stockViewShift, STOCK_VIEW_SHIFT };
 if (require.main === module) main(process.argv.slice(2)).catch(error => {
   console.error(error.message); process.exitCode = 1;

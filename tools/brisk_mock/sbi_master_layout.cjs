@@ -149,7 +149,8 @@ const DEMO_SCHEDULE = { morning_session_pre_open_time: 8 * H, morning_session_op
 async function demoSnapshot(decoderAssets, demoCache, schedule2026) {
   const read = name => fs.readFileSync(path.join(demoCache, name));
   const demo = { 'master.dat': read('master.dat'), 'snapshot.dat': read('snapshot.dat') };
-  const reference = await Decoder.create({ 'fita.js': read('fita.js'), 'fita.wasm': read('fita.wasm'), ...demo });
+  // The demo decoder reads its books through _getItaRows; this build's from its own ladder (BoardReader).
+  const reference = await Decoder.create({ 'fita.js': read('fita.js'), 'fita.wasm': read('fita.wasm'), ...demo }, { board: false });
   const attempt = async schedule => {
     try {
       return { decoder: await Decoder.create({ ...decoderAssets, ...demo }, { protocolVersion: 18000, check: checkAbi, schedule }) };
@@ -167,6 +168,7 @@ async function demoSnapshot(decoderAssets, demoCache, schedule2026) {
       if (!differs.length && reference.master[i].code === decoder.master[i].code) same++; else first = first || `${a.code}: ${differs.join(', ')}`;
     }
     Object.assign(out, { with_2021_hours: 'loaded', price_bars: decoder.ohlc, quotes_equal_to_the_demo_decoder: same,
+      ladder_reader: decoder.board ? { ...decoder.board.calls, ...decoder.board.layout } : decoder.boardSkipped,
       ...(first ? { first_difference: first } : {}) });
   } else {
     out.with_2021_hours = error;
@@ -207,7 +209,9 @@ async function main(cache, demoCache) {
   console.log(JSON.stringify(report, null, 2));
   const sq = report.boot_special_quotes;
   const sqOk = sq.sent === 4 && sq.on_their_issue === 4 && sq.on_other_issues === 0;
-  const demoOk = !demoCache || report.demo_snapshot.quotes_equal_to_the_demo_decoder === report.demo_snapshot.issues;
+  const demoOk = !demoCache || (report.demo_snapshot.quotes_equal_to_the_demo_decoder === report.demo_snapshot.issues
+    && JSON.stringify(report.demo_snapshot.ladder_reader) === JSON.stringify(
+      { lookup: [40, 34672], flag: 704, rebuild: 222, map: 100, start: 112, size: 116, base: 8, market: 24 }));
   // As recorded, the host must stop right after the first 15-byte frame and name it; without those
   // frames every message is taken, and every ping is answered with itself.
   const { as_recorded: r, without_the_15_byte_frames: s } = report.stream;

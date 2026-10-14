@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { Decoder, QuoteHistory, frames, u64, looseU64, parseMasterFile, checkMasterFile, loadAssets, replay, main, parseStockView, stockViewShift,
-  scheduleArgs, SCHEDULE_FIELDS } = require('../../briskapi/decoder/decoder.cjs');
+  scheduleArgs, SCHEDULE_FIELDS, boardCalls, BOARD_KERNEL } = require('../../briskapi/decoder/decoder.cjs');
 const cache = process.env.BRISK_MOCK_CACHE;
 
 function frame(time, bytes = Buffer.from([1])) {
@@ -569,6 +569,71 @@ test('an 18000 master: text codes, the decoder\'s own names and tick types, limi
   assert.throws(() => new Decoder(fake, { ...assets, 'master.dat': Buffer.concat([file.subarray(180), file.subarray(0, 180)]) },
     { protocolVersion: 18000 }), /disagrees with its master file on 3 of 3 issues \(issue 0: code "1301", file "167A"\)/);
   assert.throws(() => new Decoder(fake, assets, { protocolVersion: 17000 }), /layout for protocol 17000 is not known/);
+});
+
+
+// The book of `issue` as the stock view's quote has it, both ways: from the ladder, and through _getItaRows.
+function bothBooks(decoder, issue) {
+  const m = decoder.master[issue];
+  if (!decoder.w._getStockView(decoder.id, issue, decoder.buf)) return null;
+  const view = parseStockView(new Uint32Array(decoder.w.HEAPU8.buffer, decoder.buf, decoder.viewWords), decoder.ohlc, decoder.layoutShift);
+  let walked;
+  try { walked = decoder.walkBook(issue, m, view); } catch (error) { if (error.trap) return null; throw error; }
+  return [decoder.board.book(issue, m, view), walked];
+}
+
+test('a quote\'s book is read from the decoder\'s ladder, as _getItaRows gives it, through the opening auction', { skip: !cache }, async () => {
+  const assets = loadAssets(cache);
+  const decoder = await Decoder.create(assets);
+  assert.ok(decoder.board, decoder.boardSkipped);
+  assert.deepEqual(decoder.board.calls, { lookup: [39, 34112], flag: 2556, rebuild: 218 });
+  assert.deepEqual(decoder.board.layout, { map: 92, start: 104, size: 108, base: 0, market: 16 });
+  const stream = frames(assets['ws.dat']);
+  decoder.start(stream.next().value.data);
+  let books = 0, levels = 0, closing = 0;
+  for (let n = 0; n < 600; n++) {
+    decoder.feed(stream.next().value.data);
+    for (const issue of decoder.changed()) {
+      const both = bothBooks(decoder, issue);
+      if (!both) continue;
+      assert.deepEqual(both[0], both[1], decoder.master[issue].code);
+      books++; levels += both[0].bid_levels.length + both[0].ask_levels.length;
+      closing += both[0].bid_closing_levels.length + both[0].ask_closing_levels.length;
+    }
+  }
+  assert.ok(books > 30000 && levels > 300000 && closing > 0, `${books} books, ${levels} levels, ${closing} closing`);
+});
+
+test('a decoder reads books through _getItaRows when its ladder reader is off, gone wrong or given a bad value', { skip: !cache }, async () => {
+  const assets = loadAssets(cache);
+  const [on, off] = [await Decoder.create(assets), await Decoder.create(assets, { board: false })];
+  assert.ok(on.board && !off.board);
+  for (let issue = 0; issue < on.master.length; issue += 13) assert.deepEqual(on.quote(issue), off.quote(issue));
+  // A check against _getItaRows that fails ends the reader, and the book read through _getItaRows is used.
+  const toyota = on.master.findIndex(m => m.code === '7203');
+  on.board.layout.market += 8;
+  on.board.reads = 4095;   // the next read is checked
+  const quote = on.quote(toyota);
+  assert.equal(on.board, null);
+  assert.match(on.boardSkipped, /its book of 7203 differed from _getItaRows' after 4096 reads/);
+  assert.deepEqual(quote, off.quote(toyota));
+  // A quantity _getItaRows could not convert is a trap here as there.
+  const fresh = await Decoder.create(assets), board = fresh.board;
+  const p = board.board(toyota);
+  new Float64Array(fresh.w.HEAPU8.buffer)[(p + board.layout.market + 8) >> 3] = -5;
+  assert.throws(() => fresh.quote(toyota), error => error.trap === true && /float unrepresentable/.test(error.message));
+});
+
+test('the board kernel embedded is board.wat assembled, and boardCalls finds what _getItaRows calls', () => {
+  const kernel = Buffer.from(BOARD_KERNEL, 'base64');
+  assert.throws(() => boardCalls(kernel), /_getItaRows or the invoke imports not found/);
+  const wat2wasm = spawnSync('wat2wasm', ['--version']);
+  if (wat2wasm.error) return;   // WABT not installed: the bytes stand as committed
+  const out = path.join(os.tmpdir(), `board-${process.pid}.wasm`);
+  const built = spawnSync('wat2wasm', [path.join(__dirname, '../../briskapi/decoder/board.wat'), '-o', out]);
+  assert.equal(built.status, 0, String(built.stderr));
+  assert.deepEqual(fs.readFileSync(out), kernel);
+  fs.rmSync(out);
 });
 
 test('a snapshot that restores the whole day\'s trades so far (millions, after the open) is taken whole', { skip: !cache }, async () => {

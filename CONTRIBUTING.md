@@ -28,7 +28,8 @@ changes only with a re-audited asset pin (`tools/brisk_mock/build_reference.py`)
 ## Development
 
 Work on free-threaded Python 3.14 (3.14t), on which a whole-market live feed keeps up, as CI
-does. A python.org build of it on macOS loads no CA certificates until its
+does. `briskapi/decoder/board.wat` is assembled into `decoder.cjs` (`BOARD_KERNEL`) with WABT's
+`wat2wasm`; a test checks the two agree where WABT is installed. A python.org build of it on macOS loads no CA certificates until its
 "Install Certificates" step has run; briskapi's own requests use the system's then (`briskapi/_https.py`).
 
 ```sh

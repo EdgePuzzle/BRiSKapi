@@ -13,16 +13,16 @@ const { Decoder } = require('./decoder.cjs');
 const POOL_MIN_ISSUES = 500;
 
 // How many workers suit this computer: its cores less four (for the Python feed's reading, parsing and
-// writing), from two to twelve. On an M5 Pro six take the demo's whole-market opening through the feed faster
-// than a live open sends it (about 130,000 quote updates a second); slower cores need more. Each holds a decoder
-// of about 270 MB.
+// writing), from two to eight. On an M5 Pro four take the demo's whole-market opening through the feed at about
+// 236,000 quote updates a second, nearly twice what a live open sends; slower cores need more. Each holds a
+// decoder of about 270 MB.
 function workerCount(env = process.env) {
   if (env.BRISK_WORKERS !== undefined && env.BRISK_WORKERS !== '') {
     const count = Number(env.BRISK_WORKERS);
     if (!Number.isInteger(count) || count < 0) throw new Error('BRISK_WORKERS must be a whole number (0 turns the workers off)');
     return count;
   }
-  return Math.min(12, Math.max(2, os.availableParallelism() - 4));
+  return Math.min(8, Math.max(2, os.availableParallelism() - 4));
 }
 
 class QuotePool {

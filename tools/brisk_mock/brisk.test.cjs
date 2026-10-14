@@ -579,7 +579,7 @@ test('how many quote workers, and a worker that cannot start stops the session',
   assert.equal(workerCount({ BRISK_WORKERS: '0' }), 0);
   assert.equal(workerCount({ BRISK_WORKERS: '3' }), 3);
   assert.throws(() => workerCount({ BRISK_WORKERS: 'two' }), /BRISK_WORKERS must be a whole number/);
-  assert.ok(workerCount({}) >= 2 && workerCount({}) <= 12);
+  assert.ok(workerCount({}) >= 2 && workerCount({}) <= 8);
   const { files } = demo();
   await assert.rejects(QuotePool.start({ assets: { ...files, 'master.dat': Buffer.alloc(16) }, ids: [0], count: 1,
     options: { protocolVersion: 16000 } }), /Quote worker 0:/);

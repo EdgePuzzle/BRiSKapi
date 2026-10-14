@@ -296,7 +296,8 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   } });
   trace?.(`master: ${decoder.master.length} issues, ${decoder.layout.size}-byte records, agreeing with the master file`
     + (decoder.boot.skipped_exceptional_sq ? `; special quotes not sent for ${decoder.boot.skipped_exceptional_sq.join(',')} (not in the master)` : '')
-    + (decoder.scheduled ? `; schedule applied (${decoder.ohlc} price bars)` : ''));
+    + (decoder.scheduled ? `; schedule applied (${decoder.ohlc} price bars)` : '')
+    + `; books read ${decoder.board ? 'from its ladder' : `through _getItaRows (${decoder.boardSkipped})`}`);
   const selected = new Set(codes);
   const master = decoder.master.filter(m => !selected.size || selected.has(m.code));
   const missing = codes.filter(code => !master.some(m => m.code === code));
