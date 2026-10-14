@@ -25,8 +25,9 @@ Run focused archive, query and API coverage (minimum 85%, `--cov=archive_service
 Node tests and Rust tests/fmt/Clippy. CI supplies downloaded demo fixtures. Keep README.md (usage only),
 ARCHITECTURE.md (internals), docs/cloud-api.md, PRIVACY.md, infra/README.md, docs/data-format.md (a test
 checks it, and its translation, name every API column) and schema documentation synchronized, together with
-the Japanese translations README.ja.md, PRIVACY.ja.md, docs/cloud-api.ja.md and docs/data-format.ja.md
-(the English PRIVACY.md governs); changes to collected
+the Japanese translations README.ja.md, PRIVACY.ja.md, docs/cloud-api.ja.md, docs/data-format.ja.md and
+docs/site/reference.ja.json (the API reference's; the site build fails while a method or parameter in
+docs/site/reference.py lacks one) (the English PRIVACY.md governs); changes to collected
 data bump `POLICY_VERSION`, and PRIVACY.md also covers how OHLCV bars are built and who
 receives them. The documentation site (`docs/site`, GitHub Pages) is built from these documents; when
 an API reference example changes, rerun `docs/site/capture.py` (it queries the demo dataset with a

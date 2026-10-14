@@ -416,20 +416,48 @@ def api_title(title):
     return f'<span class="api-title-prefix">{owner}.</span><wbr>{rest.replace(".", ".<wbr>")}' if dot else title
 
 
-def method_page(method, responses, query_url):
+# The reference pages' own words, per language; the method texts themselves are reference.py's and, in Japanese,
+# reference.ja.json's.
+LABELS = {
+    'en': {'parameters': 'Parameters', 'returns': 'Returns', 'required': 'required', 'optional': 'optional',
+           'method': 'API method', 'usage': 'Example usage', 'response': 'Example response', 'illustrative': 'Illustrative',
+           'captured': 'Captured from the demo',
+           'note': "Illustrative values: this call needs your broker's BRiSK, or your own uploads, to run."},
+    'ja': {'parameters': 'パラメーター', 'returns': '戻り値', 'required': '必須', 'optional': '任意',
+           'method': 'API メソッド', 'usage': '使用例', 'response': 'レスポンス例', 'illustrative': '説明用の値',
+           'captured': 'デモで実行した結果',
+           'note': '説明用の値です。この呼び出しの実行には、証券会社の BRiSK か、自分のアップロードが必要です。'},
+}
+
+
+def method_japanese(translations):
+    """reference.ja.json, checked against reference.py: every method, and each of its parameters, translated."""
+    for _, methods in reference.REFERENCE:
+        for method in methods:
+            ja = translations.get(method.slug)
+            assert ja and ja.get('text') and ja.get('returns'), f'reference.ja.json lacks {method.slug}'
+            assert set(ja.get('params', {})) == {p.name for p in method.params}, f'reference.ja.json: {method.slug} parameters'
+    assert set(translations) == {m.slug for _, methods in reference.REFERENCE for m in methods}, 'reference.ja.json: unknown methods'
+    return translations
+
+
+def method_page(method, responses, query_url, ja=None):
+    words = LABELS['ja' if ja else 'en']
+    text, returned = (ja['text'], ja['returns']) if ja else (method.text, method.returns)
     returns = method.signature.rpartition('-> ')[2] if '->' in method.signature else 'None'
     defaults = {name: value for name, value in DEFAULT.findall(method.signature) if value != 'None'}
-    left = [method.text, '']
+    left = [text, '']
     if method.params:
-        left += ['## Parameters', '']
+        left += [f"## {words['parameters']}", '']
         for p in method.params:
-            need = '<span class="param-required">required</span>' if p.required else '<span class="param-optional">optional</span>'
+            need = (f'<span class="param-required">{words["required"]}</span>' if p.required else
+                    f'<span class="param-optional">{words["optional"]}</span>')
             default = f' <span class="param-default">= {html.escape(defaults[p.name])}</span>' if p.name in defaults else ''
             left += ['<div class="param" markdown>', f'<div class="param-head"><code class="param-name">{p.name}</code> '
                      f'<span class="param-type">{html.escape(p.type)}</span> {need}{default}</div>',
-                     '', p.text, '', '</div>', '']
-    left += ['## Returns', '', '<div class="param" markdown>',
-             f'<div class="param-head"><span class="param-type">{html.escape(returns)}</span></div>', '', method.returns, '',
+                     '', ja['params'][p.name] if ja else p.text, '', '</div>', '']
+    left += [f"## {words['returns']}", '', '<div class="param" markdown>',
+             f'<div class="param-head"><span class="param-type">{html.escape(returns)}</span></div>', '', returned, '',
              '</div>', '']
     examples = {name: code.replace('{QUERY_URL}', query_url) for name, code in method.examples.items()}
     shown = method.responses if method.illustrative else responses.get(method.slug, {})
@@ -441,14 +469,13 @@ def method_page(method, responses, query_url):
     # A response's tabs follow the example's (content.tabs.link), so the card shows none of its own; a response
     # in one language, beside examples in several, says which.
     language = f' ({next(iter(shown))})' if len(shown) == 1 and len(examples) > 1 else ''
-    source = ('<span class="card-source card-source--illustrative">Illustrative</span>' if method.illustrative else
-              '<span class="card-source">Captured from the demo</span>')
-    note = ('<div class="card-note">Illustrative values: this call needs your broker\'s BRiSK, or your own uploads, to run.</div>'
-            if method.illustrative else '')
-    right = ['<div class="card" markdown>', '<div class="card-title">API method</div>', '', fence('python', method.signature), '',
-             '</div>', '<div class="card card--usage" markdown>', '<div class="card-title">Example usage</div>', '', usage, '',
+    source = (f'<span class="card-source card-source--illustrative">{words["illustrative"]}</span>' if method.illustrative else
+              f'<span class="card-source">{words["captured"]}</span>')
+    note = f'<div class="card-note">{words["note"]}</div>' if method.illustrative else ''
+    right = ['<div class="card" markdown>', f'<div class="card-title">{words["method"]}</div>', '', fence('python', method.signature),
+             '', '</div>', '<div class="card card--usage" markdown>', f'<div class="card-title">{words["usage"]}</div>', '', usage, '',
              '</div>', '<div class="card card--response" markdown>',
-             f'<div class="card-title"><span>Example response{language}</span>{source}</div>', note, '', result, '', '</div>']
+             f'<div class="card-title"><span>{words["response"]}{language}</span>{source}</div>', note, '', result, '', '</div>']
     http = ENDPOINT.search(method.examples.get('HTTP', ''))
     endpoint = ''
     if http:
@@ -524,10 +551,13 @@ def build():
     site.readmes()
     responses = json.loads((HERE / 'responses.json').read_text())
     query_url = json.loads((ROOT / 'briskapi' / 'archive.json').read_text())['query_url']
+    japanese = method_japanese(json.loads((HERE / 'reference.ja.json').read_text()))
     for _, methods in reference.REFERENCE:
         for method in methods:
             page = f'reference/{method.slug}.md'
             site.pages[page] = root_links(method_page(method, responses, query_url), page)
+            site.pages[page.replace('.md', '.ja.md')] = root_links(
+                method_page(method, responses, query_url, japanese[method.slug]), page)
     for page in ALONE:   # a tab of its own: its sidebar would list only itself
         for path in (page, page.replace('.md', '.ja.md')):
             meta, text = re.match(r'(?:---\n(.*?)\n---\n)?(.*)', site.pages[path], re.S).groups()

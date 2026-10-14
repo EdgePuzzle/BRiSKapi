@@ -516,7 +516,7 @@ BROKER = [
            {'Python': 'import briskapi\n\nbriskapi.login("e-shiten")   # BRISK_ESHITEN_COOKIES, or cookies saved by `brisk login`'},
            {'Python': '<briskapi.brisk.Client object>'}, illustrative=True),
     Method('python/broker_connect', 'briskapi.connect (your broker)', 'connect: broker',
-           'Your broker\'s live BRiSK feed (experimental), decoded by BRiSK\'s own decoder under Node. It records one trading '
+           'Your broker\'s live BRiSK feed, decoded by BRiSK\'s own decoder under Node. It records one trading '
            'day after another until closed, keeping (`output`) and uploading each finished day. Without `output`, a '
            'finished day is kept only in your archive, and with uploads off, nowhere. On the command line: '
            '`brisk live --site sbi` or `--site e-shiten` (see [Recording](/guides/recording.md)).',

@@ -1,0 +1,441 @@
+{
+ "historical/client": {
+  "text": "クラウド API のクライアントです。自分のアーカイブの ID が API キーなので、サインアップは不要です。リクエストは HTTPS でアーカイブの照会サービスに送られ、読めるのは自分の記録と公開デモだけです。",
+  "returns": "`Historical` クライアント。`timeseries` と `metadata` を備えています。",
+  "params": {
+   "key": "自分のアーカイブの ID。既定: このコンピューターのもの（`BRISK_IDENTITY`、システムの資格情報ストア、または `~/.config/brisk/identity.json`）。どれもなければ新しく作られ、復元コードの保管方法を示す警告が表示されます。",
+   "gateway": "クラウド API の URL。既定: インストール済みの `briskapi/archive.json` にある、アーカイブのもの。`https://`（または `http://localhost`）でなければなりません。"
+  }
+ },
+ "historical/timeseries/get_range": {
+  "text": "クラウドにある自分の記録から、1つのスキーマのレコードを、複数の銘柄・指定した期間について返します。重なった記録は統合され（各レコードは1回だけ）、時刻順に並びます。OHLCV バーはクラウドにしかなく、自分のアップロードだけから作られるため、アップロードがカバーする銘柄と時間帯の分だけが得られます。",
+  "returns": "レコードの [`DataStore`](/reference/historical/store/to_df.md)。",
+  "params": {
+   "dataset": "`XTKS.BRISK`（自分のライブ記録）または `XTKS.BRISKDEMO`（公開デモ。どの ID からでも照会できます）。",
+   "start": "開始（含む）。ISO 8601 形式の時刻（タイムゾーンの指定がなければ JST）、日付（その取引日の JST 0時から）、または UTC ナノ秒。",
+   "end": "終了（含まない）。形式は start と同じです。既定: start の取引日の終わり。`start` から最大31日後まで。どちらも2000年から2100年の間。",
+   "symbols": "JPX の銘柄コード（`\"7203\"`、`\"167A\"`）を最大2,000銘柄。リストまたはカンマ区切りで指定します。既定: `\"ALL_SYMBOLS\"`。",
+   "schema": "`trades`（既定）、`mbp-10`、`definition`、`imbalance`、`brisk-quotes`、または `ohlcv-1s`、`ohlcv-1m`、`ohlcv-1h`、`ohlcv-1d`。[データ形式](/data-format.md)を参照してください。",
+   "stype_in": "`raw_symbol`（JPX の銘柄コード）のみ。",
+   "stype_out": "`instrument_id` のみ。どのレコードにも銘柄コードが `symbol` として入ります。",
+   "limit": "返すレコード数の上限（時刻順に並べたあとで適用）。",
+   "path": "レコードを Parquet としてこのファイルにも書き出します。"
+  }
+ },
+ "historical/timeseries/get_range_bars": {
+  "text": "OHLCV バー: 約定のあった銘柄・間隔ごとに1行で、始値から終値までを表します。`XTKS.BRISK` のバーは、自分のライブ記録からあらかじめ作られ、自分の記録がその銘柄と、取引時間（前場 09:00〜11:30、後場 12:30〜15:30 JST）内のそのバーの全期間をカバーしている場合にだけ受け取れます。デモのバーは誰でも使えます。",
+  "returns": "バーの [`DataStore`](/reference/historical/store/to_df.md): `ts_event`（バーの開始時刻）、`open`、`high`、`low`、`close`（円）、`volume`（株数）。",
+  "params": {
+   "dataset": "`XTKS.BRISK`（自分のライブ記録）または `XTKS.BRISKDEMO`（公開デモ。どの ID からでも照会できます）。",
+   "start": "開始（含む）。ISO 8601 形式の時刻（タイムゾーンの指定がなければ JST）、日付（その取引日の JST 0時から）、または UTC ナノ秒。",
+   "end": "終了（含まない）。形式は start と同じです。既定: start の取引日の終わり。`start` から最大31日後まで。どちらも2000年から2100年の間。",
+   "symbols": "JPX の銘柄コード（`\"7203\"`、`\"167A\"`）を最大2,000銘柄。リストまたはカンマ区切りで指定します。既定: `\"ALL_SYMBOLS\"`。",
+   "schema": "`trades`（既定）、`mbp-10`、`definition`、`imbalance`、`brisk-quotes`、または `ohlcv-1s`、`ohlcv-1m`、`ohlcv-1h`、`ohlcv-1d`。[データ形式](/data-format.md)を参照してください。",
+   "limit": "返すレコード数の上限（時刻順に並べたあとで適用）。"
+  }
+ },
+ "historical/metadata/list_datasets": {
+  "text": "照会できるデータセット。名前は Databento と同じ形式で、取引所のあとにフィードが続きます。`XTKS` は東京証券取引所です。",
+  "returns": "データセットコードのリスト。",
+  "params": {}
+ },
+ "historical/metadata/list_publishers": {
+  "text": "各データセットのパブリッシャー: レコードの `publisher_id`、データセット、取引所、説明。これらの ID は briskapi 独自のもので、Databento の ID は別の取引所を指します。",
+  "returns": "`{publisher_id, dataset, venue, description}` のリスト。",
+  "params": {}
+ },
+ "historical/metadata/list_schemas": {
+  "text": "データセットが提供するスキーマ。",
+  "returns": "スキーマ名のリスト。",
+  "params": {
+   "dataset": "データセットコード。"
+  }
+ },
+ "historical/metadata/list_fields": {
+  "text": "スキーマのレコードの全列を、順に、型と意味とともに返します。[データ形式](/data-format.md)と同じ内容です。",
+  "returns": "`{name, type, description}` のリスト。",
+  "params": {
+   "schema": "スキーマ名。"
+  }
+ },
+ "historical/metadata/get_dataset_range": {
+  "text": "データセットでデータのある最初と最後の取引日。`XTKS.BRISK` では、自分の記録についての日付です。",
+  "returns": "`{start, end}`。ISO 8601 形式の日付で、どちらも含みます。データがなければエラー（HTTP 404）です。",
+  "params": {
+   "dataset": "データセットコード。"
+  }
+ },
+ "historical/metadata/get_dataset_condition": {
+  "text": "データセットの各日付の状態（`available` または `missing`）。`XTKS.BRISK` では、その日に自分の記録がカバーする時間帯（JST）も返します。",
+  "returns": "`{date, condition, last_modified_date, windows}` のリスト。",
+  "params": {
+   "dataset": "データセットコード。",
+   "start_date": "最初の日付（`YYYY-MM-DD`）。既定: データセットの最初の日付。",
+   "end_date": "最後の日付（含む）。既定: データセットの最後の日付。最大1年分。"
+  }
+ },
+ "historical/metadata/get_record_count": {
+  "text": "`get_range` のリクエストが返すレコード数。実行する前にサイズを見積もるために使います。",
+  "returns": "レコード数。",
+  "params": {
+   "dataset": "`XTKS.BRISK`（自分のライブ記録）または `XTKS.BRISKDEMO`（公開デモ。どの ID からでも照会できます）。",
+   "start": "開始（含む）。ISO 8601 形式の時刻（タイムゾーンの指定がなければ JST）、日付（その取引日の JST 0時から）、または UTC ナノ秒。",
+   "end": "終了（含まない）。形式は start と同じです。既定: start の取引日の終わり。`start` から最大31日後まで。どちらも2000年から2100年の間。",
+   "symbols": "JPX の銘柄コード（`\"7203\"`、`\"167A\"`）を最大2,000銘柄。リストまたはカンマ区切りで指定します。既定: `\"ALL_SYMBOLS\"`。",
+   "schema": "`trades`（既定）、`mbp-10`、`definition`、`imbalance`、`brisk-quotes`、または `ohlcv-1s`、`ohlcv-1m`、`ohlcv-1h`、`ohlcv-1d`。[データ形式](/data-format.md)を参照してください。",
+   "limit": "返すレコード数の上限（時刻順に並べたあとで適用）。"
+  }
+ },
+ "historical/metadata/get_cost": {
+  "text": "リクエストのコスト（米ドル）。常に 0 です。クラウド API は無料で、上限があります: 1つの ID あたり1分に60リクエスト・1日に 2 GB、1つの IP アドレスあたり1分に120リクエスト・1日に 4 GB。",
+  "returns": "`0.0`。",
+  "params": {
+   "dataset": "`XTKS.BRISK`（自分のライブ記録）または `XTKS.BRISKDEMO`（公開デモ。どの ID からでも照会できます）。",
+   "start": "開始（含む）。ISO 8601 形式の時刻（タイムゾーンの指定がなければ JST）、日付（その取引日の JST 0時から）、または UTC ナノ秒。",
+   "end": "終了（含まない）。形式は start と同じです。既定: start の取引日の終わり。`start` から最大31日後まで。どちらも2000年から2100年の間。",
+   "symbols": "JPX の銘柄コード（`\"7203\"`、`\"167A\"`）を最大2,000銘柄。リストまたはカンマ区切りで指定します。既定: `\"ALL_SYMBOLS\"`。",
+   "schema": "`trades`（既定）、`mbp-10`、`definition`、`imbalance`、`brisk-quotes`、または `ohlcv-1s`、`ohlcv-1m`、`ohlcv-1h`、`ohlcv-1d`。[データ形式](/data-format.md)を参照してください。"
+  }
+ },
+ "historical/store/to_df": {
+  "text": "レコードを pandas の DataFrame として返します（`pip install 'briskapi[pandas]'` が必要）。インデックスは `ts_recv`（バーでは `ts_event`）。Databento のものと同じです。",
+  "returns": "DataFrame。`count` を指定した場合は DataFrame のイテレーターです。",
+  "params": {
+   "price_type": "`\"float\"`（円）、`\"fixed\"`（1e-9 円単位の整数）、または `\"decimal\"`（`decimal.Decimal`）。",
+   "pretty_ts": "タイムスタンプを `pandas.Timestamp` で返します。`False` にすると UTC ナノ秒になります。",
+   "map_symbols": "`symbol` 列（JPX の銘柄コード）を残します。",
+   "tz": "タイムスタンプを表示するタイムゾーン。たとえば `\"Asia/Tokyo\"`。",
+   "count": "1つあたり最大この行数の DataFrame のイテレーターを返します。"
+  }
+ },
+ "historical/store/to_ndarray": {
+  "text": "レコードを numpy の構造化配列として返します。",
+  "returns": "構造化配列。",
+  "params": {
+   "count": "1つあたり最大この件数のレコードの配列のイテレーターを返します。"
+  }
+ },
+ "historical/store/to_csv": {
+  "text": "レコードを CSV として書き出します。",
+  "returns": "書き出したパス。",
+  "params": {
+   "path": "書き出す先。",
+   "pretty_px": "価格を円で出力します。`False` にすると 1e-9 円単位の整数になります。",
+   "pretty_ts": "ISO 8601 形式のタイムスタンプ。`False` にすると UTC ナノ秒になります。",
+   "map_symbols": "`symbol` 列を残します。"
+  }
+ },
+ "historical/store/to_json": {
+  "text": "レコードを JSON Lines として書き出します。1行に1レコードです。",
+  "returns": "書き出したパス。",
+  "params": {
+   "path": "書き出す先。",
+   "pretty_px": "価格を円で出力します。`False` にすると 1e-9 円単位の整数になります。",
+   "pretty_ts": "ISO 8601 形式のタイムスタンプ。`False` にすると UTC ナノ秒になります。",
+   "map_symbols": "`symbol` 列を残します。"
+  }
+ },
+ "historical/store/to_parquet": {
+  "text": "レコードを Parquet として書き出します。既定の設定なら、サービスが返したファイルそのものになります。",
+  "returns": "書き出したパス。",
+  "params": {
+   "path": "書き出す先。",
+   "price_type": "`\"float\"`、`\"fixed\"`、`\"decimal\"` のいずれか。`to_df` と同じです。",
+   "pretty_ts": "タイムスタンプ型で書き出します。`False` にすると UTC ナノ秒になります。",
+   "map_symbols": "`symbol` 列を残します。"
+  }
+ },
+ "historical/store/to_file": {
+  "text": "サービスから受け取ったままの形式で書き出します（Parquet。Databento では DBN）。",
+  "returns": "書き出したパス。",
+  "params": {
+   "path": "書き出す先。"
+  }
+ },
+ "historical/store/replay": {
+  "text": "各レコードを時刻順に関数へ渡して呼び出します。ストアを反復しても同じレコードが得られます。",
+  "returns": "`None`。",
+  "params": {
+   "callback": "各レコード（dict）を引数に呼び出されます。"
+  }
+ },
+ "python/connect": {
+  "text": "`brisk live --site` と同じく、サイトを指定してライブフィードを開始し、`Ticker` と `Market` の既定のデータ源にします。`site=\"demo\"` は公開の BRiSK Next デモです。ライブの接続ではなく、デモサイトがファイルとして配信している2021年9月27日の記録を、ダウンロードし、固定したハッシュと照合して、記録されたペースで再生します。`cache=DIR` を指定すると、以前ダウンロードした同じファイルのコピーから再生します。`site=\"sbi\"` または `\"e-shiten\"` は、お使いの証券会社のライブの BRiSK です（[下記](/reference/python/broker_connect.md)）。最後まで正常に終わったセッションは、オプトアウトしない限り自分専用のアーカイブにアップロードされ、`output` を指定するとディスクにも残ります。コマンドラインでは `brisk live` を使います（[記録する](/guides/recording.md)を参照）。",
+  "returns": "[`Feed`](/reference/python/feed_quotes.md)。選んだすべての銘柄の状態をすでに持っています。",
+  "params": {
+   "site": "`\"demo\"`、または `\"sbi\"`、`\"e-shiten\"`（お使いの証券会社のライブの BRiSK）。[`login`](/reference/python/broker_login.md) と同じ方法でサインインします（サインイン済みなら不要です）。",
+   "codes": "デコードする銘柄（既定: 市場全体）。",
+   "history": "すべての更新と約定を保持します（`Ticker.history()` と `.trades()` のため）。",
+   "upload": "`False` なら何もアップロードしません。`None` なら設定に従います（既定ではオン）。",
+   "output": "終わった日ごとに、`SOURCE_YYYYMMDD_FROM-TO` という名前でここにも残します。",
+   "on_day": "終わった日ごとに、その結果（残したか、アップロードしたか）を渡して呼ばれます。",
+   "gateway": "このコンピューターの `briskapi.Live()` にもフィードを配信します（`brisk live` は既定で配信します）。",
+   "timeout": "初期状態を待つ秒数（既定は 60、証券会社では 120）。",
+   "cache": "以前ダウンロードしたデモのファイルのコピーから再生します（既定: ダウンロードする）。",
+   "speed": "デモの再生速度。1 で記録されたペース、0 で最速。",
+   "limit_frames": "デモをこのフレーム数で止めます（途中までの再生はアップロードされません）。",
+   "trace_protocol": "証券会社への接続手順を stderr に出力します（トークンは伏せ字）。",
+   "profile": "証券会社への接続に使う、未検証の Socket.IO パラメーター。",
+   "upload_market_data": "`False` なら、証券会社のセッションのタイミングの要約はアップロードしますが、市場データの記録はアップロードしません。"
+  }
+ },
+ "python/record": {
+  "text": "デモの再生をフォルダーに記録し（Parquet のテーブル。[データ形式](/data-format.md)を参照）、オプトアウトしない限りアップロードして、既定のデータ源にします。コマンドラインでは `brisk record` を使います（[記録する](/guides/recording.md)を参照）。",
+  "returns": "`Recording`。",
+  "params": {
+   "output": "書き込むフォルダー。",
+   "cache": "以前ダウンロードしたデモのファイルのコピーから再生します（既定: ダウンロードする）。",
+   "codes": "記録する銘柄（既定: 市場全体）。",
+   "speed": "1 で記録されたペース、0 で最速。",
+   "limit_frames": "途中で止めます（アップロードされません）。",
+   "upload": "`False` なら、アップロードせず手元にだけ残します。"
+  }
+ },
+ "python/load": {
+  "text": "記録（フォルダーまたは `Recording`）かライブの `Feed` を、`Ticker` と `Market` の既定のデータ源にします。",
+  "returns": "そのデータ源。",
+  "params": {
+   "source": "読み込むもの。"
+  }
+ },
+ "python/pull": {
+  "text": "自分のアーカイブから自分の記録を1つダウンロードし、検証して、既定のデータ源にします。`output` を指定しない場合、ダウンロードしたものはキャッシュされます。",
+  "returns": "`Recording`。",
+  "params": {
+   "prefix": "記録のアーカイブ上の prefix。`briskapi.recordings()` で確認できます。",
+   "output": "キャッシュではなく、このフォルダーに残します。"
+  }
+ },
+ "python/recordings": {
+  "text": "自分専用のアーカイブにある、自分の記録。",
+  "returns": "`{prefix, source, trading_date, securities, batches, quote_updates, bytes, sha256}` の `Table`。",
+  "params": {
+   "date": "この取引日のみ（`YYYYMMDD`）。",
+   "source": "`sbi_live`、`eshiten_live`、`historical_mock`（デモ）。"
+  }
+ },
+ "python/consent": {
+  "text": "自分専用のアーカイブへの自動アップロードの設定を、表示、承諾、取り消しします。アップロードは既定でオンです（決めるまでは `default: True`）。[プライバシーポリシー](/privacy.md)を参照してください。",
+  "returns": "設定: `{policy_version, enabled, decided_at}`。まだ決めていない場合は既定値。",
+  "params": {
+   "accept": "アップロードをオンにします（ID がなければ作ります）。",
+   "revoke": "再び承諾するまで、アップロードをオフにします。"
+  }
+ },
+ "python/ticker_quote": {
+  "text": "ある時刻の銘柄の気配です。その時刻以前で最新の更新を、読み込んだ記録またはライブフィードから返します。",
+  "returns": "気配の各項目の dict（[データ形式](/data-format.md#local-and-cloud-names)を参照）。",
+  "params": {
+   "at": "JST の時刻（`\"09:00:00\"`）または `datetime`。既定は最新。",
+   "raw": "円と `datetime` の代わりに、BRiSK 自身の形式（0.1円単位、マイクロ秒）で返します。"
+  }
+ },
+ "python/ticker_history": {
+  "text": "銘柄のすべての更新を、古い順に返します。読み込んだ記録（その範囲がそのまま）か、ライブフィード（`history=True` の場合は、接続してからのすべての更新）を読み、ネットワークは使いません。複数日にわたる場合は [`Historical`](/reference/historical/timeseries/get_range.md) を使ってください。",
+  "returns": "`Table`（dict のリストで、`.to_pandas()` が使えます）。",
+  "params": {
+   "start": "この JST の時刻から。",
+   "end": "この JST の時刻まで。",
+   "raw": "BRiSK 自身の形式で返します。"
+  }
+ },
+ "python/ticker_trades": {
+  "text": "銘柄のすべての約定を、古い順に返します。価格、株数、仕掛けた側（`buy`、`sell`。寄付きの約定の多くは None）です。読み込んだ記録かライブフィードを読みます（ライブフィードでは `history=True` を指定すると、BRiSK のスナップショットが復元できる範囲で、その日の始めまでさかのぼります）。",
+  "returns": "`{code, issue_id, time, price, quantity, side, frame}` の `Table`。",
+  "params": {
+   "start": "この JST の時刻から。",
+   "end": "この JST の時刻まで。",
+   "raw": "BRiSK 自身の形式で返します。"
+  }
+ },
+ "python/ticker_auction": {
+  "text": "ある時刻の板寄せです。予想約定価格と数量、成行注文、板の合計、成行注文の売買差（買い − 売り）を返します。`closing=True` を指定すると、引けの板寄せ（引け条件付き注文）になります。",
+  "returns": "板寄せの状態の dict。",
+  "params": {
+   "at": "JST の時刻。既定は最新。",
+   "closing": "セッションの板寄せではなく、引けの板寄せ。"
+  }
+ },
+ "python/ticker_info": {
+  "text": "銘柄のマスター情報です。銘柄名、売買単位、呼値の種別、基準値、値幅制限（円）を返します。",
+  "returns": "dict。",
+  "params": {}
+ },
+ "python/ticker_candles": {
+  "text": "BRiSK 自身のローソク足を、証券会社の BRiSK のサーバーから取得します（[`briskapi.login`](/reference/python/broker_login.md) が必要です）。`5m` は当日のみで、`1d`・`1w`・`1mo` がどこまでさかのぼるかは BRiSK 次第で、まだ分かっていません。自分の記録から作ったバーがほしい場合は [`Historical`](/reference/historical/timeseries/get_range_bars.md) を使ってください。",
+  "returns": "`{date (or year/week/month), open, high, low, close, turnover}` の `Table`。",
+  "params": {
+   "interval": "`5m`、`1d`、`1w`、`1mo`。"
+  }
+ },
+ "python/ticker_margin": {
+  "text": "信用残と貸株料（日本証券金融、JSFC）を、取引日ごとに1行で、証券会社の BRiSK から取得します。",
+  "returns": "取引日ごとに1行の `Table`: `date`、`long_balance`、`short_balance`、`preliminary_long`、`preliminary_short`、`standardized_long`、`standardized_short`（株数）と、貸株料の `lending_fee`、`lending_fee_pct`、`lending_fee_days`、`lending_fee_max`。",
+  "params": {
+   "days": "さかのぼる取引日数。"
+  }
+ },
+ "python/market_snapshot": {
+  "text": "ある時刻の、全銘柄の気配。",
+  "returns": "`Table`。銘柄ごとに気配1件。",
+  "params": {
+   "at": "JST の時刻。既定は最新。",
+   "raw": "BRiSK 自身の形式で返します。"
+  }
+ },
+ "python/market_imbalances": {
+  "text": "成行注文の売買差（買い − 売り）が大きい順に並べた銘柄。`closing=True` を指定すると、引けの板寄せの売買差で並べます。",
+  "returns": "板寄せの状態の `Table`。売買差が最も大きいものが先頭。",
+  "params": {
+   "at": "JST の時刻。既定は最新。",
+   "top": "先頭からこの件数だけ。",
+   "closing": "引けの板寄せ。"
+  }
+ },
+ "python/market_special_quotes": {
+  "text": "ある時刻に特別気配になっている銘柄です。側、価格、タイマーの終了時刻を返します。",
+  "returns": "`Table`。",
+  "params": {
+   "at": "JST の時刻。"
+  }
+ },
+ "python/market_trades": {
+  "text": "読み込んだ記録かライブフィードから、全銘柄の約定を時刻順に返します。",
+  "returns": "約定の `Table`。",
+  "params": {
+   "start": "この JST の時刻から。",
+   "end": "この JST の時刻まで。",
+   "raw": "BRiSK 自身の形式で返します。"
+  }
+ },
+ "python/market_stocks": {
+  "text": "銘柄マスター。記録またはフィードにあるすべての銘柄です。",
+  "returns": "マスターの項目の `Table`。",
+  "params": {}
+ },
+ "python/market_summary": {
+  "text": "記録またはフィードのデータ源、取引日、対象範囲、時刻の範囲。",
+  "returns": "dict。",
+  "params": {}
+ },
+ "python/market_frames": {
+  "text": "記録のすべてのバッチ（フレーム）。時刻、ローカルの計測値、スキップした銘柄、気配と約定の件数を返します。",
+  "returns": "バッチごとに1行の `Table`。",
+  "params": {}
+ },
+ "python/market_turnover": {
+  "text": "上場しているすべての銘柄の売買代金と発行済株式数を、証券会社の BRiSK から取得します。",
+  "returns": "`{code, turnover, shares_outstanding}` の `Table`。",
+  "params": {}
+ },
+ "python/market_lists": {
+  "text": "BRiSK が用意している銘柄リスト（日経225、直近の IPO など）を、リスト ID ごとに、証券会社の BRiSK から取得します。",
+  "returns": "リスト ID から銘柄コードへの dict。",
+  "params": {}
+ },
+ "python/market_events": {
+  "text": "その日の市場のイベント（バスケット注文、ストップ高・安、出来高急増など）を、証券会社の BRiSK から取得します。",
+  "returns": "`{index, code, kind, type, price, value, change_bps, time}` の `Table`（価格は円）。",
+  "params": {
+   "first": "最初のイベントのインデックス。",
+   "last": "最後のイベントのインデックス。"
+  }
+ },
+ "python/market_schedule": {
+  "text": "取引日、セッションの状態、取引時間（JST）を、証券会社の BRiSK から取得します。",
+  "returns": "dict: `date`、`status`、`morning_pre_open`、`morning_open`、`morning_close`、`afternoon_pre_open`、`afternoon_open`、`afternoon_pre_close`、`afternoon_close`。",
+  "params": {}
+ },
+ "python/market_watchlist": {
+  "text": "証券会社の BRiSK のウォッチリストに保存した銘柄コード。",
+  "returns": "銘柄コードのリスト。",
+  "params": {}
+ },
+ "python/feed_quotes": {
+  "text": "ライブフィードの更新を、届いた順に取り出します。最初は選んだ各銘柄の現在の気配です。受け取る側の処理が遅い場合、更新を捨てずにフィードのほうが待ちます。",
+  "returns": "気配のイテレーター。",
+  "params": {
+   "codes": "これらの銘柄のみ。",
+   "raw": "BRiSK 自身の形式で返します。",
+   "timeout": "各更新を待つ秒数。"
+  }
+ },
+ "python/feed_on_quote": {
+  "text": "更新ごとに、フィードのスレッドで関数を呼び出します。その中で例外が起きるとフィードが止まり、`wait()` が例外を送出します。",
+  "returns": "購読を解除する関数。",
+  "params": {
+   "callback": "各気配を渡して呼ばれます。",
+   "codes": "これらの銘柄のみ。",
+   "raw": "BRiSK 自身の形式で返します。"
+  }
+ },
+ "python/feed_snapshot": {
+  "text": "ライブフィードで、選んだすべての銘柄の現在の気配。",
+  "returns": "`Table`。銘柄ごとに気配1件。",
+  "params": {
+   "raw": "BRiSK 自身の形式で返します。"
+  }
+ },
+ "python/archive_upload": {
+  "text": "パッケージ化した記録を自分専用のアーカイブにアップロードし、検証が終わるのを待ちます。",
+  "returns": "保存された記録の `{status, prefix, sha256}`。",
+  "params": {
+   "directory": "`manifest.json` を含む記録のフォルダー。",
+   "timeout": "検証を待つ秒数。"
+  }
+ },
+ "python/archive_delete": {
+  "text": "自分のアーカイブから、記録（またはタイミングレポート）を1つ削除します。30日間は復元でき、それを過ぎると削除されます。",
+  "returns": "`{status, removed, note}`。",
+  "params": {
+   "prefix": "記録の prefix。"
+  }
+ },
+ "python/archive_deleted": {
+  "text": "自分のアーカイブから削除したもので、まだ復元できるもの（削除から30日間）。",
+  "returns": "それぞれの `prefix` と `manifest`（タイミングレポートなら `key` と `report`）、`deleted_at`、`restore_until` を持つ `Table`。",
+  "params": {
+   "date": "この取引日のみ（`YYYYMMDD`）。"
+  }
+ },
+ "python/archive_restore": {
+  "text": "過去30日間に削除した記録（またはタイミングレポート）を元に戻します。`Archive().deleted()` で一覧できます。",
+  "returns": "`{status, restored}`。",
+  "params": {
+   "prefix": "記録の prefix。"
+  }
+ },
+ "python/archive_prune": {
+  "text": "ディスクを空けます。アーカイブにある記録のローカルのコピーを、SHA-256 を照合したうえで削除します。`pull` で元に戻せます。",
+  "returns": "`{pruned, bytes, prefix}`。",
+  "params": {
+   "directory": "ローカルの記録。"
+  }
+ },
+ "python/broker_login": {
+  "text": "証券会社の BRiSK に、そのセッション Cookie でサインインします。Cookie は、直接渡す（ログイン済みのブラウザーからコピーしたもの）、サイトごとの環境変数（`BRISK_SBI_COOKIES`、`BRISK_ESHITEN_COOKIES`。JSON）から読む、または `remember=True` や `brisk login`（パスキー）で保存したものを使います。以後、`Ticker` と `Market` の証券会社のデータ（ローソク足、信用残、売買代金、リスト、イベント、取引スケジュール、ウォッチリスト）はこのセッションから取得され、`connect(site=...)` もこのセッションを使います。`briskapi.logout()` はセッションと保存した Cookie を消去します。",
+  "returns": "セッションのクライアント。",
+  "params": {
+   "site": "`\"sbi\"` または `\"e-shiten\"`。",
+   "cookies": "サイトのセッション Cookie。",
+   "remember": "保存します（本人のみ読み取り可のファイル）。"
+  }
+ },
+ "python/broker_connect": {
+  "text": "お使いの証券会社のライブの BRiSK フィードです。BRiSK 自身のデコーダーを Node 上で動かしてデコードします。閉じるまで取引日を次々に記録し、終わった日ごとにディスクに残し（`output`）、アップロードします。`output` を指定しない場合、終わった日は自分のアーカイブにだけ残り、アップロードもオフならどこにも残りません。コマンドラインでは `brisk live --site sbi` または `--site e-shiten` を使います（[記録する](/guides/recording.md)を参照）。",
+  "returns": "[`Feed`](/reference/python/feed_quotes.md)。",
+  "params": {
+   "site": "`\"sbi\"` または `\"e-shiten\"`。[`login`](/reference/python/broker_login.md) で作ったセッションを使い、なければ同じ方法でサインインします。",
+   "codes": "デコードする銘柄。",
+   "history": "すべての更新と約定を保持します。",
+   "upload": "`False` なら何もアップロードしません。",
+   "upload_market_data": "`False` なら、タイミングの要約はアップロードしますが、市場データの記録はアップロードしません。",
+   "output": "終わった日ごとに、`SOURCE_YYYYMMDD_FROM-TO` という名前でここに残します。",
+   "on_day": "終わった日ごとに呼ばれます。",
+   "gateway": "このコンピューターの `briskapi.Live()` にもフィードを配信します（`brisk live` は既定で配信します）。",
+   "trace_protocol": "接続手順を出力します（トークンは伏せ字）。",
+   "profile": "未検証の Socket.IO パラメーター。サーバーが Socket.IO で始まる場合に使います。",
+   "timeout": "初期状態を待つ秒数（既定は 120）。"
+  }
+ }
+}

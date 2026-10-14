@@ -70,7 +70,8 @@ ingest format.
 
 `.github/workflows/pages.yml` publishes https://honvl.github.io/BRiSKapi/ from `main`: the README's
 sections as guides, the other documents as pages (their `.ja.md` translations as the Japanese site's)
-and an API reference generated from `docs/site/reference.py`. Its look is `docs/site/extra.css`, with
+and an API reference generated from `docs/site/reference.py`, in Japanese from `docs/site/reference.ja.json`
+(the build refuses a method or parameter it doesn't translate). Its look is `docs/site/extra.css`, with
 `docs/site/overrides` for the fonts and the version in the header. Each reference page shows its example's
 real output, kept in `docs/site/responses.json` (the home page shows the demo's one-minute bars from
 there too); after changing an example, run it again:
