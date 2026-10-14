@@ -426,7 +426,9 @@ class Decoder {
     if (size) flush();
     // Trades a snapshot restores (a live session's could be the whole day so far) predate the stream;
     // its quotes already count them. They are kept apart, for history().
-    this.restored.push(...this.qrm.take());
+    // One at a time: a snapshot taken during the session restores the day's trades so far, millions of them, more
+    // than a call can take as arguments.
+    for (const trade of this.qrm.take()) this.restored.push(trade);
   }
 
   // Bars of OHLC history ahead of the quote fields in a stock view. SBI's build

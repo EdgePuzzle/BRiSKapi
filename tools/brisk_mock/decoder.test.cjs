@@ -570,3 +570,11 @@ test('an 18000 master: text codes, the decoder\'s own names and tick types, limi
     { protocolVersion: 18000 }), /disagrees with its master file on 3 of 3 issues \(issue 0: code "1301", file "167A"\)/);
   assert.throws(() => new Decoder(fake, assets, { protocolVersion: 17000 }), /layout for protocol 17000 is not known/);
 });
+
+test('a snapshot that restores the whole day\'s trades so far (millions, after the open) is taken whole', { skip: !cache }, async () => {
+  const decoder = await Decoder.create(loadAssets(cache));
+  const before = decoder.restored.length, restored = Array.from({ length: 500000 }, (_, k) => ({ k }));
+  decoder.qrm.take = () => restored;   // what the decoder recorded while a day's snapshot loaded
+  decoder.unserialize(Buffer.alloc(0));
+  assert.equal(decoder.restored.length, before + restored.length);
+});
