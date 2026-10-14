@@ -124,13 +124,14 @@ class Spool:
                 self._pending.append((first, lines))
                 number = len(self._parts) + len(self._pending)
         if lines:
-            self._writer.submit(self._write, number, first, lines)
+            # Built from now on (on threads, without the GIL), while earlier parts are written in order.
+            self._writer.submit(self._write, number, first, lines, _parquet.part_columns(lines, self.header))
         if wait:
             self._writer.submit(lambda: None).result()
             if self._error:
                 raise self._error
 
-    def _write(self, number, first, lines):
+    def _write(self, number, first, lines, columns):
         if self._error:
             return
         try:
@@ -138,8 +139,7 @@ class Spool:
             staging = folder.with_name(f'.{folder.name}')
             shutil.rmtree(staging, ignore_errors=True)
             # Canonical, as package() makes them: nothing of the connection's diagnostics reaches the disk.
-            batches = list(canonical_batches(io.BytesIO(b''.join(lines))))
-            _parquet.write_part(batches, self.header, staging, self._carry)
+            _parquet.write_part(columns(), self.header, staging, self._carry)
             for name in (_parquet.BATCHES, _parquet.DEPTHS, _parquet.TRADES):
                 _fsync(staging / name)
             os.replace(staging, folder)

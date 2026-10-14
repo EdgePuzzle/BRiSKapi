@@ -20,14 +20,18 @@ archive's checks and reference fingerprints apply unchanged.
 from __future__ import annotations
 
 from array import array
+from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import hashlib
 import io
 import json
+import operator
+import os
 from pathlib import Path
 import re
 import sys
 import tempfile
+import threading
 import zipfile
 
 import numpy as np
@@ -35,7 +39,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from briskapi.schema import (BATCH_KEYS, LEVELS, MASTER_KEYS, MAX_COMPRESSED, QUOTE_KEYS, SCHEMA, SKIPPED, TRADE_KEYS,
-                             canonical, require, validate_batches, validate_manifest)
+                             canonical, canonical_batches, encode, require, validate_batches, validate_manifest)
 
 VENUE = 'XTKS'
 EQUITY, DEPTHS, TRADES, BATCHES = ('data/equity.parquet', 'data/order_book_depths.parquet', 'data/trades.parquet',
@@ -49,6 +53,29 @@ F_MBP, F_SNAPSHOT = 16, 32  # NautilusTrader record flags: market by price; the 
 MAX_ROWS = {EQUITY: 20_000, DEPTHS: 4_000_000, TRADES: 20_000_000, BATCHES: 4_000_000}
 MAX_DECODED = 2 * 1024**3
 JST = dt.timezone(dt.timedelta(hours=9))
+# Building columns and summaries is Python for every row; without the GIL (free-threaded Python) it is spread over
+# _THREADS threads, a spool part in slices of at least SLICE_LINES lines. A third of the cores, at most 4: the live
+# feed and its decoder host run meanwhile, and come first (8 slowed the demo's stream by two thirds, 4 by a tenth).
+_THREADS = min(4, max(1, (os.cpu_count() or 1) // 3))
+SLICE_LINES = 16
+_pool, _pool_lock = None, threading.Lock()
+
+
+def _threads():
+    """The shared pool, or None with the GIL on. Its tasks never wait for one another."""
+    global _pool
+    if sys._is_gil_enabled():
+        return None
+    with _pool_lock:
+        _pool = _pool or ThreadPoolExecutor(_THREADS, thread_name_prefix='brisk-parquet')
+    return _pool
+
+
+def _map(function, items):
+    """[function(item) for item in items], on threads when the GIL is off."""
+    items = list(items)
+    pool = _threads() if len(items) > 1 else None
+    return list(pool.map(function, items)) if pool else [function(item) for item in items]
 
 DECIMAL = pa.decimal128(38, 16)
 TIME = pa.timestamp('ns', tz='UTC')
@@ -75,6 +102,12 @@ COUNTS = tuple(k for k in QUOTE_ORDER if k not in {'issue_id', 'code', 'frame', 
 # Integer columns held in memory: the quote's, plus the batch each update arrived in.
 INTS = ('seq', *(k for k in QUOTE_ORDER if k not in {'code', *BOOKS}))
 TRADE_INTS = ('seq', 'issue_id', 'frame', 'time_us', 'price10', 'quantity', 'side')
+def _split(seqs, flat, keys):
+    """Columns (`keys`, the first `seq`) of each row's batch and its other integers, given row after row."""
+    n = len(seqs)
+    rows = np.frombuffer(flat, np.int64).reshape(n, len(keys) - 1) if n else np.zeros((0, len(keys) - 1), np.int64)
+    return {'seq': np.frombuffer(seqs, np.int64) if n else np.zeros(0, np.int64),
+            **{k: np.ascontiguousarray(rows[:, i]) for i, k in enumerate(keys[1:])}}
 # The decoder's trade types as v2's AggressorSide.
 AGGRESSOR = {1: 'BUY', 2: 'SELL'}
 assert set(QUOTE_ORDER) == QUOTE_KEYS and set(TRADE_INTS[1:]) | {'code'} == TRADE_KEYS
@@ -215,45 +248,52 @@ class Columns:
     @classmethod
     def from_batches(cls, batches):
         """Columns from decoder batches, refusing unknown or missing fields."""
-        ints = {k: array('q') for k in INTS}
-        code, books = [], {side: (array('q'), array('q')) for side in BOOKS}
-        trades, t_code = {k: array('q') for k in TRADE_INTS}, []
+        # A quote's integers go into one row-major array, taken in C by an itemgetter, then split into columns.
+        seqs, flat, code = array('q'), array('q'), []
+        # Each code once (as interning would keep it, but sys.intern is one lock for every thread); and this call's
+        # own key sets, as a set shared between threads is locked on every use.
+        codes, quote_keys, trade_keys = {}, set(QUOTE_KEYS), set(TRADE_KEYS)
+        batch_keys = {kind: set(keys) for kind, keys in BATCH_KEYS.items()}
+        quote_ints, trade_ints, book_sides = (operator.itemgetter(*INTS[1:]), operator.itemgetter(*TRADE_INTS[1:]),
+                                              operator.itemgetter(*BOOKS))
+        books = {side: (array('q'), array('q')) for side in BOOKS}
+        sides = list(books.values())
+        t_seqs, t_flat, t_code = array('q'), array('q'), []
         rows, master = [], None
         try:
             for b in batches:
-                require(isinstance(b, dict) and b.get('type') in BATCH_KEYS and set(b) - {SKIPPED} == BATCH_KEYS[b['type']],
+                require(isinstance(b, dict) and b.get('type') in batch_keys and set(b) - {SKIPPED} == batch_keys[b['type']],
                         'Unknown or missing batch fields')
                 rows.append({k: v for k, v in b.items() if k not in ('master', 'quotes')})
                 if b['type'] == 'bootstrap' and master is None:
                     master = b['master']
                     require(isinstance(master, list) and all(isinstance(m, dict) and set(m) == MASTER_KEYS for m in master),
                             'Unknown or missing master fields')
-                for q in b.get('quotes', ()):
-                    require(isinstance(q, dict) and set(q) == QUOTE_KEYS, 'Unknown or missing quote fields')
-                    ints['seq'].append(b['seq'])
-                    for k in INTS[1:]:
-                        ints[k].append(q[k])
+                quotes = b.get('quotes', ())
+                for q in quotes:
+                    require(isinstance(q, dict) and q.keys() == quote_keys, 'Unknown or missing quote fields')
+                    flat.extend(quote_ints(q))
                     require(isinstance(q['code'], str), 'Invalid security code')
-                    code.append(sys.intern(q['code']))
-                    for side in BOOKS:
-                        counts, levels = books[side]
-                        require(isinstance(q[side], list), 'Invalid book side')
-                        counts.append(len(q[side]))
-                        for level in q[side]:
-                            require(isinstance(level, list) and len(level) == 3, 'Invalid book level')
+                    code.append(codes.setdefault(q['code'], q['code']))
+                    for (counts, levels), side in zip(sides, book_sides(q)):
+                        require(isinstance(side, list), 'Invalid book side')
+                        counts.append(len(side))
+                        for level in side:
+                            if type(level) is not list or len(level) != 3:
+                                raise ValueError('Invalid book level')
                             levels.extend(level)
-                for t in b.get('trades', ()):
-                    require(isinstance(t, dict) and set(t) == TRADE_KEYS, 'Unknown or missing trade fields')
-                    trades['seq'].append(b['seq'])
-                    for k in TRADE_INTS[1:]:
-                        trades[k].append(t[k])
+                seqs.extend([b['seq']] * len(quotes))
+                trades = b.get('trades', ())
+                for t in trades:
+                    require(isinstance(t, dict) and t.keys() == trade_keys, 'Unknown or missing trade fields')
+                    t_flat.extend(trade_ints(t))
                     require(isinstance(t['code'], str), 'Invalid security code')
-                    t_code.append(sys.intern(t['code']))
+                    t_code.append(codes.setdefault(t['code'], t['code']))
+                t_seqs.extend([b['seq']] * len(trades))
         except (TypeError, OverflowError) as error:
             raise ValueError(f'Invalid recording value: {error}') from None
         require(rows and rows[0]['type'] == 'bootstrap' and master is not None, 'Recording has no bootstrap')
-        q = {k: np.frombuffer(v, np.int64) if len(v) else np.zeros(0, np.int64) for k, v in ints.items()}
-        t = {k: np.frombuffer(v, np.int64) if len(v) else np.zeros(0, np.int64) for k, v in trades.items()}
+        q, t = _split(seqs, flat, INTS), _split(t_seqs, t_flat, TRADE_INTS)
         t_order = np.lexsort((np.arange(len(t_code)), t['seq'], t['issue_id']))
         t, t_code = {k: v[t_order] for k, v in t.items()}, np.array(t_code, dtype=object)[t_order]
         code = np.array(code, dtype=object)
@@ -429,13 +469,20 @@ class Columns:
             values[side] = [flat[bounds[i]:bounds[i + 1]] for i in range(len(idx))]
         return [dict(zip(QUOTE_ORDER, row)) for row in zip(*(values[k] for k in QUOTE_ORDER))]
 
-    def iter_batches(self):
-        """The decoder's batches in order: quotes sorted by issue, and trades by issue then in the decoder's
-        order, as in the canonical stream."""
+    def _by_batch(self):
+        """The quote and trade rows in batch order, and their batches."""
         order, t_order = np.argsort(self.q['seq'], kind='stable'), np.argsort(self.t['seq'], kind='stable')
-        seqs, t_seqs = self.q['seq'][order], self.t['seq'][t_order]
+        return order, t_order, self.q['seq'][order], self.t['seq'][t_order]
+
+    def iter_batches(self, start=0, stop=None, by_batch=None):
+        """The decoder's batches in order (those from `start` to `stop`): quotes sorted by issue, and trades by
+        issue then in the decoder's order, as in the canonical stream."""
+        order, t_order, seqs, t_seqs = by_batch or self._by_batch()
+        batches = self.batches[start:stop]
         at = t_at = 0
-        for b in self.batches:
+        if start and batches:
+            at, t_at = (int(np.searchsorted(s, batches[0]['seq'], 'left')) for s in (seqs, t_seqs))
+        for b in batches:
             end, t_end = int(np.searchsorted(seqs, b['seq'], 'right')), int(np.searchsorted(t_seqs, b['seq'], 'right'))
             require(int(np.searchsorted(seqs, b['seq'], 'left')) == at
                     and int(np.searchsorted(t_seqs, b['seq'], 'left')) == t_at, 'Quotes or trades outside their batches')
@@ -448,7 +495,38 @@ class Columns:
                 batch['trades'] = self.trades_at(t_order[t_at:t_end])
             at, t_at = end, t_end
             yield batch
-        require(at == len(seqs) and t_at == len(t_seqs), 'Quotes or trades outside their batches')
+        if stop is None or stop >= len(self.batches):
+            require(at == len(seqs) and t_at == len(t_seqs), 'Quotes or trades outside their batches')
+
+    def summary(self):
+        """The archive's summary of this content (validate_batches'), without its checks: the archive runs them
+        on every upload. For our own spooled sessions, where checking a day locally would cost minutes."""
+        first, last = self.batches[0], self.batches[-1]
+        require(first['type'] == 'bootstrap', 'Recording has no bootstrap')
+        require(last['type'] == 'end', 'Recording has no clean end')
+        by_batch, n = self._by_batch(), len(self.batches)
+        step = max(1, -(-n // (4 * _THREADS)))
+        sizes = _map(lambda start: sum(len(encode(b)) for b in self.iter_batches(start, start + step, by_batch)),
+                     range(0, n, step))
+        return dict(source=first['source'], trading_date=first['trading_date'], first_source_time_us=first['source_time_us'],
+                    last_source_time_us=last['source_time_us'], codes=sorted(m['code'] for m in self.master),
+                    batches=n, quote_updates=len(self), expanded_bytes=sum(sizes))
+
+    @classmethod
+    def concat(cls, pieces, master):
+        """Consecutive pieces of one stream as one: quotes in the canonical order, by issue then batch; trades by
+        issue, batch, then the decoder's order (as each piece kept it)."""
+        q = {k: np.concatenate([c.q[k] for c in pieces]) for k in INTS}
+        code = np.concatenate([c.code for c in pieces])
+        books = {}
+        for side in BOOKS:
+            counts = np.concatenate([np.diff(c.books[side][0]) for c in pieces])
+            books[side] = (np.concatenate([[0], np.cumsum(counts)]), np.concatenate([c.books[side][1] for c in pieces]))
+        t = {k: np.concatenate([c.t[k] for c in pieces]) for k in TRADE_INTS}
+        t_code = np.concatenate([c.t_code for c in pieces])
+        t_order = np.lexsort((np.arange(len(t_code)), t['seq'], t['issue_id']))
+        return cls(q, code, books, master, [b for c in pieces for b in c.batches], {k: v[t_order] for k, v in t.items()},
+                   t_code[t_order], order=np.lexsort((q['seq'], q['issue_id'])))
 
     def trades_at(self, idx) -> list[dict]:
         """Trade dicts (as the decoder emits them) for these trade rows."""
@@ -632,16 +710,39 @@ def stream_tables(batches, carry=None, depths=True, trades=True):
             columns._trades(midnight, slice(None)) if trades else None)
 
 
-def write_part(batches, header, directory, carry=None):
-    """A spool part (see briskapi._spool): the depths, trades and batch tables of consecutive decoder batches.
+def part_columns(lines, header):
+    """Start building the Columns of consecutive decoder lines, canonical (canonical_batches): the same as
+    Columns.from_batches of them. Returns a function that gives them. Without the GIL they are parsed and built
+    from now on, in slices of at least SLICE_LINES lines on threads; with it, by the function, here.
+    `header` (the segment's bootstrap without quotes and trades) stands in for the bootstrap of a slice that
+    starts later."""
+    def build(piece):
+        batches = list(canonical_batches(io.BytesIO(b''.join(piece))))
+        first = batches[0]['type'] == 'bootstrap'
+        columns = Columns.from_batches(batches if first else [header, *batches])
+        if not first:
+            columns.batches = columns.batches[1:]
+        return columns
+    pool = _threads()
+    if pool is None:
+        return lambda: build(lines)
+    count = max(1, min(_THREADS, len(lines) // SLICE_LINES))
+    step = -(-len(lines) // count)
+    pieces = [pool.submit(build, lines[i:i + step]) for i in range(0, len(lines), step)]
+
+    def columns():
+        built = [piece.result() for piece in pieces]
+        return built[0] if len(built) == 1 else Columns.concat(built, built[0].master)
+    return columns
+
+
+def write_part(columns, header, directory, carry=None):
+    """A spool part (see briskapi._spool): the depths, trades and batch tables of consecutive decoder lines'
+    Columns (part_columns).
 
     `header` is the segment's bootstrap without quotes and trades; it stands in for the master when the part
     starts later. `carry` continues trade IDs from the parts before. Equity is written once, by the spool.
     """
-    first = batches[0]['type'] == 'bootstrap'
-    columns = Columns.from_batches(batches if first else [header, *batches])
-    if not first:
-        columns.batches = columns.batches[1:]
     midnight = midnight_ns(header['trading_date'])
     columns.trade_ids(carry)
     directory = Path(directory)
@@ -675,19 +776,7 @@ def load_parts(equity, parts):
             midnight = midnight_ns(first['trading_date'])
         pieces.append(_part_columns(Path(part), midnight, master))
     require(pieces, 'Recording has no bootstrap')
-    q = {k: np.concatenate([c.q[k] for c in pieces]) for k in INTS}
-    code = np.concatenate([c.code for c in pieces])
-    books = {}
-    for side in BOOKS:
-        counts = np.concatenate([np.diff(c.books[side][0]) for c in pieces])
-        books[side] = (np.concatenate([[0], np.cumsum(counts)]), np.concatenate([c.books[side][1] for c in pieces]))
-    t = {k: np.concatenate([c.t[k] for c in pieces]) for k in TRADE_INTS}
-    t_code = np.concatenate([c.t_code for c in pieces])
-    # The canonical order: quotes by issue then batch; trades by issue, batch, then the decoder's order (as
-    # each part kept it).
-    t_order = np.lexsort((np.arange(len(t_code)), t['seq'], t['issue_id']))
-    return Columns(q, code, books, master, [b for c in pieces for b in c.batches], {k: v[t_order] for k, v in t.items()},
-                   t_code[t_order], order=np.lexsort((q['seq'], q['issue_id'])))
+    return Columns.concat(pieces, master)
 
 
 def repair_end(columns) -> bool:

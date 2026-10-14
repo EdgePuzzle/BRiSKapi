@@ -181,14 +181,17 @@ def package_parts(equity, parts, output, repair=False):
         if repair:
             _parquet.repair_end(columns)
         columns.write(output)
+        return columns.summary()   # not checked here: the archive checks every upload, and a day took minutes
     return _package(output, write)
 
 def _package(output, write):
+    """Package what write() puts in `output`; it returns the summary, or None to have the tables checked for it."""
     output.mkdir(parents=True, exist_ok=True)
     require(not any((output / name).exists() for name in (*_parquet.FILES, 'manifest.json')), 'Package output already exists')
     try:
-        write()
-        summary = _parquet.summarize(output)
+        summary = write()
+        if summary is None:
+            summary = _parquet.summarize(output)
         blob = _parquet.pack(output)
         require(len(blob) <= MAX_COMPRESSED, f'The package is {len(blob) / 2**20:.0f} MiB; '
                                              f'the archive accepts up to {MAX_COMPRESSED // 2**20} MiB')

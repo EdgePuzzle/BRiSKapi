@@ -65,7 +65,12 @@ def small_parts(monkeypatch):
     monkeypatch.setattr(_spool, 'PART_BYTES', _spool.PART_BYTES)
 
 
-def test_a_spooled_segment_packages_to_the_same_bytes_as_its_batches_at_once(tmp_path):
+@pytest.mark.parametrize('slices, gil', [(16, False), (1, False), (1, True)])
+def test_a_spooled_segment_packages_to_the_same_bytes_as_its_batches_at_once(tmp_path, monkeypatch, slices, gil):
+    # Parts built in slices on threads (1: a slice from every line), or one at a time with the GIL; the package's
+    # summary is the columns' own, which must be the one the archive's checks give (cli.package's).
+    monkeypatch.setattr(_parquet, 'SLICE_LINES', slices)
+    monkeypatch.setattr(_parquet.sys, '_is_gil_enabled', lambda: gil)
     batches = session()
     (tmp_path / 'events.jsonl').write_bytes(b''.join(lines(batches)))
     whole = cli.package(tmp_path / 'events.jsonl', tmp_path / 'whole')
