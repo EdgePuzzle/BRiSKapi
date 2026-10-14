@@ -1,8 +1,9 @@
 name: Recorder and archive CI
 on:
   pull_request:
-
+  # Not on tags: a release's commit was tested here on main, and the release workflow tests it again.
   push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -22,14 +23,20 @@ jobs:
         run: python -c "import sys, numpy, pyarrow, pandas, briskapi; assert not sys._is_gil_enabled(), 'the GIL is on'"
       - run: python -m pytest tests --cov=archive_service --cov=query_engine --cov=query_service --cov=briskapi --cov-fail-under=85
       - run: python -m pytest tools/brisk_mock/test_download.py tools/brisk_mock/test_sbi_master_layout.py
+      # The demo's files are pinned by hash (briskapi/decoder/assets.json): fetched from BRiSK's demo site once,
+      # then kept here, as download_mock.py leaves alone a file that matches its pin.
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/brisk-mock-cache
+          key: brisk-demo-${{ hashFiles('briskapi/decoder/assets.json') }}
       - run: python tools/brisk_mock/download_mock.py --cache /tmp/brisk-mock-cache
       - name: Verify archive reference against the pinned demo replay
         run: python -m pytest tools/brisk_mock/test_reference.py
         env:
           BRISK_MOCK_CACHE: /tmp/brisk-mock-cache
-      # One test file at a time: several replay the whole demo market through decoder worker pools, and three at
-      # once (the default on a 4-core runner) have had the runner shut down mid-step.
-      - run: node --test --test-concurrency=1 --experimental-test-coverage tools/brisk_mock/*.test.cjs
+      # Without --experimental-test-coverage: it held some 6 GB more per file (each decoder's WebAssembly), and
+      # three files at once ran the runner out of memory.
+      - run: node --test tools/brisk_mock/*.test.cjs
         env:
           BRISK_MOCK_CACHE: /tmp/brisk-mock-cache
       - name: Smoke-test the wheel outside the repository
@@ -47,18 +54,3 @@ jobs:
           BRISK_MOCK_CACHE: /tmp/brisk-mock-cache
       - run: cargo fmt --manifest-path rust/brisk_quote_ingest/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path rust/brisk_quote_ingest/Cargo.toml --all-targets -- -D warnings
-  # The passkey sign-in has Windows-only code (Credential Manager, UTF-8 handling, how the helper is stopped)
-  # that the Linux job cannot exercise, so its tests run on Windows too, in a real Chrome.
-  passkey-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.14t'
-      - run: python -m pip install -r requirements-dev.txt -e .
-      - run: python -m pytest tests/test_passkey.py tests/test_sites.py
-      - run: node --test tools/brisk_mock/passkey.test.cjs

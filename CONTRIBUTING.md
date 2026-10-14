@@ -47,7 +47,10 @@ cargo clippy --locked --manifest-path rust/brisk_quote_ingest/Cargo.toml --all-t
 ```
 
 Ordinary tests are local and never touch the cloud. `BRISK_MOCK_CACHE` opts into
-fixture replay. CI runs all of the above. Aim for at least 85% coverage of new
+fixture replay. CI runs all of the above on pull requests and pushes to `main` (with the demo's
+pinned files cached, so BRiSK's demo site is asked only when a pin changes), and the passkey tests on
+Windows too when the sign-in, or what it uses, changes (`.github/workflows/passkey.yml`). Node's test
+coverage is left off there: it held some 6 GB more per test file. Aim for at least 85% coverage of new
 behavior.
 
 Keep `README.md` and `README.ja.md` in step; internals belong in `ARCHITECTURE.md`.

@@ -925,7 +925,8 @@ being refused as a clone, `launch_url`, a missing passkey control, delivery to a
 file, and that nothing secret is logged. A page shaped like e-shiten's (user ID box, image-only
 control, ceremony in a named popup that reports to its opener) covers typing the user ID, a missing
 box, and a second ceremony in a popup after a first one. They skip when Chrome is absent. They were run on macOS, on native Windows 11 (Windows' own Node,
-Python and Chrome; the full suite including the real Credential Manager) and, in CI, on Linux.
+Python and Chrome; the full suite including the real Credential Manager) and, in CI, on Linux, and on Windows
+whenever the sign-in or what it uses changes.
 
 What is not verified against any real broker: each site's login URL (SBI's redirected to a
 maintenance page when checked, SMBC Nikko's and Monex's refuse a bare request), the passkey control's

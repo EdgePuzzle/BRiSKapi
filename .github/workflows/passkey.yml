@@ -1,0 +1,50 @@
+name: Passkey sign-in on Windows
+# The passkey sign-in has Windows-only code (Credential Manager, UTF-8 handling, how the helper is stopped) that
+# the Linux job cannot exercise, so its tests run on Windows too, in a real Chrome: when it, or what it uses, changes.
+on:
+  pull_request:
+    paths:
+      - briskapi/passkey.py
+      - briskapi/sites.py
+      - briskapi/brisk.py
+      - briskapi/cli.py
+      - briskapi/decoder/passkey.cjs
+      - tests/conftest.py
+      - tests/test_passkey.py
+      - tests/test_sites.py
+      - tools/brisk_mock/passkey.test.cjs
+      - requirements-dev.txt
+      - pyproject.toml
+      - .github/workflows/passkey.yml
+  push:
+    branches: [main]
+    paths:
+      - briskapi/passkey.py
+      - briskapi/sites.py
+      - briskapi/brisk.py
+      - briskapi/cli.py
+      - briskapi/decoder/passkey.cjs
+      - tests/conftest.py
+      - tests/test_passkey.py
+      - tests/test_sites.py
+      - tools/brisk_mock/passkey.test.cjs
+      - requirements-dev.txt
+      - pyproject.toml
+      - .github/workflows/passkey.yml
+
+permissions:
+  contents: read
+jobs:
+  passkey-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14t'
+      - run: python -m pip install -r requirements-dev.txt -e .
+      - run: python -m pytest tests/test_passkey.py tests/test_sites.py
+      - run: node --test tools/brisk_mock/passkey.test.cjs
