@@ -8,6 +8,7 @@ const path = require('node:path');
 const { Session, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, fetchCatchUp, Interrupted, fatal,
   RETRY_MS } = require('../../briskapi/decoder/brisk.cjs');
 const { frames, Decoder } = require('../../briskapi/decoder/decoder.cjs');
+const { QuotePool, workerCount, merge } = require('../../briskapi/decoder/workers.cjs');
 const cache = process.env.BRISK_MOCK_CACHE;
 
 const IDENTITY = 'a'.repeat(64);
@@ -473,6 +474,76 @@ function snapshotBehind(by, fixed) {
   return () => { Decoder.prototype.frameNumbers = real; };
 }
 
+// The batches a session writes as Python reads them (a batch whose quotes workers read comes as its line),
+// without the fields that time the run.
+function reading() {
+  const batches = [];
+  const emit = async (record, line) => { batches.push(JSON.parse(line ?? JSON.stringify(record))); };
+  const timeless = () => batches.map(({ received_unix_ms, decode_ns, replay_wall_ms, ...b }) => {
+    if (b.input_transport) { const { setup_ms, ...transport } = b.input_transport; b.input_transport = transport; }
+    return b;
+  });
+  return { batches, emit, timeless };
+}
+
+// A server that sends its first `split` frames, and the rest `afterMs` later (after a catch-up), then closes.
+function laterSocket(chunks, split, afterMs) {
+  return class extends EventTarget {
+    constructor() {
+      super();
+      const send = list => list.forEach(c => this.dispatchEvent(new MessageEvent('message', { data: c.buffer.slice(c.byteOffset, c.byteOffset + c.length) })));
+      setImmediate(() => send(chunks.slice(0, split)));
+      this.timer = setTimeout(() => { send(chunks.slice(split)); setImmediate(() => this.close(1000)); }, afterMs);
+    }
+    send() {}
+    close(code = 1000) {
+      clearTimeout(this.timer);
+      if (this.closed) return;
+      this.closed = true;
+      this.dispatchEvent(Object.assign(new Event('close'), { code, reason: '' }));
+    }
+  };
+}
+
+test('with quote workers a session writes the same batches, its quotes read in parallel', { skip: !cache }, async () => {
+  const { files } = demo();
+  const chunks = [...frames(files['ws.dat'])].slice(0, 300).map(f => f.data);
+  const run = async (workers, behind) => {
+    const { emit, timeless } = reading();
+    let caught = false;
+    const restore = behind ? snapshotBehind(5, () => caught) : () => {};
+    try {
+      await live({ cookies: { s: 'v' }, emit, protocolVersion: 16000, fetchImpl: server(files).fetchImpl, workers,
+        WebSocketImpl: behind ? laterSocket(chunks, 3, 100) : socketFrom(chunks),
+        ...(behind && { catchUp: async () => { caught = true; return Buffer.alloc(0); } }) });
+    } finally { restore(); }
+    return timeless();
+  };
+  const alone = await run(0);
+  assert.ok(alone.filter(b => b.type === 'quotes').reduce((n, b) => n + b.quotes.length, 0) > 10000, 'the whole market');
+  assert.deepEqual(await run(2), alone);
+  // A catch-up reaches the workers' decoders as the host's, and the frames after it read the same.
+  const caughtUp = await run(0, true);
+  assert.ok(caughtUp.filter(b => b.type === 'quotes').length > 200);
+  assert.deepEqual(await run(2, true), caughtUp);
+});
+
+test('the workers\' quotes come back in the host\'s order, and a worker that traced other issues stops the session', () => {
+  const results = [{ ids: [2, 4], quotes: ['"q2"', null], decode_ns: 5 }, { ids: [1, 3], quotes: ['"q1"', '"q3"'], decode_ns: 9 }];
+  assert.deepEqual(merge([1, 2, 3, 4], results, 2), { quotes: ['"q1"', '"q2"', '"q3"'], skipped: [4], decode_ns: 9 });
+  assert.throws(() => merge([1, 2, 3, 4], [{ ...results[0], ids: [2] }, results[1]], 2), /Quote worker 0 decoded other issues.*diverged/);
+});
+
+test('how many quote workers, and a worker that cannot start stops the session', { skip: !cache }, async () => {
+  assert.equal(workerCount({ BRISK_WORKERS: '0' }), 0);
+  assert.equal(workerCount({ BRISK_WORKERS: '3' }), 3);
+  assert.throws(() => workerCount({ BRISK_WORKERS: 'two' }), /BRISK_WORKERS must be a whole number/);
+  assert.ok(workerCount({}) >= 2 && workerCount({}) <= 12);
+  const { files } = demo();
+  await assert.rejects(QuotePool.start({ assets: { ...files, 'master.dat': Buffer.alloc(16) }, ids: [0], count: 1,
+    options: { protocolVersion: 16000 } }), /Quote worker 0:/);
+});
+
 test('a snapshot behind the stream is caught up while frames keep arriving', { skip: !cache }, async () => {
   const { files, chunks } = demo();
   let caught = false, asked = null;
@@ -617,6 +688,54 @@ test('the WASM\'s outgoing bytes reach the socket, and a silent heartbeat is a f
     wasm.dynCall_viii(pointers[2], decoder.id, 1, 0);                         // one heartbeat, then silence
     await assert.rejects(hook.done, /connection check failure: no heartbeat/);
   } finally { hook.restore(); }
+});
+
+test('frames queued behind a slow output keep the link alive: a burst is not a missing heartbeat', { skip: !cache }, async () => {
+  const { files } = demo();
+  const all = [...frames(files['ws.dat'])].slice(0, 40).map(f => f.data);
+  const hook = {};
+  const real = Decoder.create;
+  Decoder.create = async (assets, create) => (hook.decoder = await real.call(Decoder, assets, { ...create, check: w => {
+    create.check?.(w);
+    hook.wasm = w;
+    const initialize = w._initialize;
+    w._initialize = (...a) => { hook.pointers = a.slice(0, 6); return initialize(...a); };
+  } }));
+  // The server sends a frame every 20 ms after the opening ones; the output stalls for 400 ms (5 heartbeat
+  // windows) on the first quotes, so nothing is decoded meanwhile, heartbeats included.
+  const Socket = class extends EventTarget {
+    constructor() {
+      super();
+      Socket.last = this;
+      const send = chunk => this.dispatchEvent(new MessageEvent('message', { data: chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.length) }));
+      setImmediate(() => all.slice(0, 3).forEach(send));
+      let i = 3;
+      this.timer = setInterval(() => (i < all.length ? send(all[i++]) : clearInterval(this.timer)), 20);
+    }
+    send() {}
+    close(code = 1000) {
+      clearInterval(this.timer);
+      if (this.closed) return;
+      this.closed = true;
+      this.dispatchEvent(Object.assign(new Event('close'), { code, reason: '' }));
+    }
+  };
+  let stalled = false;
+  try {
+    const done = live({ cookies: { s: 'v' }, codes: ['7203'], protocolVersion: 16000, fetchImpl: server(files).fetchImpl,
+      WebSocketImpl: Socket, heartbeatMs: 80, emit: async b => {
+        if (b.type === 'bootstrap') hook.wasm.dynCall_viii(hook.pointers[2], hook.decoder.id, 1, 0);   // one heartbeat
+        if (b.type === 'quotes' && !stalled) {
+          stalled = true;
+          await new Promise(resolve => setTimeout(resolve, 400));
+          setTimeout(() => Socket.last.close(1000), 300);
+        }
+      } });
+    const summary = await done;
+    assert.ok(stalled);
+    assert.equal(summary.type, 'end');
+    assert.ok(summary.frames > 20, `frames kept arriving (${summary.frames})`);
+  } finally { Decoder.create = real; Socket.last?.close(1000); }
 });
 
 test('heartbeats keep a feed alive; another session, or the market closing, ends it cleanly', { skip: !cache }, async () => {

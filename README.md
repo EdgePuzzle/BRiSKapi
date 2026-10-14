@@ -47,8 +47,11 @@ maps one to the other. `briskapi.Live` uses the cloud API's names and records.
 
 ## Install
 
-Python 3.12+. Live feeds and recording also need Node 22+, because BRiSK's own
-decoder is a WebAssembly module that runs under Node.
+Free-threaded Python 3.14 (`python3.14t`) and Node 22+. The feed records the whole market,
+whose opening auction changes thousands of books within seconds, by reading, parsing and
+writing on several cores at once, which Python does only without the GIL (a Python with it
+works, but warns that it can fall behind at the open). BRiSK's own decoder is a WebAssembly
+module that runs under Node.
 
 ```sh
 pip install 'briskapi[pandas]'      # `import briskapi` and the `brisk` command
@@ -149,7 +152,7 @@ cloud API returns. `briskapi.Live` is shaped like Databento's live client and ne
 sign-in: only the feed signs in to your broker.
 
 ```sh
-brisk live --site sbi --quiet   # records, uploads and serves XTKS.BRISK until you stop it (--site demo: the demo, XTKS.BRISKDEMO)
+brisk live --site sbi   # records, uploads and serves XTKS.BRISK until you stop it (--site demo: the demo, XTKS.BRISKDEMO)
 ```
 
 ```python
@@ -433,12 +436,12 @@ one security's history is read on its own.
 ## Command line
 
 ```sh
-brisk live --site demo --codes 7203,6758    # one JSON object per quote update (--raw for vendor fields)
+brisk live --site demo --codes 7203,6758 --quotes   # one JSON object per quote update (--raw for vendor fields)
 brisk sites | enroll | login | forget       # sign in to your broker's BRiSK with a passkey through Chrome (experimental)
 brisk live --site sbi --codes 7203          # BRiSK at SBI Securities; cookies from BRISK_SBI_COOKIES (JSON) or `brisk login`; --trace-protocol shows the handshake, wire details in BRISK_PROFILE
 brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; cookies from BRISK_ESHITEN_COOKIES (JSON) or `brisk login`
 brisk live --site sbi --output days         # runs day after day; keeps each finished day in days/ (e.g. sbi_live_20261013_085800-153512) and prints a {"day": {...}} line on stderr
-brisk live --site sbi --quiet               # prints no quotes: records, uploads and serves briskapi.Live() (--no-gateway: serves nothing)
+brisk live --site sbi                       # records, uploads and serves briskapi.Live() (--no-gateway: serves nothing), with a line on stderr every 10 s (a minute in a log): the day, how long it has recorded, its updates and their rate
 brisk record --output recordings/s1         # record the demo (uploaded unless you opt out)
 brisk list --date 20210927 --source historical_mock   # your recordings (--timing: your timing reports; --deleted: what you deleted in the last 30 days)
 brisk pull PREFIX --output recordings/downloaded   # use a prefix returned by brisk list

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Callable, Iterator
 import warnings
 
@@ -76,6 +77,10 @@ def _consent(upload, limit_frames):
     return allowed, allowed and not cli.opted_out(upload)
 
 
+# Threads parsing the host's lines on a free-threaded build (see Feed._lines).
+PARSERS = min(4, os.cpu_count() or 1)
+
+
 class Feed:
     """Live auction state, updated in a background thread as the decoder emits frames.
 
@@ -132,6 +137,7 @@ class Feed:
         self.status, self.error, self.seq, self.uploaded = 'starting', None, -1, None
         # A broker host with no session to join says so (date, session_status) and waits for the next trading day's.
         self.waiting: dict | None = None
+        self._day_updates, self._day_began = 0, None   # this day's quote updates since its bootstrap, and when it began
         # Each segment's batches go to disk as they arrive (briskapi._spool): to package it, to keep what a stop
         # or a crash cuts short, and for a gateway's replays.
         self._spooling, self._broker = bool(self._package or self._output or gateway), command is not None
@@ -323,11 +329,58 @@ class Feed:
                     self._listeners.remove(listener)
         return current, remove
 
+    def _lines(self):
+        """The host's batches with their lines, in order. Parsing them is most of the feed's work, so with the GIL
+        off (free-threaded Python) one thread reads the pipe a chunk at a time while PARSERS threads parse."""
+        stdout = self._process.stdout
+        if sys._is_gil_enabled():
+            for line in stdout:
+                yield json.loads(line), line
+            return
+        chunks: queue.Queue = queue.Queue(maxsize=64)   # at most 64 MB read ahead
+        stop = threading.Event()
+
+        def put(item):   # never stuck on a full queue once the feed has stopped reading
+            while not stop.is_set():
+                try:
+                    return chunks.put(item, timeout=0.1)
+                except queue.Full:
+                    pass
+
+        def parse(lines):
+            return [(json.loads(line), line) for line in lines]
+
+        def read(pool):
+            try:
+                tail = b''
+                # read1 returns what the pipe holds: a line when the stream is slow, a megabyte in a burst.
+                while not stop.is_set() and (data := stdout.read1(2**20)):
+                    data = tail + data
+                    cut = data.rfind(b'\n') + 1
+                    tail = data[cut:]
+                    if cut:
+                        put(pool.submit(parse, data[:cut].splitlines(keepends=True)))
+                if tail:
+                    put(pool.submit(parse, [tail]))
+            except BaseException as error:  # noqa: BLE001 - the feed thread raises it
+                put(error)
+            finally:
+                put(None)
+
+        with ThreadPoolExecutor(PARSERS, thread_name_prefix='brisk-parse') as pool:
+            threading.Thread(target=read, args=(pool,), name='brisk-read', daemon=True).start()
+            try:
+                while (chunk := chunks.get()) is not None:
+                    if isinstance(chunk, BaseException):
+                        raise chunk
+                    yield from chunk.result()
+            finally:
+                stop.set()
+
     def _run(self):
         spool, days, ended = None, 0, False
         try:
-            for line in self._process.stdout:
-                batch = json.loads(line)
+            for batch, line in self._lines():
                 if batch.get('type') == 'waiting':  # out of band, not a day's record: kept nowhere
                     with self._changed:
                         self.waiting = {key: batch.get(key) for key in ('date', 'session_status')}
@@ -388,6 +441,9 @@ class Feed:
             if batch['type'] == 'bootstrap':
                 self._bootstrap = {k: v for k, v in batch.items() if k != 'quotes'}
                 self.status, self.waiting = 'running', None
+                self._day_updates, self._day_began = 0, time.monotonic()
+            else:
+                self._day_updates += len(quotes)
             self._quotes.update((q['issue_id'], q) for q in quotes)
             if self._history is not None:
                 for q in quotes:
@@ -401,6 +457,15 @@ class Feed:
             for q in quotes:
                 if wanted is None or q['issue_id'] in wanted:
                     deliver(view(q))
+
+    def _progress(self):
+        """The running day: its trading date, seconds since its bootstrap, its quote updates and its latest source
+        clock (None before a day has begun)."""
+        with self._changed:
+            if self._bootstrap is None:
+                return None
+            return {'trading_date': self._bootstrap['trading_date'], 'seconds': time.monotonic() - self._day_began,
+                    'updates': self._day_updates, 'source_time_us': self._last_source_time_us}
 
     def _finish(self):
         with self._changed:

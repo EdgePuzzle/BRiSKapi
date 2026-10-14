@@ -206,7 +206,7 @@ def test_the_demo_through_connect_and_the_cli(decoder, monkeypatch, capsys):
     monkeypatch.setattr(_live, 'DECODER', script)
     monkeypatch.setattr(cli, 'package_parts', lambda *a, **k: 1 / 0)    # the gateway alone packages nothing
     errors = []
-    runner = threading.Thread(target=lambda: errors.append(cli.main(['live', '--site', 'demo', '--cache', '.', '--quiet', '--no-upload'])))
+    runner = threading.Thread(target=lambda: errors.append(cli.main(['live', '--site', 'demo', '--cache', '.', '--no-upload'])))
     runner.start()
     wait_for(lambda: _gateway.gateway_path('XTKS.BRISKDEMO').exists())
     live = brisk.Live()
@@ -229,7 +229,7 @@ def test_the_demo_through_connect_and_the_cli(decoder, monkeypatch, capsys):
 
     script, release = decoder(market())
     monkeypatch.setattr(_live, 'DECODER', script)
-    cli.main(['live', '--site', 'demo', '--cache', '.', '--no-gateway', '--no-upload'])
+    cli.main(['live', '--site', 'demo', '--cache', '.', '--no-gateway', '--no-upload', '--quotes'])
     printed = capsys.readouterr()
     assert 'briskapi.Live' not in printed.err and printed.out
 
@@ -310,10 +310,11 @@ def test_a_slow_session_is_dropped_not_waited_for(monkeypatch):
                  + json.dumps({'subscribe': [0], 'symbols': None}).encode() + b'\n')
     wait_for(lambda: gateway._clients and gateway._clients[0].codes is None)
     line = b'{"type":"quotes"' + b' ' * 1024**2 + b'}\n'
+    client = gateway._clients[0]   # it may leave the list as soon as it is dropped
     started = time.monotonic()
     for _ in range(64):          # 64 MB to a session that reads nothing
         gateway.publish({'type': 'quotes', 'quotes': []}, line)
-    assert time.monotonic() - started < 5 and gateway._clients[0]._last   # the feed went on; the session is dropped
+    assert time.monotonic() - started < 5 and client._last   # the feed went on; the session is dropped
     received = b''.join(iter(lambda: sock.recv(1 << 20), b''))
     assert json.loads(received.splitlines()[-1])['error'].startswith('This session fell more than 4 MB behind')
     wait_for(lambda: not gateway._clients)

@@ -48,8 +48,10 @@ e支店（BRiSK Next）の BRiSK も利用できます（パスキーでのサ�
 
 ## インストール
 
-Python 3.12 以上が必要です。ライブフィードと記録には Node 22 以上も必要です
-（BRiSK 自身のデコーダーが Node 上で動く WebAssembly モジュールのため）。
+フリースレッド版の Python 3.14（`python3.14t`）と Node 22 以上が必要です。フィードは全銘柄を記録します。
+全銘柄の寄付では数秒のうちに何千もの板が変わるため、読み込み・解析・書き込みを複数のコアで同時に行いますが、
+Python がそうできるのは GIL がない場合だけです（GIL のある Python でも動きますが、寄付で遅れることがあると
+警告します）。BRiSK 自身のデコーダーは Node 上で動く WebAssembly モジュールです。
 
 ```sh
 pip install 'briskapi[pandas]'      # `import briskapi` と `brisk` コマンド
@@ -148,7 +150,7 @@ feed.wait()           # または feed.close()。`with briskapi.connect(...) as 
 キーもサインインも要りません。証券会社にサインインするのはフィードだけです。
 
 ```sh
-brisk live --site sbi --quiet   # 止めるまで記録・アップロードし、XTKS.BRISK を配信（--site demo ならデモの XTKS.BRISKDEMO）
+brisk live --site sbi   # 止めるまで記録・アップロードし、XTKS.BRISK を配信（--site demo ならデモの XTKS.BRISKDEMO）
 ```
 
 ```python
@@ -435,12 +437,12 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 ## コマンドライン
 
 ```sh
-brisk live --site demo --codes 7203,6758    # 気配の更新ごとに JSON を1行出力（--raw でベンダー形式）
+brisk live --site demo --codes 7203,6758 --quotes   # 気配の更新ごとに JSON を1行出力（--raw でベンダー形式）
 brisk sites | enroll | login | forget       # Chrome 経由のパスキーで証券会社の BRiSK にサインイン（試験的）
 brisk live --site sbi --codes 7203          # SBI証券の BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_PROFILE）
 brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）または `brisk login` が保存したもの
 brisk live --site sbi --output days         # 日をまたいで動き続け、終わった日ごとに days/ に残し（例: sbi_live_20261013_085800-153512）、stderr に {"day": {...}} を1行出力
-brisk live --site sbi --quiet               # 気配を出力せず、記録・アップロードと briskapi.Live() への配信だけ（--no-gateway で配信しない）
+brisk live --site sbi                       # 記録・アップロードし、briskapi.Live() に配信（--no-gateway で配信しない）。10秒ごと（ログでは1分ごと）に stderr に1行: その日、記録した時間、更新数とその速さ
 brisk record --output recordings/s1         # デモを記録（オプトアウトしない限りアップロード）
 brisk list --date 20210927 --source historical_mock   # 自分の記録（--timing で自分のタイミングレポート、--deleted で過去30日間に削除したもの）
 brisk pull PREFIX --output recordings/downloaded   # brisk list が返した prefix を使う

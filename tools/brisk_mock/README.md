@@ -151,7 +151,8 @@ server stamps it: absolute in the snapshot, then moved by each update's delta. T
 decoder has no clock of its own, and whether the server's stamps are exchange event
 times is not established (see ARCHITECTURE.md).
 `received_unix_ms` on stream batches is the local mock replay receipt time with
-millisecond precision. `decode_ns` measures local decode plus quote extraction.
+millisecond precision. `decode_ns` measures local decode plus quote extraction (with a live host's quote
+workers, the host's decode plus the slowest worker's share).
 Neither difference establishes live exchange latency.
 
 The initial snapshot is at **2021-09-27 08:59:59.999955 JST**, with 4,131 securities

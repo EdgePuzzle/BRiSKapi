@@ -7,7 +7,7 @@ itself. For usage, see the [README](README.md).
 
 | Component | Where | Role |
 | --- | --- | --- |
-| Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `brisk.cjs` drives a broker's BRiSK decoder (SBI's, or e-shiten BRiSK Next's) from an authenticated session, one trading day after another. Both emit one JSON batch per frame. |
+| Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `brisk.cjs` drives a broker's BRiSK decoder (SBI's, or e-shiten BRiSK Next's) from an authenticated session, one trading day after another, reading a large selection's quotes with worker threads (`workers.cjs`). Both emit one JSON batch per frame. |
 | Python API | `briskapi/` | `Recording` (files), `Feed` (live, background thread, with a worker thread that packages and uploads each finished day), `Ticker`/`Market` views and `Archive`. |
 | BRiSK site client | `briskapi/brisk.py` | Cookie login (SBI by default, or e-shiten with `site="e-shiten"`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `briskapi.connect(site=...)` starts the live host through it (`_connect`). |
 | Archive client | `briskapi/cli.py`, `briskapi/schema.py`, `briskapi/_parquet.py`, `briskapi/identity.py` | The `brisk` CLI, upload consent, your identity, Parquet packaging, upload, verified download, deletion, restore and export. |
@@ -354,7 +354,11 @@ bundle) and in pybrisk's SBI research (`engineio.cjs` and `brisk.cjs`):
    stray update, stops the session (on SBI's March data the real reply passes and a
    second push of it is refused).
 4. The server heartbeat, decoded by the WASM, is watched: no beat for 10 s after the
-   first one is a connection failure, as in the vendor client. A second rule is the
+   first one is a connection failure, as in the vendor client. Any frame arriving also
+   counts: the vendor client decodes each frame on arrival, but the host decodes in
+   order with its output, and in the opening burst frames (heartbeats among them) can
+   wait behind the output for longer than 10 s, which once ended the session at
+   09:00:07 although the link was alive. A second rule is the
    vendor's too: during trading hours (08:00-15:00 JST, not 11:30-12:10) the
    decoder's data time may lag the server clock, taken from the heartbeat, by at
    most 90 s. The WASM's `authError` is the single-session rule (one WebSocket per
@@ -434,19 +438,20 @@ UNDER sum every row above and below the window read, and the market row holds th
 orders and, in its closing groups, the market-on-close orders. Its layout is the same in
 both builds, which return byte-identical books for every issue of the demo's snapshot. A
 quote keeps each side's ten best prices that hold orders, and the quantity and order count
-at its own bid and ask: the host reads 32 rows from the quote's bid (or ask) toward worse
-prices, and on until ten are found or nothing lies beyond; when OVER (UNDER for sells)
-shows orders at better prices, as in crossed auction books, it reads every row beyond
-first, in one call, since each call sums the whole board. On the demo's data this equals
-reading the whole board on every issue at several times, in both builds, and costs about
-22 µs per quote (a quote about 47 µs in all; boards run to 3,521 rows).
-
-OVER, UNDER and the window sum the whole board for every group, so the one-row read made
-for the market row also gives each group's board totals (`bid_total_quantity` and the
-rest). The closing-condition limit orders (引け条件付) form a book of their own, walked like
-a side's with light 0 (which keeps the closing groups), and only where its total shows
-orders: on the demo's data both equal reading the whole board, and a full replay takes
-5% longer.
+at its own bid and ask. Each call sums the whole board for OVER and UNDER, and that is its
+cost: on Toyota's book a call takes about 26 µs with light 1 and 37 µs with light 0, for 1 row
+or 400 alike. So the host reads a quote's book in as few calls as it can. One window, from 64
+rows below the quote's bid to 64 above its ask, with light 0 (which keeps the closing groups),
+gives the market row; each group's board totals (`bid_total_quantity` and the rest: OVER,
+plus the window's rows, plus UNDER); and usually every level of both sides. A side whose
+best price lies outside it (a spread wider than 128 ticks, or no price on that side) gets a
+window of its own. A side reads on toward worse prices, 64 rows a call, until it has ten
+levels or nothing lies beyond. When OVER (UNDER for sells) shows orders at better prices, as
+in crossed auction books, it first reads every row beyond, in one call. The
+closing-condition limit orders (引け条件付) form a book of their own, read the same way, and
+only where its total shows orders. On the demo's data all of this equals reading the whole
+board on every issue at several times, in both builds. At the demo's opening it takes about
+1.4 calls and 25 µs per quote; walking 32 rows a call took 4.2 calls and 70 µs.
 
 Trades come from the decoder's QR records, which it keeps on the host side: for each
 execution it calls the imported `_qr_emplace(stock, type, time, price10, lots, lot, frame)`
@@ -581,6 +586,41 @@ attempt shows what the server answers. Anything wrong ends in an explicit error 
 stream that never initializes, a refused namespace, a rejected catch-up, an
 implausible stock view or master) rather than guessed data. A connection lost once a day
 has begun reconnects ([Trading days](#trading-days)); other failures end the recording.
+
+### Quote workers
+
+Reading quotes is most of a live host's work. On the demo the WASM decodes the whole
+recording in about a second, while reading its 731,251 quotes takes about 20 s. At the
+opening auction the whole market changes within seconds (a live open has sent some 130,000
+quote updates a second), so for a selection of 500 issues or more (a recording is the whole
+market) the host reads quotes with worker threads (`workers.cjs`). By default there are as
+many as the computer has cores less four, from two to twelve; `BRISK_WORKERS` sets the number,
+and 0 turns them off.
+
+Each worker runs a decoder of its own, loaded from the same files and boot response. It is
+fed every frame the host's decoder is, in the same order, with the catch-up and begin()
+where the host has them, and it reads the bootstrap's quotes of its share as the host's
+decoder did. It reads the quotes of its share of each frame's changed issues
+(`issue_id % workers`), as JSON, and clears its own trace and trade records. The host's
+decoder does everything else: the stream's callbacks (ping replies, heartbeats), its clock,
+the changed issues and the trades. With workers the host decodes each frame as it arrives
+and queues its batch, and writes the batches in order as their quotes come back. It builds
+each line from the workers' JSON, so the batches are byte for byte what one thread writes
+(tested on the demo's whole replay, catch-up included). A worker must have traced exactly
+its share of the host's changed issues, or the session stops: its decoder would have
+diverged. Quotes waiting to be written may not pass 1 GiB; the session stops rather than
+fill the memory when the reader falls that far behind. A worker's decoder holds about 270 MB.
+
+Parsing the host's lines is most of the Python feed's work (about 9 µs a quote update on one
+thread). Without the GIL (free-threaded Python 3.14) one thread reads the pipe a chunk at a
+time (up to 1 MB), `PARSERS` threads (up to four) parse the chunks, and the feed's thread
+applies the batches in order; the spool writes its Parquet parts on a thread of its own. With
+the GIL, the lines are read and parsed one at a time, and the spool's thread takes turns with
+the reader. On an M5 Pro, the demo's whole replay, served as fast as it is taken, goes through
+it all (the host and its workers, the feed recording to disk and serving the gateway) at
+113,000 quote updates a second with 4 workers, 138,000 with 6 and 159,000 with 8. The same with
+the GIL and the host reading alone took 31,000. Slower cores take fewer: there the opening can
+fall a few seconds behind, which the status line of `brisk live` shows in its data time.
 
 ### Trading days
 

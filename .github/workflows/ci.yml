@@ -16,8 +16,10 @@ jobs:
           node-version: '22'
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14t'
       - run: python -m pip install -r requirements-dev.txt -e .
+      - name: No dependency turns the GIL back on
+        run: python -c "import sys, numpy, pyarrow, pandas, briskapi; assert not sys._is_gil_enabled(), 'the GIL is on'"
       - run: python -m pytest tests --cov=archive_service --cov=query_engine --cov=query_service --cov=briskapi --cov-fail-under=85
       - run: python -m pytest tools/brisk_mock/test_download.py tools/brisk_mock/test_sbi_master_layout.py
       - run: python tools/brisk_mock/download_mock.py --cache /tmp/brisk-mock-cache
@@ -35,7 +37,7 @@ jobs:
           python -m venv /tmp/wheel-venv
           /tmp/wheel-venv/bin/python -m pip install /tmp/dist/briskapi-*.whl
           /tmp/wheel-venv/bin/python -I -c "import briskapi.cli as c, briskapi.schema as s; assert c.DECODER.exists() and 'historical_mock' in s.REFERENCES"
-          /tmp/wheel-venv/bin/brisk live --site demo --cache /tmp/brisk-mock-cache --codes 7203 --speed 0 --limit-frames 3 > /tmp/live.jsonl
+          /tmp/wheel-venv/bin/brisk live --site demo --cache /tmp/brisk-mock-cache --codes 7203 --speed 0 --limit-frames 3 --quotes > /tmp/live.jsonl
           /tmp/wheel-venv/bin/python -c "import json; rows = [json.loads(l) for l in open('/tmp/live.jsonl')]; assert rows and all(r['code'] == '7203' for r in rows)"
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked --manifest-path rust/brisk_quote_ingest/Cargo.toml
@@ -54,7 +56,7 @@ jobs:
           node-version: '22'
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14t'
       - run: python -m pip install -r requirements-dev.txt -e .
       - run: python -m pytest tests/test_passkey.py tests/test_sites.py
       - run: node --test tools/brisk_mock/passkey.test.cjs

@@ -8,7 +8,7 @@ version = "1.0.1"
 description = "Unofficial Python API and brisk CLI for BRiSK auction data: sign in to SBI or Tachibana e-shiten BRiSK with a passkey, record the live feed through BRiSK's own decoder day after day, keep each day in your own private archive, and query your history and OHLCV bars through the cloud API"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = ["numpy>=1.26", "pyarrow>=19"]
 keywords = ["brisk", "market-data", "auction", "tokyo-stock-exchange", "japan", "sbi", "tachibana", "e-shiten"]
 classifiers = [
@@ -19,7 +19,8 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading :: 3 - Stable",
     "Topic :: Office/Business :: Financial :: Investment",
 ]
 

@@ -10,7 +10,7 @@ const manifest = require('./assets.json');
 const { verifyAsset, loadWebAssets } = require('./web.cjs');
 const BUFFER = 4 * 1024 * 1024;
 const LEVELS = 10;   // price levels kept on each side of a quote's book
-const WINDOW = 32;   // book rows read per call while walking away from the best price
+const WINDOW = 64;   // book rows either side of the best prices read per call (a call costs the same for 1 row or 400)
 const HISTORY = 50000;   // trades per history batch (those a snapshot restores)
 // The order groups of a _getItaRows row (204 bytes): quantity (u64) and order count (u64) word offsets.
 const GROUPS = {
@@ -594,92 +594,111 @@ class Decoder {
       quote.issue_status = words[6 * this.ohlc + this.layoutShift + 37] - 8;
       if (!(quote.issue_status >= 0 && quote.issue_status <= 7)) throw new Error(`Issue status unrecognised: ${m.code}`);
     }
-    // _getItaRows(id, issue, first row index, rows, price rows, market row, OVER, UNDER, light) writes
-    // 204-byte rows; one price row is asked for here to get the market row, whose buy and sell
-    // groups (quantity at +20 and +112) and closing groups (+64, +156) are the market orders, and
-    // OVER and UNDER, which with the price row sum the whole board. It always returns 1; a window off
-    // the board throws. light = 0 keeps the closing groups.
-    const price = quote.indicative_price10 || quote.bid_price10 || quote.ask_price10 || m.base_price10;
-    const index = this.w._fitItaViewRowPrice10(this.id, issue_id, price, 1);
-    this.w._getItaRows(this.id, issue_id, index, 1, this.buf + 612, this.buf, this.buf + 204, this.buf + 408, 0);
-    const row = new Uint32Array(this.w.HEAPU8.buffer, this.buf, 204);
-    quote.market_buy_quantity = u64(row, 5);
-    quote.market_sell_quantity = u64(row, 28);
-    quote.closing_market_buy_quantity = u64(row, 16);
-    quote.closing_market_sell_quantity = u64(row, 39);
-    // Limit orders on the whole board, each group: OVER (words 51 on) + the price row (153) + UNDER (102).
-    const total = word => u64(row, 51 + word) + u64(row, 153 + word) + u64(row, 102 + word);
-    const totals = {};
-    for (const [name, group] of Object.entries(GROUPS)) {
-      totals[`${name}_total_quantity`] = total(group.quantity);
-      totals[`${name}_total_orders`] = total(group.orders);
-    }
-    Object.assign(quote, this.book(issue_id, m, quote, totals), totals);
+    Object.assign(quote, this.book(issue_id, m, quote));
     return quote;
   }
 
-  // The quantity and orders at the quote's bid and ask prices, and the book's best LEVELS prices that
-  // hold orders on each side, best first, as [price10, quantity, orders]. Row indices step one tick
-  // between the issue's limits (_getTickPrice10ToIndex takes the tick type, not the issue).
-  // The closing-condition (引け条件付) limit orders make a book of their own, read the same way, where
-  // the board totals show any.
-  book(issue_id, m, quote, totals) {
+  // The book of a quote: the market orders, each order group's totals over the whole board, the quantity and
+  // orders at the quote's bid and ask prices, and each side's best LEVELS prices that hold orders, best first, as
+  // [price10, quantity, orders]: the bids from the top of the board down, the asks from the bottom up. The
+  // closing-condition (引け条件付) limit orders make a book of their own, read the same way, where the totals
+  // show any. Row indices step one tick between the issue's limits (_getTickPrice10ToIndex takes the tick type,
+  // not the issue).
+  //
+  // _getItaRows(id, issue, first row index, rows, price rows, market row, OVER, UNDER, light) writes 204-byte
+  // rows: the price rows asked for, the market row, whose buy and sell groups (quantity at +20 and +112) and
+  // closing groups (+64, +156) are the market orders, and OVER and UNDER, each group summed over the rows above
+  // and below those read. It always returns 1; a window off the board throws. light = 0 keeps the closing
+  // groups. Every call sums the whole board for OVER and UNDER, which costs more than the rows it returns, so a
+  // book is read in as few calls as it can be: one window from WINDOW rows below the bid to WINDOW above the
+  // ask, with the closing groups, usually holds all of it (and with OVER and UNDER, the board's totals).
+  book(issue_id, m, quote) {
     const index = price => this.w._getTickPrice10ToIndex(this.id, m.tick_type, price);
     const low = index(m.limit_down10), high = index(m.limit_up10);
     const inside = price => price >= m.limit_down10 && price <= m.limit_up10;
     const bidHint = inside(quote.bid_price10) ? index(quote.bid_price10) : high;
     const askHint = inside(quote.ask_price10) ? index(quote.ask_price10) : low;
-    const bid_levels = this.levels(issue_id, low, high, GROUPS.bid, bidHint);
-    const ask_levels = this.levels(issue_id, low, high, GROUPS.ask, askHint);
-    const bid_closing_levels = totals.bid_closing_total_quantity ? this.levels(issue_id, low, high, GROUPS.bid_closing, bidHint) : [];
-    const ask_closing_levels = totals.ask_closing_total_quantity ? this.levels(issue_id, low, high, GROUPS.ask_closing, askHint) : [];
-    const at = (levels, price, buy) => {
+    // A side far from the other (a wide spread, or no price on it) gets a window of its own when it needs one.
+    const near = Math.abs(bidHint - askHint) <= 2 * WINDOW;
+    const window = this.read(issue_id, Math.max(low, (near ? Math.min(bidHint, askHint) : bidHint) - WINDOW + 1),
+      Math.min(high, (near ? Math.max(bidHint, askHint) : bidHint) + WINDOW - 1), true);
+    const u = window.u, count = window.last - window.first + 1;
+    const book = { market_buy_quantity: u64(u, 5), market_sell_quantity: u64(u, 28),
+      closing_market_buy_quantity: u64(u, 16), closing_market_sell_quantity: u64(u, 39) };
+    // Limit orders on the whole board, each group: OVER (words 51 on) + the rows read (153 on) + UNDER (102).
+    const totals = {};
+    for (const [name, group] of Object.entries(GROUPS)) {
+      for (const [key, word] of [['quantity', group.quantity], ['orders', group.orders]]) {
+        let total = u64(u, 51 + word) + u64(u, 102 + word);
+        for (let k = 0; k < count; k++) total += u64(u, 153 + 51 * k + word);
+        totals[`${name}_total_${key}`] = total;
+      }
+    }
+    // The side's own window where the shared one does not hold its best price (or lacks its groups).
+    const anchor = (hint, group) => (hint >= window.first && hint <= window.last ? window
+      : group.buy ? this.read(issue_id, Math.max(low, hint - WINDOW + 1), hint, group.closing)
+        : this.read(issue_id, hint, Math.min(high, hint + WINDOW - 1), group.closing));
+    const side = (group, hint) => this.levels(issue_id, low, high, group, anchor(hint, group));
+    const bid_levels = side(GROUPS.bid, bidHint);
+    const ask_levels = side(GROUPS.ask, askHint);
+    const bid_closing_levels = totals.bid_closing_total_quantity ? side(GROUPS.bid_closing, bidHint) : [];
+    const ask_closing_levels = totals.ask_closing_total_quantity ? side(GROUPS.ask_closing, askHint) : [];
+    const at = (levels, price, group) => {
       const level = levels.find(([p]) => p === price);
       if (level) return level.slice(1);
       // A price the walk passed, or every order on the side having been read, means none there.
-      const passed = levels.length < LEVELS || (buy ? price >= levels.at(-1)[0] : price <= levels.at(-1)[0]);
+      const passed = levels.length < LEVELS || (group.buy ? price >= levels.at(-1)[0] : price <= levels.at(-1)[0]);
       if (!price || !inside(price) || passed) return [0, 0];
-      const [row] = this.rows(issue_id, index(price), 1).rows;
-      return buy ? row.bid : row.ask;
+      const i = index(price);
+      const r = i >= window.first && i <= window.last ? window : this.read(issue_id, i, i, false);
+      const b = 153 + 51 * (i - r.first);
+      return [u64(r.u, b + group.quantity), u64(r.u, b + group.orders)];
     };
-    const [bid_quantity, bid_orders] = at(bid_levels, quote.bid_price10, true);
-    const [ask_quantity, ask_orders] = at(ask_levels, quote.ask_price10, false);
-    return { bid_quantity, bid_orders, ask_quantity, ask_orders, bid_levels, ask_levels, bid_closing_levels, ask_closing_levels };
+    const [bid_quantity, bid_orders] = at(bid_levels, quote.bid_price10, GROUPS.bid);
+    const [ask_quantity, ask_orders] = at(ask_levels, quote.ask_price10, GROUPS.ask);
+    return { ...book, bid_quantity, bid_orders, ask_quantity, ask_orders, bid_levels, ask_levels, bid_closing_levels,
+      ask_closing_levels, ...totals };
   }
 
-  // One side's best LEVELS prices with orders. `hint` is where the best price should be (the quote's).
-  // Reads walk from there to worse prices a window at a time, until there are enough levels or nothing
-  // lies beyond. If the first window shows orders at better prices than the hint (OVER for buys, UNDER
-  // for sells, as in a crossed auction book), every row beyond the hint is read first, in one call:
-  // each read sums the whole board for OVER and UNDER, so one long read beats a search of short ones.
-  levels(issue_id, low, high, group, hint) {
-    const { buy, closing, name } = group;
-    const quantity = r => r[name][0], orders = r => r[name][1];
-    const better = w => (buy ? w.over[name] : w.under[name]), worse = w => (buy ? w.under[name] : w.over[name]);
-    const window = from => {
-      const to = buy ? Math.max(low, from - WINDOW + 1) : Math.min(high, from + WINDOW - 1);
-      const first = Math.min(from, to);
-      return { first, last: Math.max(from, to), ...this.rows(issue_id, first, Math.abs(from - to) + 1, closing) };
-    };
+  // One side's best LEVELS prices with orders, best first. `anchor` is a read that holds the side's best price
+  // where the quote says it is. The rows beyond it on the better side are read, in one call, only if its OVER
+  // (bids) or UNDER (asks) has orders there, as in a crossed auction book; the worse side then a WINDOW at a
+  // time, until there are enough levels or nothing lies beyond.
+  levels(issue_id, low, high, group, anchor) {
+    const { buy, closing, quantity, orders } = group;
+    const over = r => u64(r.u, 51 + quantity), under = r => u64(r.u, 102 + quantity);
+    const better = buy ? over : under, worse = buy ? under : over;
     const levels = [];
-    const take = rows => {
-      for (const r of buy ? rows.slice().reverse() : rows) {
-        if (quantity(r) && levels.length < LEVELS) levels.push([r.price10, quantity(r), orders(r)]);
+    const take = r => {
+      const count = r.last - r.first + 1;
+      for (let j = 0; j < count && levels.length < LEVELS; j++) {
+        const b = 153 + 51 * (buy ? count - 1 - j : j);
+        const q = u64(r.u, b + quantity);
+        if (q) levels.push([r.u[b], q, u64(r.u, b + orders)]);
       }
     };
-    let w = window(hint);
-    if (better(w)) {
-      const first = buy ? hint + 1 : low, last = buy ? high : hint - 1;
-      take(this.rows(issue_id, first, last - first + 1, closing).rows);
+    if (better(anchor) && (buy ? anchor.last < high : anchor.first > low)) {
+      take(buy ? this.read(issue_id, anchor.last + 1, high, closing) : this.read(issue_id, low, anchor.first - 1, closing));
     }
-    for (;;) {
-      take(w.rows);
-      if (levels.length >= LEVELS || !worse(w)) return levels;
-      w = window(buy ? w.first - 1 : w.last + 1);
+    for (let r = anchor; ;) {
+      take(r);
+      if (levels.length >= LEVELS || !worse(r) || (buy ? r.first <= low : r.last >= high)) return levels;
+      r = buy ? this.read(issue_id, Math.max(low, r.first - WINDOW), r.first - 1, closing)
+        : this.read(issue_id, r.last + 1, Math.min(high, r.last + WINDOW), closing);
     }
   }
 
-  // Price rows first..first + count - 1 of an issue's book, each { price10, bid: [quantity, orders],
+  // Rows first..last of an issue's book, copied out of the decoder's buffer (the next read reuses it): the price
+  // rows from word 153, 51 words each, the market row at 0, OVER at 51 and UNDER at 102. Without `closing`,
+  // light = 1: the closing groups, traded volume and cumulative columns aren't computed.
+  read(issue_id, first, last, closing) {
+    const count = last - first + 1;
+    if (612 + 204 * count > BUFFER) throw new Error(`A book read of ${count} rows exceeds the decoder buffer`);
+    this.w._getItaRows(this.id, issue_id, first, count, this.buf + 612, this.buf, this.buf + 204, this.buf + 408, closing ? 0 : 1);
+    return { first, last, u: new Uint32Array(this.w.HEAPU8.buffer, this.buf, 153 + 51 * count).slice() };
+  }
+
+  // Price rows first..first + count - 1 of an issue's book as objects (the tests read whole boards with it), each { price10, bid: [quantity, orders],
   // ask: [...] } (and bid_closing, ask_closing with `closing`), and each group's quantity on the rows
   // above (OVER) and below (UNDER) them. Without `closing`, light = 1: the closing groups, traded
   // volume and cumulative columns aren't computed.

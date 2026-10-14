@@ -27,7 +27,12 @@ changes only with a re-audited asset pin (`tools/brisk_mock/build_reference.py`)
 
 ## Development
 
+Work on free-threaded Python 3.14 (3.14t), on which a whole-market live feed keeps up, as CI
+does. A python.org build of it on macOS loads no CA certificates until its
+"Install Certificates" step has run; briskapi's own requests use the system's then (`briskapi/_https.py`).
+
 ```sh
+uv venv --seed --python 3.14t .venv
 .venv/bin/python -m pip install -r requirements-dev.txt -e .
 .venv/bin/python -m pytest tests \
   --cov=archive_service --cov=query_engine --cov=query_service --cov=briskapi --cov-fail-under=85

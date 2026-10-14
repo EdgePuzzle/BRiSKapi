@@ -499,7 +499,7 @@ def test_cli_live(gated_decoder, tmp_path, monkeypatch, capsys):
     gated_decoder().touch()
     monkeypatch.setattr(cli, 'package_parts', lambda *a, **k: None)
     monkeypatch.setattr(cli, 'upload', lambda *a, **k: {'status': 'stored'})
-    cli.main(['live', '--site', 'demo', '--cache', str(tmp_path), '--codes', '7203'])
+    cli.main(['live', '--site', 'demo', '--cache', str(tmp_path), '--codes', '7203', '--quotes'])
     out = capsys.readouterr()
     lines = [json.loads(line) for line in out.out.splitlines()]
     # The ungated fake races ahead of the snapshot; per-code order and final state still hold.
@@ -512,7 +512,7 @@ def test_cli_live(gated_decoder, tmp_path, monkeypatch, capsys):
     assert 'on by default' in out.err and '"uploaded": {"status": "stored"}' in out.err
     monkeypatch.setattr(cli, 'interactive', lambda: True)
     monkeypatch.setattr(cli.sys, 'stdin', io.StringIO('\n'))
-    cli.main(['live', '--site', 'demo', '--cache', str(tmp_path), '--raw'])
+    cli.main(['live', '--site', 'demo', '--cache', str(tmp_path), '--quotes', '--raw'])
     out = capsys.readouterr()
     assert 'private archive' in out.err and '"uploaded": {"status": "stored"}' in out.err
     assert all('last_price10' in json.loads(line) for line in out.out.splitlines())

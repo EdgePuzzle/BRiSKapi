@@ -262,7 +262,8 @@ function heartbeatMonitor({ intervalMs = 7000, checkEveryMs = 1000, onFail, now 
     const stale = staleCheck?.();
     if (stale) onFail(stale);
   }, checkEveryMs);
-  return { beat() { last = now(); }, stop() { clearInterval(timer); } };
+  // received(): other traffic on the link, which keeps a monitor the first heartbeat has started alive.
+  return { beat() { last = now(); }, received() { if (last !== null) last = now(); }, stop() { clearInterval(timer); } };
 }
 
 // The vendor client's second liveness rule: during trading hours (08:00-15:00 JST, not the

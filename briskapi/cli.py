@@ -414,8 +414,8 @@ def record_events(events, cache=None, codes=None, limit_frames=None, speed=1, bi
         subprocess.run([node, str(DECODER), *options], check=True, stdout=out)
 
 def live(args):
-    """Print each quote update as one JSON line (unless --quiet), and serve the feed to briskapi.Live on this
-    computer (unless --no-gateway); a complete session is uploaded per consent."""
+    """Record the feed, reporting how it goes on stderr (with --quotes, print each quote update as one JSON line),
+    and serve it to briskapi.Live on this computer (unless --no-gateway); a complete session is uploaded per consent."""
     from briskapi import connect, login  # The API package builds on this module.
     codes = args.codes.split(',') if args.codes else None
     if args.site != 'demo':
@@ -442,9 +442,11 @@ def live(args):
         print(f'Serving {feed.gateway.dataset} to briskapi.Live() on this computer only '
               f'(127.0.0.1:{feed.gateway.port}; --no-gateway turns this off)', file=sys.stderr, flush=True)
     try:
-        if not args.quiet:
+        if args.quotes:
             for quote in feed.quotes(raw=args.raw):
                 print(json.dumps(quote, ensure_ascii=False, default=lambda value: value.isoformat()), flush=True)
+        else:
+            _progress(feed, PROGRESS_SECONDS[sys.stderr.isatty()])
         feed.wait()
     except KeyboardInterrupt:
         print('Stopping: the running day ends here, then it is kept and uploaded as chosen '
@@ -454,6 +456,31 @@ def live(args):
     # A day that could not end (a demo replay, or a host that did not stop in time) uploads only its timing summary.
     if feed.timing_uploaded and not (feed.recordings and feed.recordings[-1]['timing_uploaded'] is feed.timing_uploaded):
         print(json.dumps({'timing_uploaded': feed.timing_uploaded}), file=sys.stderr)
+
+# How often `brisk live` reports on the recording: on a terminal, and when its stderr goes to a file or a log.
+PROGRESS_SECONDS = {True: 10, False: 60}
+
+
+def _progress(feed, every):
+    """Until the feed ends, a line on stderr every `every` seconds while a day records: its date, how long it has
+    recorded, its quote updates and their rate since the last line, and its latest data time."""
+    last = None
+    while feed._thread.is_alive():
+        feed._thread.join(every)
+        now = feed._progress()
+        if now is None or not feed._thread.is_alive():
+            continue
+        if last is None or last['trading_date'] != now['trading_date'] or now['updates'] < last['updates']:
+            last = {**now, 'seconds': 0, 'updates': 0}
+        rate = (now['updates'] - last['updates']) / max(now['seconds'] - last['seconds'], 1e-9)
+        recorded = int(now['seconds'])
+        clock = now['source_time_us'] // 1_000_000 if now['source_time_us'] is not None else None
+        at = f', data at {clock // 3600:02d}:{clock // 60 % 60:02d}:{clock % 60:02d} JST' if clock is not None else ''
+        date = now['trading_date']
+        print(f'[brisk] {date[:4]}-{date[4:6]}-{date[6:]}: recording for {recorded // 3600}:{recorded // 60 % 60:02d}:{recorded % 60:02d}, '
+              f'{now["updates"]:,} updates, {rate:,.0f} a second{at}', file=sys.stderr, flush=True)
+        last = now
+
 
 def _interrupt(signum, frame):
     raise KeyboardInterrupt
@@ -508,14 +535,15 @@ def _main(argv):
             p.add_argument('--binary', type=Path, help='Optional Rust collector (brisk_quote_ingest) for state validation and latency display')
         else:
             p.add_argument('--events', type=Path, required=True)
-    p = sub.add_parser('live', help='Stream live quote updates as JSON lines')
+    p = sub.add_parser('live', help='Record the live feed day after day, and serve it to briskapi.Live()')
     p.add_argument('--cache', type=Path, metavar='DIR',
                    help="With --site demo: replay a copy of the demo's files downloaded before (default: download them)")
     p.add_argument('--codes', help='Comma-separated security codes (default: whole market)')
     p.add_argument('--speed', type=float, default=1)
     p.add_argument('--limit-frames', type=int)
-    p.add_argument('--raw', action='store_true', help='Vendor fields (price10, microseconds) instead of yen/ISO times')
-    p.add_argument('--quiet', action='store_true', help='Print no quote updates: only record, upload and serve briskapi.Live')
+    p.add_argument('--quotes', action='store_true',
+                   help='Print each quote update as one JSON line (default: a line on stderr now and then on the recording)')
+    p.add_argument('--raw', action='store_true', help='With --quotes: vendor fields (price10, microseconds) instead of yen/ISO times')
     p.add_argument('--gateway', action=argparse.BooleanOptionalAction, default=True,
                    help='Serve the feed to briskapi.Live() on this computer only (127.0.0.1, with a key in an owner-only '
                         'file; default: yes)')
@@ -590,6 +618,8 @@ def _main(argv):
         parser.error('--upload-market-data is for a broker: --site sbi or e-shiten')
     if args.command == 'live' and args.cache and args.site != 'demo':
         parser.error('--cache is for the demo: --site demo')
+    if args.command == 'live' and args.raw and not args.quotes:
+        parser.error('--raw is for the quotes printed with --quotes')
     config = settings(args.config)
     if args.command == 'consent':
         if args.accept:

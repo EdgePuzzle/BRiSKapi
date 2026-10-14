@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14t'
       - run: python -m pip install -r docs/site/requirements.txt
       # --strict: a broken link or a missing example response fails the build
       - run: python docs/site/build.py

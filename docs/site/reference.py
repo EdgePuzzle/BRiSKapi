@@ -254,7 +254,7 @@ PYTHON = [
            'A [`Feed`](/reference/python/feed_quotes.md), already holding every selected security\'s state.',
            {'Python': 'import briskapi\n\nfeed = briskapi.connect(site="demo", codes=["7203"], upload=False)\n'
             'print(feed)\nprint(briskapi.Ticker("7203").quote()["indicative_price"])\nfeed.close()',
-            'CLI': 'brisk live --site demo --codes 7203 --no-upload   # one JSON line per quote update'}, unrun=('CLI',)),
+            'CLI': 'brisk live --site demo --codes 7203 --no-upload --quotes   # one JSON line per quote update'}, unrun=('CLI',)),
     Method('python/record', 'briskapi.record', 'record',
            'Record the demo replay into a folder (Parquet tables, see [Data format](/data-format.md)), upload it unless you '
            'opt out, and make it the default source. On the command line: `brisk record` (see '

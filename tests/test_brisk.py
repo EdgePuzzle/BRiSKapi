@@ -4,6 +4,7 @@ import datetime as dt
 import io
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import sys
@@ -266,7 +267,7 @@ def test_cli_live_sbi(fake_host, monkeypatch, capsys):
     sent, market = [], []
     monkeypatch.setattr(cli, 'upload_timing', lambda report, url: sent.append(report) or {'status': 'stored'})
     monkeypatch.setattr(cli, 'upload', lambda *args, **kwargs: market.append(args) or {'status': 'stored'})
-    cli.main(['live', '--site', 'sbi', '--codes', '7203'])
+    cli.main(['live', '--site', 'sbi', '--codes', '7203', '--quotes'])
     out = capsys.readouterr()
     lines = [json.loads(line) for line in out.out.splitlines()]
     # The one-time question names what a broker session uploads: a timing summary and the market recording.
@@ -473,8 +474,10 @@ def test_a_day_whose_host_cannot_end_it_is_repaired_with_its_end_and_uploaded(tm
     monkeypatch.setattr(cli, 'upload', publish)
     briskapi.login(cookies={'session_bfaf77a2': 'v'})
     briskapi.consent(accept=True)
-    feed = briskapi.connect(site='sbi', upload_market_data=True)
+    # Opened inside the check: on a free-threaded build, warnings are caught per context, which the feed's
+    # threads inherit when they start.
     with pytest.warns(UserWarning, match='repaired with one and uploaded'):
+        feed = briskapi.connect(site='sbi', upload_market_data=True)
         feed.close(timeout=0.5)
     assert feed.status == 'closed' and feed.uploaded == {'status': 'stored'}
     assert [s['batches'] for s in sent] == [2], 'the bootstrap and its repaired end'
@@ -681,7 +684,7 @@ def test_cli_asks_once_for_e_shiten_like_sbi(eshiten_host, monkeypatch, capsys, 
     monkeypatch.setenv('BRISK_ESHITEN_COOKIES', '{"s": "v"}')
     monkeypatch.setattr(cli, 'interactive', lambda: True)
     monkeypatch.setattr(cli.sys, 'stdin', io.StringIO(answer))
-    cli.main(['live', '--site', 'e-shiten', '--codes', '7203'])
+    cli.main(['live', '--site', 'e-shiten', '--codes', '7203', '--quotes'])
     out = capsys.readouterr()
     assert json.loads(out.out.splitlines()[-1])['last_price'] == 10160.0
     assert 'Upload automatically to your private archive?' in out.err
@@ -697,3 +700,32 @@ def test_cli_asks_once_for_e_shiten_like_sbi(eshiten_host, monkeypatch, capsys, 
     with pytest.raises(SystemExit):
         cli.main(['live', '--site', 'sbi', '--cache', '.'])
     assert '--cache is for the demo' in capsys.readouterr().err
+
+
+def test_cli_live_reports_on_the_recording_instead_of_printing_its_quotes(monkeypatch, tmp_path, capsys):
+    # A host that records for a while: each status line names the day, how long it has recorded, its updates
+    # and their rate, and its latest data time; no quote is printed.
+    batches = sbi_session(frames=40)
+    script = tmp_path / 'slow.cjs'
+    script.write_text(f"const b = {json.dumps(batches)}; let i = 0;\n"
+                      "const t = setInterval(() => { console.log(JSON.stringify(b[i++])); if (i === b.length) clearInterval(t); }, 10);\n")
+    monkeypatch.setattr(brisk, 'DECODER', script)
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
+    monkeypatch.setattr(cli, 'PROGRESS_SECONDS', {True: 0.1, False: 0.1})
+    cli.main(['live', '--site', 'sbi', '--no-upload', '--no-gateway'])
+    out = capsys.readouterr()
+    assert out.out == ''
+    reports = [line for line in out.err.splitlines() if line.startswith('[brisk] 2026-03-11: recording for 0:00:0')]
+    assert reports, out.err
+    assert re.search(r', \d[\d,]* updates, [\d,]+ a second, data at 09:00:\d\d JST$', reports[-1]), reports[-1]
+    with pytest.raises(SystemExit):
+        cli.main(['live', '--site', 'sbi', '--raw'])
+    assert '--raw is for the quotes printed with --quotes' in capsys.readouterr().err
+
+
+def test_a_broker_feed_on_a_python_with_the_gil_warns_that_it_can_fall_behind(fake_host, monkeypatch):
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    monkeypatch.setattr(brisk.sys, '_is_gil_enabled', lambda: True)   # the feed then reads its lines one at a time
+    with pytest.warns(UserWarning, match=r'has the GIL.*free-threaded Python 3\.14'):
+        feed = briskapi.connect(site='sbi', upload=False)
+    assert feed.wait().source == 'sbi_live'

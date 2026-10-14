@@ -17,6 +17,7 @@ const crypto = require('node:crypto');
 const { once } = require('node:events');
 const { Decoder } = require('./decoder.cjs');
 const { Link, resolveProfile, heartbeatMonitor, staleDataCheck, redact } = require('./engineio.cjs');
+const { QuotePool, workerCount, POOL_MIN_ISSUES } = require('./workers.cjs');
 
 // Brokers whose BRiSK is this app. On 2026-10-08 both served the same boot (flex_version 18000),
 // master, snapshot and decoder, so only the address differs.
@@ -104,6 +105,9 @@ const DAY_CHECK_MS = 10 * 60 * 1000;
 // (the vendor app's own check of the date is every minute).
 const STREAM_CHECK_MS = 60 * 1000;
 const NEW_DAY_US = 3600e6;  // a clock an hour behind the last frame's belongs to another day
+// With quote workers, how far the output may fall behind the stream (quotes read, not yet written) before the
+// session stops rather than fill the memory.
+const OUTPUT_BACKLOG_BYTES = 2 ** 30;
 
 // Fetch the frames between the snapshot and the stream's first frame. Mirrors the vendor
 // client: up to five retries, but never for an expired session or a snapshot that is too old.
@@ -214,7 +218,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   protocolVersion, profile: overrides = {}, trace = null, catchUp = null, heartbeatMs = HEARTBEAT_MS,
   staleSeconds = 90, connectTimeoutMs = 15000, catchUpBackoffMs, site: siteId = 'sbi', after = null,
   dayCheckMs = DAY_CHECK_MS, streamCheckMs = STREAM_CHECK_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), onBoot = null,
-  resumable = false, stop = null, log = null }) {
+  resumable = false, stop = null, log = null, workers = null }) {
   const where = site(siteId);
   const profile = resolveProfile(overrides);
   const session = new Session(cookies, fetchImpl, where);
@@ -269,7 +273,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     link?.close();
     settle({ code: -1, reason: '' });
   };
-  let monitor = null, timer = null, dayTimer = null;  // started with the link and always stopped, so a failure cannot leave the process hanging
+  let monitor = null, timer = null, dayTimer = null, pool = null;  // started with the link and always stopped, so a failure cannot leave the process hanging
   const endDay = why => {
     if (dayOver) return;
     dayOver = true;
@@ -319,6 +323,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   const finishStart = caughtUp => {
     clearTimeout(timer);
     decoder.begin();
+    pool?.begin(master.map(m => m.issue_id));
     const now = decoder.time();
     const { quotes, skipped } = decoder.quotes(master.map(m => m.issue_id));
     // The stock view layout is unverified for the broker build: refuse implausible values.
@@ -345,7 +350,9 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     trace?.(`catch-up needed for ${lagging.length} issues`);
     work = work.then(async () => {
       if (failure) return;
-      decoder.catchUp(await requestCatchUp(lagging), lagging);
+      const reply = await requestCatchUp(lagging);
+      decoder.catchUp(reply, lagging);
+      pool?.catchUp(reply, lagging);
       finishStart(lagging.length);
     }).catch(fail);
   };
@@ -367,9 +374,54 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
       ...(skipped.length && { skipped_issues: skipped.sort((a, b) => a - b) }) });
   };
 
+  // With quote workers (see workers.cjs), each frame is decoded as it arrives while the workers read its quotes,
+  // and the batches are written in order as their quotes come back, as JSON the workers made.
+  let held = 0;
+  const arrive = (frame, received_unix_ms) => {
+    if (dayOver) return;
+    const t0 = process.hrtime.bigint();
+    decoder.feed(frame);
+    decoder.applyBasePrice();
+    const clock = decoder.time();
+    if (clock + NEW_DAY_US < lastTime) return endDay(`the stream's clock went back to ${clock}`);
+    lastTime = Math.max(lastTime, clock);
+    const changed = decoder.changed().filter(id => ids.has(id));
+    const trades = decoder.trades(ids);
+    const decoded_ns = Number(process.hrtime.bigint() - t0);
+    let bytes = 0;
+    const read = pool.feed(frame, changed).then(result => {
+      bytes = result.quotes.reduce((n, quote) => n + quote.length, 0);
+      if ((held += bytes) > OUTPUT_BACKLOG_BYTES) {
+        throw new Error(`${where.name}: the output is ${Math.round(held / 2 ** 20)} MB of quotes behind the stream; `
+          + 'whatever reads it is not keeping up');
+      }
+      return result;
+    });
+    read.catch(() => {});   // a failure is the chain's to report
+    work = work.then(async () => {
+      if (failure) return;
+      const { quotes, skipped, decode_ns } = await read;
+      updates += quotes.length;
+      const head = { type: 'quotes', seq: seq++, source_time_us: clock, received_unix_ms, decode_ns: decoded_ns + decode_ns,
+        replay_lateness_ms: null };
+      const tail = { trades, ...(skipped.length && { skipped_issues: skipped.sort((a, b) => a - b) }) };
+      const line = `${JSON.stringify(head).slice(0, -1)},"quotes":[${quotes.join(',')}],${JSON.stringify(tail).slice(1)}`;
+      held -= bytes;
+      await emit({ ...head, quotes, ...tail }, line);
+    }).catch(fail);
+  };
+
   const onFrame = frame => {
     const received_unix_ms = Date.now();
     frames++;
+    // A frame arriving shows the link is alive. The WASM's heartbeat is seen only once its frame is decoded, and
+    // in a burst (the opening auction) frames queue behind the output for longer than the heartbeat allows; the
+    // vendor client, which decodes on arrival, would see it now. Falling behind is the stale check's to judge.
+    monitor?.received();
+    if (started && pool) {
+      try { arrive(frame, received_unix_ms); } catch (error) { fail(error); }
+      return;
+    }
     if (started) {
       work = work.then(() => failure || handle(frame, received_unix_ms)).catch(fail);
       return;
@@ -377,11 +429,20 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     try {
       decoder.feed(frame);
       decoder.applyBasePrice();
+      pool?.feed(frame);
       if (!starting && decoder.initialFrames) { starting = true; begin(); }
     } catch (error) { fail(error); }
   };
 
   try {
+    // Workers for a large selection (by default; `workers` sets how many, 0 none), started before the stream so
+    // that they see every frame the host's decoder does.
+    const count = workers ?? (ids.size >= POOL_MIN_ISSUES ? workerCount() : 0);
+    if (count > 0) {
+      pool = await QuotePool.start({ assets, ids, count, options: { protocolVersion, schedule: app.schedule_info ?? null,
+        boot: { exceptional_sq: app.exceptional_sq, base_prices: app.base_prices } } });
+      trace?.(`quotes read by ${count} worker threads`);
+    }
     monitor = heartbeatMonitor({ intervalMs: heartbeatMs, checkEveryMs: Math.min(1000, heartbeatMs / 4), onFail: fail,
       staleCheck: stale && (() => stale.check(decoder.time())) });
     timer = setTimeout(() => fail(new Error(`${where.name} stream did not initialize within ${startTimeoutMs / 1000}s; `
@@ -418,6 +479,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     clearInterval(dayTimer);
     monitor?.stop();
     link?.close();
+    pool?.close();
     if (stop) stop.end = null;
   }
 }
@@ -487,8 +549,9 @@ async function main(argv, env = process.env) {
   process.on('SIGTERM', onSignal);
   await record({ cookies: JSON.parse(env[where.cookies] || 'null'), codes, profile, site: where.id, stop,
     trace: trace ? line => process.stderr.write(`[brisk protocol] ${line}\n`) : null,
-    emit: async record => {
-      if (!process.stdout.write(JSON.stringify(record) + '\n')) await once(process.stdout, 'drain');
+    // A batch whose quotes workers read comes with its line already made.
+    emit: async (record, line = JSON.stringify(record)) => {
+      if (!process.stdout.write(line + '\n')) await once(process.stdout, 'drain');
     } });
 }
 

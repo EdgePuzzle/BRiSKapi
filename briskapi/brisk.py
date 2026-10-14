@@ -28,12 +28,14 @@ import base64
 import datetime as dt
 import json
 import os
+import sys
 from pathlib import Path
 import time
 from typing import NamedTuple
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 import zlib
 
 from briskapi import _https
@@ -326,6 +328,10 @@ def _connect(site, codes=None, history=False, node='node', timeout=120, upload=N
     from briskapi._live import Feed
     session = (_client if _client is not None and _client.site == site else _login(site=site)).session
     cli.check_node(node)      # local checks first: a missing Node is reported without contacting the site
+    if sys._is_gil_enabled():
+        warnings.warn('This Python has the GIL, so the feed reads the stream and writes the recording in turns, and '
+                      'it can fall seconds behind at the opening auction. Use free-threaded Python 3.14 (python3.14t).',
+                      stacklevel=3)
     _check_session(session)
     command = [node, str(DECODER)]
     if codes:
