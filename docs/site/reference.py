@@ -522,8 +522,8 @@ BROKER = [
            {'Python': '<briskapi.brisk.Client object>'}, illustrative=True),
     Method('python/broker_connect', 'briskapi.connect (your broker)', 'connect: broker',
            'Your broker\'s live BRiSK feed, decoded by BRiSK\'s own decoder under Node. It records one trading '
-           'day after another until closed, keeping (`output`) and uploading each day as it runs, as recordings of about '
-           '500,000 quote updates. Without `output`, a recording is kept only in your archive, and with uploads off, nowhere. On the command line: '
+           'day after another until closed, keeping (`output`) and uploading each day as two recordings, its morning '
+           'and afternoon sessions. Without `output`, a recording is kept only in your archive, and with uploads off, nowhere. On the command line: '
            '`brisk live --site sbi` or another broker\'s site (see [Recording](/guides/recording.md)).',
            'briskapi.connect(\n    *,\n    site: str,\n    codes: list[str] | None = None,\n    history: bool = False,\n'
            '    upload: bool | None = None,\n    upload_market_data: bool | None = None,\n    output: str | Path | None = None,\n'

@@ -327,8 +327,8 @@ def _connect(site, codes=None, history=False, node='node', timeout=120, upload=N
     server closes the stream after the market) or it serves a new trading date, the day is finished, and the
     next one starts from a fresh snapshot once the site's session is running. Started with no session
     running (after the close, on a holiday), it waits for the next trading day's. Each day is packaged on a
-    worker thread as it runs, a recording of about 500,000 quote updates at a time (a whole-market day is far
-    more than one recording holds), each kept in `output` (a folder named SOURCE_YYYYMMDD_FROM-TO, FROM and TO
+    worker thread in two recordings, the morning session's once the lunch break begins and the afternoon's
+    at the day's end, each kept in `output` (a folder named SOURCE_YYYYMMDD_FROM-TO, FROM and TO
     its first and last source clock, JST HHMMSS) if given and uploaded as chosen; `on_day(result)` is then
     called and `feed.recordings` lists it.
     gateway=True also serves the feed to briskapi.Live on this computer, as dataset XTKS.BRISK.

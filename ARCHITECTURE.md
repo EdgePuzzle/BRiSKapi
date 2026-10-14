@@ -126,6 +126,13 @@ quote as custom data `BriskQuote` (int64 columns in vendor units, so a v2
 `customdataclass` can declare them, and the closing-condition books as JSON text).
 `--jsonl FILE` writes canonical batches.
 
+A broker's recording is a trading session of the whole market, some 25 million updates, so reading
+one never holds it whole in memory where it can be avoided: one security's quotes and trades read
+only its row groups, `state()` (and so `Market`'s views of every security at a time) reads a row
+group at a time, `Market.trades()` reads the trades table alone, and the Nautilus export writes an
+instrument at a time. Only batch order (`batches()`, `lines()`, `--jsonl`) needs the recording in
+memory, tens of gigabytes for a session, as its rows are stored by security.
+
 ## Live feed
 
 `briskapi.Feed` reads decoder output on a background thread and applies each batch
@@ -171,24 +178,23 @@ and put in the canonical order) and writes the same bytes as the day's batches a
 minutes 35 seconds and would take a day most of an hour: the archive runs them on every upload, and
 an upload it rejects is kept like a failed one.
 
-A broker's day is shipped as it runs, in pieces (`Spool.ship`): a whole-market day has some 50
-million quote updates, against a package of at most 64 MiB that the archive's function checks in
-memory (the demo's 735,000 make 39 MiB and take 1.7 GB of its 3 GB), and packaging it at once would take
-a computer's memory and most of an hour. After each part is written the spool tells the feed's worker,
-which ships a piece once the parts not yet shipped hold `SEGMENT_ROWS` (500,000) quote updates and end
-where every issue's trades so far are followed by a quote of it (`_parquet.part_index` reads that from
-the parts' small columns): the archive checks that the trades account for each quote's volume and
-turnover, which a piece ending between a trade and its issue's next quote would break. Each piece is a
-recording of its own (`_parquet.after`): a bootstrap like the day's, at the clock of the batch before
-it, holding each issue's last quote so far (`_parquet.latest`; an issue with none is skipped), then the
-piece's batches numbered on from it and an end (`repair_end`'s, or the day's own with its own count,
-`recount_end`). Consecutive pieces cover the day without a gap (each starts at the clock where the one
-before ends), and the cloud API reads them as one: its bars merge their clock ranges, and the quotes a
-bootstrap repeats carry the frame numbers already seen, so its deduplication drops them. The worker
-keeps and uploads each piece as it would a day, and at the day's end ships what is left (in more pieces
-if a stop or a slow worker left more than one's worth). `shipped.json` counts the parts shipped, so a
-crashed session's spool is finished from there; where the shipped pieces left the book is rebuilt from
-their parts a part at a time. A demo's replay is one recording, as its reference requires.
+A broker's day is shipped as it runs, in two pieces (`Spool.ship`): a whole-market day has some 50
+million quote updates, more than a computer should package, or the archive check, at once. The morning
+session's piece ships as soon as a part closes after noon (`LUNCH_US`, the lunch break), the afternoon's
+at the day's end; no piece holds more than `MAX_PIECE_ROWS` (60 million). After each part is written
+the spool tells the feed's worker, which decides from the parts' small columns (`_parquet.part_index`).
+Each piece is a recording of its own: the afternoon's (`_parquet.write_piece` with a cut) starts with a
+bootstrap like the day's, at the clock of the batch before it, holding each issue's last quote so far
+(an issue with none is skipped), then its batches numbered on from it and the day's end with its own
+count. The two meet at a clock, and the cloud API reads them as one: its bars merge their clock ranges,
+and the quotes a bootstrap repeats carry the frame numbers already seen, so its deduplication drops
+them. A piece is written a range of issues at a time (each part's depths hold a row group per
+`PART_ISSUES` issue IDs, and a range gathers about `PIECE_ROWS` rows from every part), in the row
+groups writing it at once would make, so the bytes are the same and no session is ever whole in memory;
+its zip is written and hashed on disk (`pack_to`). The worker keeps and uploads each piece as it would a
+day. `shipped.json` counts the parts shipped, so a crashed session's spool is finished from there; where
+the morning left the book is rebuilt from its parts a part at a time. A demo's replay is one recording,
+as its reference requires.
 
 A packaging or upload failure is a warning and a result that
 says so, never a failed feed, and the day is then kept in `~/.local/share/brisk/recordings`
@@ -1049,8 +1055,15 @@ address and per owner (`CHANGES`). A request over any limit gets HTTP 429.
 ### Integrity
 
 The client is open source, so the service validates every upload. Demo and
-synthetic content must match a reference; broker live content has no reference and
-is uploader-declared:
+synthetic content must match a reference, and is checked whole, in memory
+(`verify_directory`); broker live content has no reference and is uploader-declared, and
+is checked a row group at a time on disk (`verify_broker`), as a trading session of the whole
+market is some 25 million quote updates. Every upload is checked for what it may hold (the
+tables, fields and encodings below); a broker's for being well formed too (each quote's and
+trade's identity, order, batch, clock and value ranges, its books' order, the batches'
+sequence, kinds, clocks, transport and local timing, and the end's count), but not for the
+market's own consistency (trades against volumes, each issue's frames over time), which
+nothing could make trustworthy:
 
 - **Reference replay.** Market content must equal the pinned demo replay.
   [briskapi/references/historical_mock.json](briskapi/references/historical_mock.json) holds a
@@ -1152,10 +1165,12 @@ results/OWNER/UUID.EXT                       a query result too large to return 
 - Upload tickets last 15 minutes and bind the object key, exact size and encryption.
 - Uploads are bound to their first S3 object version. Retries of that event are
   safe, and overwriting an upload cannot replace a stored recording.
-- Limits: a 64 MiB package, 2 GiB in canonical JSON form and 16 MiB per batch in
-  that form. Tickets are limited to four per IP address per hour (stored as a keyed
-  hash, never the address), eight per owner per hour, 64 per hour in total and 5 GiB
-  of authorized uploads per UTC day, counted by what is sent (a timing table alone,
+- Limits: a demo or synthetic replay, a 64 MiB package, 2 GiB in canonical JSON form and
+  16 MiB per batch in that form; a broker's recording, a 4 GiB package (S3 takes a browser
+  POST of up to 5 GB) and `BROKER_MAX_ROWS` rows, uploaded and stored from disk, never in
+  memory (the function has 10 GB of `/tmp` and 15 minutes). Tickets are limited to four per IP
+  address per hour (stored as a keyed hash, never the address), eight per owner per hour, 64
+  per hour in total, 8 GiB of authorized uploads per owner and 64 GiB in all per UTC day, counted by what is sent (a timing table alone,
   once the copy exists), on top of every request's per-address limit (see
   [Identity](#identity)). A complete demo replay is a 41 MB package.
 - Ticket metadata in staging expires after two days. Stored data is kept until its
@@ -1207,7 +1222,7 @@ only the lifecycle does.
 The decoded schema accepts `historical_mock`, `synthetic_test` and the brokers' `sbi_live`,
 `eshiten_live`, `matsui_live`, `monex_live` and `smbcnikko_live`. The small, self-authored
 `synthetic_test` fixture verifies uploads; filter by source when selecting market data. Uploaded
-decoded broker recordings retain their `source` and undergo canonical-field, integrity and continuity checks.
+decoded broker recordings retain their `source` and undergo the canonical-table and structural checks above.
 Their market accuracy is uploader-declared; they are not silently treated as
 reference-verified demo data. New raw-wire uploads remain unsupported. Objects stored
 while the archive was public (before policy version 6) sit outside any owner's prefix and

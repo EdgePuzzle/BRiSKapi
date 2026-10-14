@@ -587,7 +587,7 @@ def test_a_feed_keeps_and_uploads_each_trading_day_as_it_ends(tmp_path, monkeypa
 def test_a_broker_day_ships_a_piece_at_a_time_each_a_recording_the_archive_accepts(fake_host, tmp_path, monkeypatch):
     # A whole-market day is far more than one recording holds, so it goes to the archive a piece at a time as it runs.
     monkeypatch.setattr(_spool, 'PART_BYTES', 3000)
-    monkeypatch.setattr(_spool, 'SEGMENT_ROWS', 30)
+    monkeypatch.setattr(_spool, 'MAX_PIECE_ROWS', 30)
     sent = []
 
     def publish(directory, url, **options):

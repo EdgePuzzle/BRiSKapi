@@ -71,7 +71,7 @@ Recording isn't a third API. The live calls record as they run, and `brisk live`
 
 | Command line | Python | Records | Kept on disk | Uploaded |
 | --- | --- | --- | --- | --- |
-| `brisk live --site sbi` (or `e-shiten`, `matsui`, `monex`, `smbcnikko`) | `briskapi.connect(site="sbi")` | Your broker's live feed until you stop it, each trading day as recordings of a few minutes | Each recording, with `--output DIR` (`output=`) | Each recording as it is made, unless you opt out |
+| `brisk live --site sbi` (or `e-shiten`, `matsui`, `monex`, `smbcnikko`) | `briskapi.connect(site="sbi")` | Your broker's live feed until you stop it, each trading day as two recordings (its sessions) | Each recording, with `--output DIR` (`output=`) | Each recording as it is made, unless you opt out |
 | `brisk live --site demo` | `briskapi.connect(site="demo")` | The demo replay, printed as JSON lines | With `--output DIR` | If the replay completes |
 | `brisk record --output DIR` | `briskapi.record(DIR)` | The demo replay | Always, in `DIR` | If the replay completes |
 
@@ -89,10 +89,9 @@ While it runs, `brisk live` also serves its feed to `briskapi.Live()` on this co
 
 While a day runs, it is written to disk as it arrives: Parquet files in a spool folder
 (`~/.local/share/brisk/spool`), about as large as the finished recording, so a crash loses at
-most its last half-minute. A broker's day becomes recordings as it runs, each of about 500,000 quote
-updates (a few minutes at the open, longer later) and starting from a snapshot of the book where the
-one before ended: a whole-market day, some 50 million updates, is far more than one recording can
-hold. The demo's replay is one recording.
+most its last half-minute. A broker's day becomes two recordings as it runs: the morning
+session's, kept and uploaded once the lunch break begins, and the afternoon's at the day's end,
+starting from a snapshot of the book where the morning's ended. The demo's replay is one recording.
 
 - **Without `--output`**, each recording goes to your [archive](#your-private-archive) and
   its local copy is removed. With uploads off as well (`--no-upload`, or
@@ -260,14 +259,14 @@ market.events()       # basket orders, limit up/down, volume surges
 market.schedule()     # trading date, status and session times
 market.watchlist()    # your saved codes
 
-feed = briskapi.connect(site="sbi", codes=["7203"])   # live; uploaded a few minutes at a time unless you opt out
+feed = briskapi.connect(site="sbi", codes=["7203"])   # live; each session uploaded unless you opt out
 toyota.quote()                              # same calls as any feed
 # upload_market_data=False uploads no market recordings, upload=False nothing; output="days" keeps each day
 ```
 
 A broker feed records continuously and keeps running across days. It packages and uploads each
-day as it runs, a recording of about 500,000 quote updates at a time, each starting from a snapshot
-of the book where the one before ended (in the cloud API they read as one day). When the site's
+day in two recordings, the morning session's once the lunch break begins and the afternoon's (starting
+from a snapshot of the book where the morning's ended) at the day's end; in the cloud API they read as one day. When the site's
 session is done or it starts serving the next trading date (checked every 10 minutes), or the server
 closes the stream after the market, the day ends: its last recording is packaged and uploaded, with
 the day's timing summary (unless you opt out), while the feed waits for the next session and records
@@ -486,7 +485,7 @@ brisk pull PREFIX --output recordings/downloaded   # use a prefix returned by br
 brisk delete PREFIX                         # remove one of your uploads from your archive (restorable for 30 days)
 brisk restore PREFIX                        # bring back an upload deleted in the last 30 days (also a timing report's key)
 brisk prune recordings/s1                   # free disk: remove a local recording your archive holds
-brisk export recordings/s1 --nautilus catalog      # a NautilusTrader v2 catalog (or --jsonl FILE)
+brisk export recordings/s1 --nautilus catalog      # a NautilusTrader v2 catalog, an instrument at a time (or --jsonl FILE, which holds the recording in memory: tens of GB for a broker's session)
 brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13   # the cloud API: CSV to stdout (--encoding json|parquet, --output FILE, --end, --limit)
 brisk consent [--accept | --revoke]         # show or change automatic uploads (--no-upload: this run only)
 brisk upload recordings/s1                  # retry uploading a recording
@@ -511,7 +510,7 @@ Each command is the command-line form of a Python call:
 | `brisk export`, `brisk identity` | Command line only |
 
 `brisk live --site sbi` (or another broker's site) runs until you stop it, recording each trading
-day a few minutes at a time; started after the close or on a holiday, it says so and waits for the next trading day. Unless you opt out, it uploads its market recordings as they are made, and each day's timing summary,
+day as two recordings, its morning and afternoon sessions; started after the close or on a holiday, it says so and waits for the next trading day. Unless you opt out, it uploads its market recordings as they are made, and each day's timing summary,
 without asking; `--no-upload-market-data` stops uploading the recordings and `--no-upload` both
 (add `--output DIR` to keep them on disk). `brisk list --source sbi_live` (or `eshiten_live`, `matsui_live`, `monex_live`, `smbcnikko_live`) lists
 your broker recordings. Every `brisk live` also serves its feed to `briskapi.Live()` on this computer

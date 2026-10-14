@@ -214,9 +214,9 @@ def _content(directory):
 
 @pytest.mark.parametrize('rows', [1, 6, 15])
 def test_a_day_ships_in_pieces_each_a_recording_the_archive_accepts_and_together_the_day(tmp_path, monkeypatch, rows):
-    monkeypatch.setattr(_spool, 'SEGMENT_ROWS', rows)
+    monkeypatch.setattr(_spool, 'MAX_PIECE_ROWS', rows)
     batches = session()
-    # Issue 1's trades in batch 9 come without its quote (unreadable there): no piece may end before its next one.
+    # Issue 1's trades in batch 9 come without its quote (unreadable there): a piece may end there all the same.
     batches[9]['quotes'], batches[9]['skipped_issues'] = batches[9]['quotes'][1:], [1]
     batches[-1]['quote_updates'] -= 1
     (tmp_path / 'events.jsonl').write_bytes(b''.join(lines(batches)))
@@ -241,8 +241,63 @@ def test_a_day_ships_in_pieces_each_a_recording_the_archive_accepts_and_together
     assert spool.ship(tmp_path / 'more', final=True) is None
 
 
+def _afternoon(batches, at):
+    """The session with every batch from `at` on after the lunch break (three and a half hours later)."""
+    later = 12_600 * 10**6
+    out = []
+    for i, b in enumerate(json.loads(json.dumps(batches))):
+        if i >= at:
+            b['source_time_us'] += later
+            if 'received_unix_ms' in b:
+                b['received_unix_ms'] += later // 1000
+            for q in b.get('quotes', ()):
+                q['source_time_us'] += later
+            for t in b.get('trades', ()):
+                t['time_us'] += later
+        out.append(b)
+    return out
+
+
+def test_a_day_ships_its_morning_once_a_part_closes_after_noon_and_its_afternoon_at_its_end(tmp_path, monkeypatch):
+    monkeypatch.setattr(_spool, 'LUNCH_US', OPEN_US + 3 * 3600 * 10**6)   # the session's clocks start at OPEN_US
+    batches = _afternoon(session(), 20)
+    spool = spooled(tmp_path, batches[:24])   # the day runs on past noon: the morning ships
+    spool.close_part(wait=True)
+    morning = spool.ship(tmp_path / 'morning')
+    assert morning and morning[0]['summary']['last_source_time_us'] >= _spool.LUNCH_US > morning[0]['summary']['first_source_time_us']
+    assert spool.ship(tmp_path / 'again') is None, 'the afternoon waits for the day\'s end'
+    for b, line in zip(batches[24:], lines(batches[24:])):
+        spool.add(b, line)
+    afternoon = spool.ship(tmp_path / 'afternoon', final=True)
+    assert afternoon and afternoon[0]['summary']['first_source_time_us'] == morning[0]['summary']['last_source_time_us']
+    for directory, (manifest, _) in ((tmp_path / 'morning', morning), (tmp_path / 'afternoon', afternoon)):
+        assert _parquet.inspect_package(directory, manifest) == manifest['summary']
+    assert spool.ship(tmp_path / 'more', final=True) is None
+
+
+def test_a_piece_written_a_range_of_issues_at_a_time_is_the_same_as_written_at_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(_parquet, 'PIECE_ROWS', 3)   # many ranges
+    monkeypatch.setattr(_parquet, 'PART_ISSUES', 1)
+    spool = spooled(tmp_path, session())
+    spool.close_part(wait=True)
+    parts, equity = spool.parts(), spool.path / _parquet.EQUITY
+    bootstrap = _parquet.bootstrap_row(parts[0])
+    midnight = _parquet.midnight_ns(bootstrap['trading_date'])
+    k = len(parts) // 2
+    before = _parquet.load_parts(equity, parts[:k], midnight)
+    cut = _spool._Cut(_parquet.latest(before), before.batches[-1]['source_time_us'])
+    expected = _parquet.after(_parquet.load_parts(equity, parts[k:], midnight), cut, bootstrap)
+    _parquet.recount_end(expected)
+    expected.write(tmp_path / 'at-once')
+    summary, latest, clock, repaired = _parquet.write_piece(equity, parts[k:], tmp_path / 'by-range', midnight, cut, bootstrap)
+    for name in _parquet.FILES:
+        assert (tmp_path / 'by-range' / name).read_bytes() == (tmp_path / 'at-once' / name).read_bytes(), name
+    assert summary == expected.summary() and not repaired and clock == expected.batches[-1]['source_time_us']
+    assert len(latest) == len(_parquet.latest(expected))
+
+
 def test_a_crashed_spool_ships_what_is_left_from_where_it_was(tmp_path, monkeypatch):
-    monkeypatch.setattr(_spool, 'SEGMENT_ROWS', 8)
+    monkeypatch.setattr(_spool, 'MAX_PIECE_ROWS', 8)
     batches = session()[:30]   # cut short: no end
     spool = spooled(tmp_path, batches)
     spool.close_part(wait=True)

@@ -222,7 +222,7 @@ class Recording:
         raise NotFoundError(f'{code} is not in this recording')
 
     def validate(self) -> dict:
-        """Run the archive's full checks (exact tables, timing bounds, reference replay)."""
+        """Run the archive's checks (exact tables, timing bounds, a replay's reference, a broker's structure)."""
         if self.format == 'parquet':
             return _parquet.summarize(self.directory)
         with self.open() as f:
@@ -234,7 +234,8 @@ class Recording:
         if limit is None and self._final is not None:
             return dict(self._final)
         if self.format == 'parquet':
-            quotes = self._load().state(limit)
+            # Read a row group at a time unless already in memory: a broker's session is some 25 million updates.
+            quotes = self._columns.state(limit) if self._columns is not None else _parquet.state(self.directory, limit)
             if limit is None:
                 self._final = dict(quotes)
             return quotes
@@ -254,7 +255,8 @@ class Recording:
         issue = None if code is None else self.issue(code)['issue_id']
         low, high = micros(self.trading_date, start), micros(self.trading_date, end)
         if self.format == 'parquet':
-            columns = self._columns or _parquet.Columns.load(self.directory, issue_id=issue)
+            columns = self._columns or (_parquet.Columns.load(self.directory, issue_id=issue) if issue is not None
+                                        else _parquet.Columns.trades_of(self.directory))
             trades = columns.trades(issue, low, high)
         else:
             trades = [t for batch in self.batches() for t in batch.get('trades', ())

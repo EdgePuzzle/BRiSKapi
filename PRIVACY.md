@@ -53,8 +53,8 @@ clean and complete session is uploaded to your private archive without further p
 `briskapi.connect()`, `briskapi.record()`), and broker sessions (SBI, Tachibana e-shiten, Matsui,
 Monex or SMBC Nikko: `brisk live --site sbi` or another broker's site, `briskapi.connect(site=...)`), which upload a timing
 summary and their decoded market recording. A broker session records one trading day after
-another until you stop it, and uploads each day while it runs, as recordings of about 500,000 quote
-updates (a few minutes at the open, longer later), the last when the day ends (when the site serves
+another until you stop it, and uploads each day in two recordings, the morning session's once the
+lunch break begins and the afternoon's when the day ends (when the site serves
 the next trading date, or the server closes the stream). If the connection to your broker's BRiSK
 drops during a day, the session reconnects by itself: what it recorded before the drop is a
 complete recording of its own, uploaded like the others, and the rest of the day is recorded
@@ -103,8 +103,9 @@ own timing table; downloading it returns the whole recording.
   the order book, turnover and broker issue status; version 6 the trades, the
   closing-condition books and the board totals; version 9 the same from Matsui, Monex and SMBC
   Nikko sessions. Demo content is checked against the pinned
-  reference replay. Broker content is uploader-declared, with exact field and continuity
-  checks rather than a reference replay.
+  reference replay. Broker content is uploader-declared: the archive checks that it holds
+  exactly these fields, canonically encoded, and that it is well formed (identities, order, clocks,
+  value ranges), but not the market's own consistency.
 - **Local timing measurements**: per-frame decode time (`decode_ns`), your computer's
   wall-clock receipt time in milliseconds (`received_unix_ms`), replay lateness, total
   replay time and demo asset download time, plus whether the assets came from the website
@@ -158,9 +159,9 @@ Monex and `smbcnikko` for SMBC Nikko) uses session cookies from your own browser
   add, which has no data client, are kept in an owner-only file under `~/.config/brisk/cookies/`. The Chrome profile used for sign-in is
   temporary and deleted afterwards (one left by a force-killed run is removed at the next start),
   and only the BRiSK host's cookies are taken from it.
-- With uploads on, a broker session's decoded market recording is uploaded while each trading day
-  runs, about 500,000 quote updates at a time (each piece starting from a snapshot of the book, which
-  repeats the latest quote of every security), the rest of the day when it ends, the part of a day
+- With uploads on, a broker session's decoded market recording is uploaded in two pieces a trading
+  day: the morning session's once the lunch break begins, and the afternoon's (starting from a snapshot
+  of the book, which repeats the latest quote of every security) when the day ends, the part of a day
   before a lost connection once the session reconnects, and what is left of the day when you stop the
   session, or when it crashes or is killed (repaired, as above). `--no-upload-market-data` or
   `briskapi.connect(site=..., upload_market_data=False)` keeps it local.

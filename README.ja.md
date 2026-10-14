@@ -71,7 +71,7 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 
 | コマンドライン | Python | 記録するもの | ディスクに残るもの | アップロード |
 | --- | --- | --- | --- | --- |
-| `brisk live --site sbi`（または `e-shiten`、`matsui`、`monex`、`smbcnikko`） | `briskapi.connect(site="sbi")` | 証券会社のライブフィード。止めるまで、各取引日を数分ずつの記録として | `--output DIR`（`output=`）を指定すると、記録ごと | できた記録から順に（オプトアウトした場合を除く） |
+| `brisk live --site sbi`（または `e-shiten`、`matsui`、`monex`、`smbcnikko`） | `briskapi.connect(site="sbi")` | 証券会社のライブフィード。止めるまで、各取引日を2つの記録（前場と後場）として | `--output DIR`（`output=`）を指定すると、記録ごと | できた記録から順に（オプトアウトした場合を除く） |
 | `brisk live --site demo` | `briskapi.connect(site="demo")` | デモの再生（JSON の行として出力） | `--output DIR` を指定した場合 | 再生が最後まで終わった場合 |
 | `brisk record --output DIR` | `briskapi.record(DIR)` | デモの再生 | 常に `DIR` に | 再生が最後まで終わった場合 |
 
@@ -89,9 +89,9 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 
 日の途中も、届いたそばからディスクに書き込まれます。スプールフォルダー（`~/.local/share/brisk/spool`）の
 Parquet ファイルで、大きさは完成した記録とほぼ同じなので、クラッシュしても失われるのは最後の30秒ほどだけです。
-証券会社の日は、動いている間に、気配の更新約50万件ずつ（寄付では数分、その後はもっと長く）の記録になり、
-それぞれ直前の記録が終わった時点の板のスナップショットから始まります。全銘柄の1日は約5,000万件で、
-1つの記録に収まる量をはるかに超えるためです。デモの再生は1つの記録です。
+証券会社の日は、動いている間に2つの記録になります。前場の記録は昼休みに入った時点で保存・アップロードされ、
+後場の記録は前場の記録が終わった時点の板のスナップショットから始まり、日が終わった時点で保存・アップロードされます。
+デモの再生は1つの記録です。
 
 - **`--output` を指定しない場合**、記録は[自分のアーカイブ](#自分専用のアーカイブ)に送られ、手元の
   コピーは削除されます。さらにアップロードもオフにすると（`--no-upload`、または証券会社の市場データの記録なら
@@ -256,14 +256,14 @@ market.events()       # バスケット注文、ストップ高・安、出来�
 market.schedule()     # 取引日、状態、取引時間
 market.watchlist()    # 保存済みの銘柄コード
 
-feed = briskapi.connect(site="sbi", codes=["7203"])   # ライブ。オプトアウトしない限り、数分ずつアップロード
+feed = briskapi.connect(site="sbi", codes=["7203"])   # ライブ。オプトアウトしない限り、前場・後場ごとにアップロード
 toyota.quote()                              # 他のフィードと同じ呼び出し
 # upload_market_data=False で市場データの記録を、upload=False ですべてをアップロードしない（残すには output="days"）
 ```
 
-証券会社のフィードは連続して記録し、日をまたいでも動き続けます。各日は動いている間に、気配の更新約50万件ずつの
-記録としてパッケージ化・アップロードされ、それぞれ直前の記録が終わった時点の板のスナップショットから始まります
-（クラウド API では1日として読めます）。サイトのセッションが終了（done）したとき、またはサイトが次の取引日を
+証券会社のフィードは連続して記録し、日をまたいでも動き続けます。各日は2つの記録として
+パッケージ化・アップロードされ、前場の記録は昼休みに入った時点で、後場の記録（前場が終わった時点の板の
+スナップショットから始まります）は日が終わった時点です（クラウド API では1日として読めます）。サイトのセッションが終了（done）したとき、またはサイトが次の取引日を
 配信し始めたとき（10分ごとに確認）、あるいはサーバーが市場の終了後にストリームを閉じたときにその日が終わり、
 最後の記録がその日のタイミングの要約とともにパッケージ化・アップロードされ（オプトアウトした場合を除く）、
 フィードは次のセッションを待って、新しいスナップショットから記録を始めます。セッションが開いていないとき（取引終了後や休日）に始めると、
@@ -483,7 +483,7 @@ brisk pull PREFIX --output recordings/downloaded   # brisk list が返した pre
 brisk delete PREFIX                         # 自分のアップロードを自分のアーカイブから削除（30日間は復元可能）
 brisk restore PREFIX                        # 過去30日間に削除したアップロードを元に戻す（タイミングレポートのキーも可）
 brisk prune recordings/s1                   # ディスクを空ける: アーカイブにある記録のローカルのコピーを削除
-brisk export recordings/s1 --nautilus catalog      # NautilusTrader v2 のカタログ（または --jsonl FILE）
+brisk export recordings/s1 --nautilus catalog      # NautilusTrader v2 のカタログを銘柄ごとに書き出し（または --jsonl FILE。記録全体をメモリに読むので、証券会社の前場・後場では数十 GB）
 brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13   # クラウド API：CSV を標準出力へ（--encoding json|parquet、--output FILE、--end、--limit）
 brisk consent [--accept | --revoke]         # 自動アップロードの設定の表示・変更（--no-upload: 今回だけ）
 brisk upload recordings/s1                  # 記録のアップロードを再試行
@@ -507,7 +507,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 | `brisk enroll`、`login`、`forget` | `briskapi.passkey.enroll()`、`.login()`、`.forget()` |
 | `brisk export`、`brisk identity` | コマンドラインのみ |
 
-`brisk live --site sbi`（またはほかの証券会社のサイト）は、止めるまで動き続け、各取引日を数分ずつ記録します。
+`brisk live --site sbi`（またはほかの証券会社のサイト）は、止めるまで動き続け、各取引日を前場と後場の2つの記録にします。
 取引終了後や休日に始めると、そう表示して次の取引日を待ちます。
 オプトアウトしない限り、市場データの記録をできたものから順に、各日のタイミングの要約とともに確認なしで
 アップロードします。`--no-upload-market-data` で記録を、`--no-upload` で両方をアップロードしなくなります

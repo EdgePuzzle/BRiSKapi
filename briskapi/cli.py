@@ -2,6 +2,7 @@
 """Consume BRiSK auction data live, record it, upload it to your private archive and use that archive."""
 import argparse
 import datetime as dt
+import io
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,8 @@ import warnings
 from briskapi import _https, _parquet, identity
 from briskapi._recording import BriskError, Recording
 from briskapi.schema import (RECORDING_PREFIX, REFERENCES, SCHEMA, SOURCES, MAX_COMPRESSED, TIMING_KEY, canonical_batches,
-                             encode, local_name, owner, recording_name, validate_manifest, validate_timing, require)
+                             encode, local_name, max_package, owner, recording_name, validate_manifest, validate_timing,
+                             require)
 
 PACKAGE = Path(__file__).resolve().parent
 # BRiSK's own WASM decoder runs under Node; the package ships only this host and SHA-256 pins.
@@ -175,19 +177,19 @@ def package(events, output):
     """Encode decoder JSONL as a package: the recording's tables plus a manifest of their zip."""
     return _package(output, lambda: save_recording(events, output))
 
-def package_parts(equity, parts, output, repair=False, build=None):
-    """A spooled segment (briskapi._spool) as a package: the same tables and manifest as package() of its batches.
-    With `repair`, a segment cut short first gets the end its host never wrote (_parquet.repair_end). `build`
-    makes the recording's Columns instead (a piece of a day: see Spool.ship)."""
+def package_parts(equity, parts, output, repair=False, piece=None):
+    """A spooled segment (briskapi._spool) as a package: the same tables and manifest as package() of its batches,
+    written a range of issues at a time (_parquet.write_piece). With `repair`, a segment cut short first gets the
+    end its host never wrote (_parquet.repair_end). `piece` ({midnight, cut, bootstrap, end}: Spool.ship's) makes
+    a piece of a day instead, and gets back where it leaves the day ({latest, clock}) and whether it was repaired."""
+    piece = {} if piece is None else piece
+
     def write():
-        if build:
-            columns = build()
-        else:
-            columns = _parquet.load_parts(equity, parts)
-            if repair:
-                _parquet.repair_end(columns)
-        columns.write(output)
-        return columns.summary()   # not checked here: the archive checks every upload, and a day took minutes
+        midnight = piece.get('midnight') or _parquet.midnight_ns(_parquet.bootstrap_row(parts[0])['trading_date'])
+        summary, piece['latest'], piece['clock'], piece['repaired'] = _parquet.write_piece(
+            equity, parts, output, midnight, piece.get('cut'), piece.get('bootstrap'),
+            piece.get('end', 'repair' if repair else None))
+        return summary   # not checked here: the archive checks every upload, and a day took minutes
     return _package(output, write)
 
 def _package(output, write):
@@ -198,10 +200,14 @@ def _package(output, write):
         summary = write()
         if summary is None:
             summary = _parquet.summarize(output)
-        blob = _parquet.pack(output)
-        require(len(blob) <= MAX_COMPRESSED, f'The package is {len(blob) / 2**20:.0f} MiB; '
-                                             f'the archive accepts up to {MAX_COMPRESSED // 2**20} MiB')
-        m = validate_manifest(dict(schema=SCHEMA, sha256=_parquet.digest(blob), bytes=len(blob), summary=summary))
+        zipped = output.with_name(f'.{output.name}.zip')
+        try:
+            sha256, size = _parquet.pack_to(output, zipped)
+        finally:
+            zipped.unlink(missing_ok=True)
+        limit = max_package(summary['source'])
+        require(size <= limit, f'The package is {size / 2**20:.0f} MiB; the archive accepts up to {limit // 2**20} MiB')
+        m = validate_manifest(dict(schema=SCHEMA, sha256=sha256, bytes=size, summary=summary))
     except BaseException:
         for name in _parquet.FILES:
             (output / name).unlink(missing_ok=True)
@@ -230,8 +236,35 @@ def api(api_url, action, **fields):
     """One archive request as this computer's identity (made on first use)."""
     return request_json(api_url, {'action': action, **fields}, identity.secret())
 
-def upload(directory, api_url, timeout=660, verify=True, out=None, market=None):
-    """Upload a package to your private archive and wait for its validation.
+class _Body(io.RawIOBase):
+    """An upload's multipart body: its head, a file read as it is sent, and its tail."""
+
+    def __init__(self, head, path, tail):
+        super().__init__()
+        self._parts = [io.BytesIO(head), open(path, 'rb'), io.BytesIO(tail)]
+        self.size = len(head) + Path(path).stat().st_size + len(tail)
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        while self._parts:
+            count = self._parts[0].readinto(buffer)
+            if count:
+                return count
+            self._parts.pop(0).close()
+        return 0
+
+    def close(self):
+        for part in self._parts:
+            part.close()
+        self._parts = []
+        super().close()
+
+
+def upload(directory, api_url, timeout=1500, verify=True, out=None, market=None):
+    """Upload a package to your private archive and wait for its validation (a broker's trading session takes
+    the archive some minutes).
 
     A demo (or synthetic) replay's market data is the same for everyone and the archive keeps it once,
     so such a package sends only its timing table once the archive holds that copy; `market=True`
@@ -240,31 +273,35 @@ def upload(directory, api_url, timeout=660, verify=True, out=None, market=None):
     m = json.loads((directory / 'manifest.json').read_text())
     if verify:
         _parquet.inspect_package(directory, m)
-    blob = _parquet.pack(directory)
-    require(len(blob) == m['bytes'] and _parquet.digest(blob) == m['sha256'], 'Size/hash mismatch')
-    ticket = None
-    if not market and REFERENCES.get(m['summary']['source']):
-        timing = _parquet.pack(directory, (_parquet.BATCHES,))
-        try:
-            ticket = api(api_url, 'upload', manifest=m, part={'sha256': _parquet.digest(timing), 'bytes': len(timing)})
-            blob = timing
-        except urllib.error.HTTPError as error:
-            if error.code != 409:  # 409: the archive has no copy of the market data yet
-                raise
-    if ticket is None:
-        ticket = api(api_url, 'upload', manifest=m, part=None)
-    # S3 browser POST policies bind key, encryption, content type and exact size.
-    # The archive's 64 MiB cap bounds the multipart body below 65 MiB.
-    boundary = uuid.uuid4().hex
-    parts = []
-    for key, value in ticket['upload']['fields'].items():
-        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode())
-    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="recording.zip"\r\nContent-Type: application/zip\r\n\r\n'.encode())
-    parts.extend([blob, f'\r\n--{boundary}--\r\n'.encode()])
-    request = urllib.request.Request(ticket['upload']['url'], data=b''.join(parts),
-             headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}, method='POST')
-    with urllib.request.urlopen(request, timeout=120, context=_https.context()) as response:
-        response.read()
+    with tempfile.TemporaryDirectory() as tmp:
+        zipped = Path(tmp) / 'recording.zip'
+        sha256, size = _parquet.pack_to(directory, zipped)
+        require(size == m['bytes'] and sha256 == m['sha256'], 'Size/hash mismatch')
+        ticket = None
+        if not market and REFERENCES.get(m['summary']['source']):
+            timing = Path(tmp) / 'timing.zip'
+            sha256, size = _parquet.pack_to(directory, timing, (_parquet.BATCHES,))
+            try:
+                ticket = api(api_url, 'upload', manifest=m, part={'sha256': sha256, 'bytes': size})
+                zipped = timing
+            except urllib.error.HTTPError as error:
+                if error.code != 409:  # 409: the archive has no copy of the market data yet
+                    raise
+        if ticket is None:
+            ticket = api(api_url, 'upload', manifest=m, part=None)
+        # S3 browser POST policies bind key, encryption, content type and exact size; the file is read as it is
+        # sent, never whole in memory.
+        boundary = uuid.uuid4().hex
+        head = b''.join(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode()
+                        for key, value in ticket['upload']['fields'].items())
+        head += (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="recording.zip"\r\n'
+                 'Content-Type: application/zip\r\n\r\n').encode()
+        with _Body(head, zipped, f'\r\n--{boundary}--\r\n'.encode()) as body:
+            request = urllib.request.Request(ticket['upload']['url'], data=body, method='POST',
+                                             headers={'Content-Type': f'multipart/form-data; boundary={boundary}',
+                                                      'Content-Length': str(body.size)})
+            with urllib.request.urlopen(request, timeout=120, context=_https.context()) as response:
+                response.read()
     status_url = api_url.rstrip('/') + '/?ticket=' + ticket['ticket']
     print(json.dumps({'ticket': ticket['ticket'], 'status_url': status_url}), file=out, flush=True)
     deadline = time.monotonic() + timeout
@@ -326,15 +363,14 @@ def pull(api_url, prefix, output):
     with tempfile.TemporaryDirectory(dir=output.parent) as tmp:
         directory, total = Path(tmp), 0
         for name in _parquet.FILES:
-            with urllib.request.urlopen(urls[name], timeout=120, context=_https.context()) as body:
-                data = body.read(MAX_COMPRESSED + 1 - total)
-            total += len(data)
-            require(total <= m['bytes'], 'Size/hash mismatch')
             (directory / name).parent.mkdir(parents=True, exist_ok=True)
-            (directory / name).write_bytes(data)
-        # The tables pack to the zip the manifest hashes, byte for byte.
-        blob = _parquet.pack(directory)
-        require(len(blob) == m['bytes'] and _parquet.digest(blob) == m['sha256'], 'Size/hash mismatch')
+            with urllib.request.urlopen(urls[name], timeout=120, context=_https.context()) as body, \
+                    (directory / name).open('wb') as sink:
+                while chunk := body.read(2**20):
+                    total += len(chunk)
+                    require(total <= m['bytes'], 'Size/hash mismatch')
+                    sink.write(chunk)
+        # The tables pack to the zip the manifest hashes, byte for byte (inspect_package), and pass its checks.
         _parquet.inspect_package(directory, m)
         (directory / 'manifest.json').write_text(json.dumps(m, indent=2) + '\n')
         shutil.move(str(directory), str(output))

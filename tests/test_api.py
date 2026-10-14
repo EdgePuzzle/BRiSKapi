@@ -485,8 +485,8 @@ def test_feed_uploads_complete_sessions(gated_decoder, tmp_path, monkeypatch):
     gate.touch()
     packaged = []
 
-    def package_parts(equity, parts, output, repair=False, build=None):
-        packaged.append([b['seq'] for b in (build() if build else _parquet.load_parts(equity, parts)).iter_batches()])
+    def package_parts(equity, parts, output, repair=False, piece=None):
+        packaged.append([b['seq'] for b in _parquet.load_parts(equity, parts).iter_batches()])
 
     monkeypatch.setattr(cli, 'package_parts', package_parts)
     monkeypatch.setattr(cli, 'upload', lambda directory, url, verify, out: {'status': 'stored', 'verify': verify})

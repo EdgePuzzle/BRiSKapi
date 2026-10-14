@@ -39,9 +39,9 @@ import zlib
 import boto3
 from botocore.exceptions import ClientError
 import pyarrow as pa
-from briskapi._parquet import BATCHES, FILES, MARKET, digest, pack, unpack, verify_directory
+from briskapi._parquet import BATCHES, FILES, MARKET, file_digest, pack_to, unpack_file, verify_package
 import query_engine
-from briskapi.schema import (OWNER, RECORDING_PREFIX, REFERENCES, TIMING_KEY, encode, owner, recording_name, validate_manifest,
+from briskapi.schema import (OWNER, RECORDING_PREFIX, REFERENCES, TIMING_KEY, encode, max_package, owner, recording_name, validate_manifest,
                              validate_timing, require, MAX_COMPRESSED, MAX_TIMING_BYTES)
 
 BUCKET = os.environ.get('ARCHIVE_BUCKET', '')
@@ -187,7 +187,9 @@ def upload(body, who, ip, s3, db):
     quota(db, ip, 1, 4, 3600)
     quota(db, 'owner-' + who, 1, 8, 3600)
     quota(db, 'global-tickets', 1, 64, 3600)
-    quota(db, 'global-bytes', sent['bytes'], 5 * 1024**3, 86400)
+    # A broker's day is two recordings of a trading session each, some gigabytes in all.
+    quota(db, 'owner-bytes-' + who, sent['bytes'], 8 * 1024**3, 86400)
+    quota(db, 'global-bytes', sent['bytes'], 64 * 1024**3, 86400)
     ticket = str(uuid.uuid4())
     json_put(s3, f'incoming/{ticket}/manifest.json', m)
     if part:
@@ -424,11 +426,18 @@ def ingest(record, s3, db):
         part = _part(_optional(s3, f'incoming/{ticket}/part.json'))
         sent = part or m
         upload = s3.get_object(Bucket=BUCKET, Key=key, VersionId=version)
-        require(upload['ContentLength'] == sent['bytes'] <= MAX_COMPRESSED, 'Invalid upload size')
-        with upload['Body'] as body:
-            data = body.read(MAX_COMPRESSED + 1)
-        require(len(data) == sent['bytes'] and digest(data) == sent['sha256'], 'Size/hash mismatch')
-        prefix, stored = store(data, m, part, who, s3)
+        require(upload['ContentLength'] == sent['bytes'] <= (MAX_COMPRESSED if part else max_package(m['summary']['source'])),
+                'Invalid upload size')
+        # On disk, never whole in memory: a broker's recording of a trading session is some gigabytes.
+        with tempfile.TemporaryDirectory() as tmp:
+            zipped, total = Path(tmp) / 'recording.zip', 0
+            with upload['Body'] as body, zipped.open('wb') as sink:
+                while chunk := body.read(2**20):
+                    total += len(chunk)
+                    require(total <= sent['bytes'], 'Size/hash mismatch')
+                    sink.write(chunk)
+            require(total == sent['bytes'] and file_digest(zipped) == sent['sha256'], 'Size/hash mismatch')
+            prefix, stored = store(zipped, m, part, who, s3)
         json_put(s3, f'incoming/{ticket}/status.json', {'status': 'stored', 'prefix': prefix, 'sha256': stored['sha256']})
     except INVALID as e:
         # No raw payload or potentially sensitive contents in the ticket's status or logs.
@@ -452,43 +461,47 @@ def _fetch(s3, prefix, directory, names):
         (directory / name).parent.mkdir(parents=True, exist_ok=True)
         (directory / name).write_bytes(data)
 
-def _put(s3, key, data):
+def _put(s3, key, path):
     try:
-        s3.put_object(Bucket=BUCKET, Key=key, Body=data, ContentType='application/vnd.apache.parquet', IfNoneMatch='*')
+        with open(path, 'rb') as body:
+            s3.put_object(Bucket=BUCKET, Key=key, Body=body, ContentType='application/vnd.apache.parquet', IfNoneMatch='*')
     except ClientError as e:
         if e.response['Error']['Code'] not in {'PreconditionFailed', 'ConditionalRequestConflict'}:
             raise
 
-def store(data, m, part, who, s3):
-    """Verify an upload (the whole recording, or a replay's timing table to join the stored market data) and store
-    it; returns (prefix, stored manifest). The stored manifest hashes the zip of the four tables as stored."""
+def store(zipped, m, part, who, s3):
+    """Verify an upload (`zipped`: the whole recording, or a replay's timing table to join the stored market data)
+    and store it; returns (prefix, stored manifest). The stored manifest hashes the zip of the four tables as
+    stored. A broker's recording is checked a row group at a time (verify_package), a replay whole."""
     shared = reference_prefix(m['summary']['source'])
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(dir=zipped.parent) as tmp:
         directory = Path(tmp)
         if part:
             require(_exists(s3, f'{shared}/complete.json'), "No stored copy of this replay's market data")
-            unpack(data, directory, (BATCHES,))
+            unpack_file(zipped, directory, MAX_COMPRESSED, (BATCHES,))
             _fetch(s3, shared, directory, MARKET)
         else:
-            unpack(data, directory)
-        verify_directory(directory, m)
+            unpack_file(zipped, directory, max_package(m['summary']['source']))
+        zipped.unlink()   # its tables are out: the disk holds a recording once
+        verify_package(directory, m)
         if shared:
             if not part:
                 # The first verified replay becomes the archive's copy (each table is the same for everyone),
                 # and every owner's recording uses the copy as stored.
                 if not _exists(s3, f'{shared}/complete.json'):
                     for name in MARKET:
-                        _put(s3, f'{shared}/{name}', (directory / name).read_bytes())
+                        _put(s3, f'{shared}/{name}', directory / name)
                     json_put(s3, f'{shared}/complete.json', {'source': m['summary']['source']}, immutable=True)
                 _fetch(s3, shared, directory, MARKET)
             own = (BATCHES,)
         else:
             own = FILES
-        blob = pack(directory)
-        stored = validate_manifest({**m, 'sha256': digest(blob), 'bytes': len(blob)})
+        sha256, size = pack_to(directory, zipped)
+        zipped.unlink()
+        stored = validate_manifest({**m, 'sha256': sha256, 'bytes': size})
         prefix = f'archive/{who}/{recording_name(stored)}'
         for name in own:
-            _put(s3, f'{prefix}/{name}', (directory / name).read_bytes())
+            _put(s3, f'{prefix}/{name}', directory / name)
     json_put(s3, f'{prefix}/files.json', {name: f'{prefix if name in own else shared}/{name}' for name in FILES},
              immutable=True)
     # Manifest is the commit marker. Readers list only committed datasets.

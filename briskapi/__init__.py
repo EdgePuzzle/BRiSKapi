@@ -64,7 +64,7 @@ def connect(*, site=None, codes=None, history=False, upload=None, output=None, o
       unless login already did (`trace_protocol`, `profile`, `upload_market_data`).
 
     The feed records each trading day and uploads it to your private archive unless you opt out
-    (upload=False), a broker's as it runs, a recording of about 500,000 quote updates at a time; `output`
+    (upload=False), a broker's in two recordings, its morning and afternoon sessions; `output`
     also keeps each recording on disk, `on_day(result)` is called with each,
     `history=True` keeps every update for Ticker.history(), and gateway=True also serves the feed to
     briskapi.Live on this computer. `timeout` (default 60 s, 120 s for a broker) bounds the wait for the

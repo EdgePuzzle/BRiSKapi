@@ -3,8 +3,8 @@
 The archive accepts recordings with exact market/timing fields, checked batch by batch
 in their canonical JSON form whatever the file format (see briskapi/_parquet.py).
 Demo and synthetic market content must match a pinned reference replay. Opted-in
-broker recordings have structural and continuity checks, but their market content
-cannot be independently verified. The service writes accepted content itself.
+broker recordings are checked for their structure, a row group at a time (briskapi._parquet.verify_broker),
+but their market content cannot be independently verified. The service writes accepted content itself.
 """
 import datetime as dt
 import hashlib
@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 
 MAX_COMPRESSED = 64 * 1024 * 1024
+MAX_BROKER_COMPRESSED = 4 * 1024**3
 # Bounds on the canonical JSON form of a recording and of each batch.
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_LINE = 16 * 1024 * 1024
@@ -393,13 +394,18 @@ def owner(secret):
     require(isinstance(secret, str) and IDENTITY.fullmatch(secret), 'Invalid identity')
     return hashlib.sha256(b'brisk-owner-v1:' + secret.encode()).hexdigest()[:32]
 
+def max_package(source):
+    """The largest package the archive takes of a source: a broker's recording is a trading session of the whole
+    market, checked a row group at a time; a demo or synthetic one is checked whole, in memory."""
+    return MAX_BROKER_COMPRESSED if source in BROKER_TRANSPORT else MAX_COMPRESSED
+
 def validate_manifest(m):
     require(isinstance(m, dict) and set(m) == {'schema', 'sha256', 'bytes', 'summary'}, 'Invalid manifest fields')
     require(m['schema'] == SCHEMA and isinstance(m['sha256'], str) and re.fullmatch('[0-9a-f]{64}', m['sha256']), 'Invalid schema/hash')
-    require(0 < integer(m['bytes'], MAX_COMPRESSED), 'Empty upload')
     summary = m['summary']
     require(isinstance(summary, dict) and set(summary) == SUMMARY_KEYS and isinstance(summary['source'], str)
             and summary['source'] in SOURCES, 'Invalid summary')
+    require(0 < integer(m['bytes'], max_package(summary['source'])), 'Empty upload')
     require(isinstance(summary['trading_date'], str) and re.fullmatch(r'\d{8}', summary['trading_date']), 'Invalid summary date')
     dt.datetime.strptime(summary['trading_date'], '%Y%m%d')
     for key in SUMMARY_KEYS - {'source', 'trading_date', 'codes'}:

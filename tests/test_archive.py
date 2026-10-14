@@ -1011,7 +1011,7 @@ def test_upload_sends_the_whole_replay_until_the_archive_holds_its_market_data(p
             raise urllib.error.HTTPError(url, 409, 'no copy yet', {}, None)
         return {'ticket': str(uuid.uuid4()), 'upload': {'url': 'https://example.test', 'fields': {'key': 'k'}}}
     monkeypatch.setattr(cli, 'request_json', request_json)
-    monkeypatch.setattr(cli.urllib.request, 'urlopen', lambda request, **k: bodies.append(request.data) or HTTP())
+    monkeypatch.setattr(cli.urllib.request, 'urlopen', lambda request, **k: bodies.append(request.data.read()) or HTTP())
     assert cli.upload(directory, API, verify=False, market=market)['status'] == 'stored'
     assert asked == ([None] if market else [part_of(directory)[1], None]) and _parquet.pack(directory) in bodies[0]
     def refuse(url, data=None, secret=None):
@@ -1065,7 +1065,7 @@ def test_package_failure_leaves_nothing(tmp_path):
 def test_package_over_the_archive_limit_leaves_nothing(tmp_path, monkeypatch):
     events = tmp_path / 'source.jsonl'
     events.write_bytes(raw(batches()))
-    monkeypatch.setattr(cli, 'MAX_COMPRESSED', 1000)
+    monkeypatch.setattr(cli, 'max_package', lambda source: 1000)
     with pytest.raises(ValueError, match='accepts up to'):
         cli.package(events, tmp_path / 'out')
     assert not [p for p in (tmp_path / 'out').rglob('*') if p.is_file()]
