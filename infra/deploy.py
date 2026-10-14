@@ -150,7 +150,10 @@ def deploy(bucket):
         {'ID':'ExpireResults','Status':'Enabled','Filter':{'Prefix':'results/'},'Expiration':{'Days':1},
          'NoncurrentVersionExpiration':{'NoncurrentDays':1}},
         {'ID':'ExpireReplacedBars','Status':'Enabled','Filter':{'Prefix':'bars/'},
-         'NoncurrentVersionExpiration':{'NoncurrentDays':1},'Expiration':{'ExpiredObjectDeleteMarker':True}}]})
+         'NoncurrentVersionExpiration':{'NoncurrentDays':1},'Expiration':{'ExpiredObjectDeleteMarker':True}},
+        # Recordings' tables are stored in Intelligent-Tiering (archive_service._put); this moves those stored before.
+        *({'ID':f'IntelligentTiering-{prefix[:-1]}','Status':'Enabled','Filter':{'Prefix':prefix},
+           'Transitions':[{'Days':0,'StorageClass':'INTELLIGENT_TIERING'}]} for prefix in ('archive/', 'reference/'))]})
     ignore_exists(db.create_table, TableName=NAME, AttributeDefinitions=[{'AttributeName':'id','AttributeType':'S'}],
         KeySchema=[{'AttributeName':'id','KeyType':'HASH'}], BillingMode='PAY_PER_REQUEST')
     db.get_waiter('table_exists').wait(TableName=NAME)

@@ -462,9 +462,12 @@ def _fetch(s3, prefix, directory, names):
         (directory / name).write_bytes(data)
 
 def _put(s3, key, path):
+    # Intelligent-Tiering: a recording is mostly written once and seldom read, so a table no one reads for 30 days
+    # costs about half, after 90 a fifth, read as fast and for no retrieval fee.
     try:
         with open(path, 'rb') as body:
-            s3.put_object(Bucket=BUCKET, Key=key, Body=body, ContentType='application/vnd.apache.parquet', IfNoneMatch='*')
+            s3.put_object(Bucket=BUCKET, Key=key, Body=body, ContentType='application/vnd.apache.parquet', IfNoneMatch='*',
+                          StorageClass='INTELLIGENT_TIERING')
     except ClientError as e:
         if e.response['Error']['Code'] not in {'PreconditionFailed', 'ConditionalRequestConflict'}:
             raise

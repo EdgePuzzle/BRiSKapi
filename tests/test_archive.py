@@ -77,6 +77,7 @@ class S3:
     with the time of its deletion), which copy_object can restore."""
     def __init__(self):
         self.objects = {}
+        self.classes = {}   # key -> the storage class it was written with (None: the bucket's default)
         self.versions = {}
         self.retained = {}
         self.deleted = []
@@ -85,6 +86,7 @@ class S3:
         if kw.get('IfNoneMatch') and Key in self.objects:
             raise ClientError({'Error': {'Code': 'PreconditionFailed'}}, 'PutObject')
         self.objects[Key] = Body.read() if hasattr(Body, 'read') else Body
+        self.classes[Key] = kw.get('StorageClass')
         return {}
     def get_object(self, Bucket, Key, VersionId=None, Range=None):
         try:
@@ -220,6 +222,10 @@ def test_upload_store_and_pull_your_own(packaged, tmp_path, online):
     # The validated staging upload is gone. The replay's market tables become the archive's one copy;
     # the recording keeps its own timing table and where its other tables are.
     assert not s3.versions and s3.deleted == [(f'incoming/{ticket}/recording.zip', 'v1')]
+    # Tables are stored in Intelligent-Tiering (seldom read once written); manifests and the like as the bucket has it.
+    tables = [k for k in s3.objects if k.endswith('.parquet')]
+    assert tables and all(s3.classes[k] == 'INTELLIGENT_TIERING' for k in tables)
+    assert s3.classes[status['prefix'] + '/manifest.json'] is None
     shared = service.reference_prefix('synthetic_test')
     assert sorted(kept(s3, status['prefix'])) == [_parquet.BATCHES, 'files.json', 'manifest.json']
     assert json.loads(s3.objects[status['prefix'] + '/files.json']) == {

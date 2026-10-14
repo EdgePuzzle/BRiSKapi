@@ -153,7 +153,11 @@ a day. Staging has its own rule (`ExpireStaging`: two days), and so do the cloud
 prefixes: `ExpireResults` removes `results/` objects a day after they are written (and their
 noncurrent versions a day after they become so), and `ExpireReplacedBars` removes the
 noncurrent versions of `bars/` objects a day after they become so, with expired delete
-markers. Deployment replaces the bucket's
+markers. Recordings' tables are stored in S3 Intelligent-Tiering (`_put` in `archive_service.py`),
+as they are mostly written once and seldom read: unread for 30 days a table costs about half, for 90
+a fifth, read as fast and with no retrieval fee. `IntelligentTiering-archive` and
+`IntelligentTiering-reference` move the tables stored before that (objects under 128 KB, the
+manifests, stay as they are). Deployment replaces the bucket's
 whole lifecycle configuration, so a rule added by hand does not survive it, and the new rules
 also reach noncurrent versions that exist when they are first deployed: those older than 31
 days go at the next lifecycle run.

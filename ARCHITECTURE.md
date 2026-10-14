@@ -1213,6 +1213,11 @@ only the lifecycle does.
   and removes delete markers once no version is left beneath them. S3 applies lifecycle
   rules asynchronously, so removal can trail that by a day. Current objects are not
   affected, and `reference/` has no rule, since no owner deletes there.
+- Recordings' tables are stored in S3 Intelligent-Tiering (`_put`): mostly written once and
+  seldom read, a table no one reads for 30 days costs about half, after 90 about a fifth, read
+  as fast and with no retrieval fee. The rules `IntelligentTiering-archive` and
+  `IntelligentTiering-reference` move tables stored before (S3 leaves objects under 128 KB,
+  the manifests, where they are).
 - A live recording's `delete` and `restore` also rebuild its owner's bars of that trading
   day (`owner_bars` in the service). The role deletes `bars/` objects the same way it
   deletes archive ones (current versions only), and the lifecycle rule `ExpireReplacedBars`
