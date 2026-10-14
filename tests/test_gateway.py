@@ -532,7 +532,9 @@ class Socket extends EventTarget {
 live({ cookies: { s: 'v' }, protocolVersion: 16000, fetchImpl, WebSocketImpl: Socket, staleSeconds: 0, heartbeatMs: 1e9,
   lanes: readLanes(process.stdin),
   emit: async (record, line = JSON.stringify(record)) => { if (!process.stdout.write(line + '\\n')) await once(process.stdout, 'drain'); } })
-  .then(() => process.exit(0), error => { console.error(error.message); process.exit(1); });
+  // Exit once stdout has taken every line: on macOS a pipe is written asynchronously, and exiting at once can cut
+  // the last lines short.
+  .then(() => process.stdout.write('', () => process.exit(0)), error => { console.error(error.message); process.exit(1); });
 """
 
 

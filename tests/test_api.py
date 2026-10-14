@@ -359,7 +359,7 @@ def test_module_entry_point(monkeypatch, capsys):
 @pytest.fixture
 def gated_decoder(tmp_path, monkeypatch):
     """Fake decoder: prints the bootstrap, then the rest once the test opens the gate."""
-    def make(batches=None, exit_code=0, hold=False):
+    def make(batches=None, exit_code=0, hold=False, cut=''):
         lines = [json.dumps(b) for b in (market() if batches is None else batches)]
         script = tmp_path / f'gated{len(list(tmp_path.glob("gated*")))}.cjs'
         gate = tmp_path / 'go'
@@ -367,7 +367,7 @@ def gated_decoder(tmp_path, monkeypatch):
             f"const fs = require('fs'); const lines = {json.dumps(lines)};\n"
             f"if (!{json.dumps(hold)}) console.log(lines[0]);\n"
             f"const go = () => fs.existsSync({json.dumps(str(gate))}) ? (lines.slice(1).forEach(l => console.log(l)), "
-            f"process.exitCode = {exit_code}) : setTimeout(go, 5);\n"
+            f"process.stdout.write({json.dumps(cut)}), process.exitCode = {exit_code}) : setTimeout(go, 5);\n"
             f"if (!{json.dumps(hold)}) go(); else setTimeout(() => {{}}, 60000);\n")
         monkeypatch.setattr(_live, 'DECODER', script)
         return gate
@@ -413,7 +413,7 @@ def test_live_feed(gated_decoder, tmp_path):
             feed.issue('9999')
 
 
-def test_feed_failures(gated_decoder, tmp_path):
+def test_feed_failures(gated_decoder, tmp_path, monkeypatch):
     gate = gated_decoder(exit_code=3)
     feed = brisk.connect(site='demo', cache=tmp_path, upload=False)
     updates = feed.quotes()
@@ -436,6 +436,17 @@ def test_feed_failures(gated_decoder, tmp_path):
     with pytest.raises(brisk.BriskError, match='before replay completion'):
         feed.wait()
     gate.unlink()
+
+    gil_enabled = _live.sys._is_gil_enabled
+    for gil in (False, True):   # a line without its end: the decoder exited before writing all of it
+        monkeypatch.setattr(_live.sys, '_is_gil_enabled', lambda: gil)
+        gated_decoder(market()[:-1], cut=json.dumps(market()[-1])[:40])
+        feed = brisk.connect(site='demo', cache=tmp_path, upload=False)
+        gate.touch()
+        with pytest.raises(brisk.BriskError, match='stopped in the middle of a line'):
+            feed.wait()
+        gate.unlink()
+    monkeypatch.setattr(_live.sys, '_is_gil_enabled', gil_enabled)
 
     broken = market(); broken[2]['seq'] = 7
     gated_decoder(broken)

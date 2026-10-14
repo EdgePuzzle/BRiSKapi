@@ -79,6 +79,8 @@ def _consent(upload, limit_frames):
 
 # Threads parsing the host's lines on a free-threaded build (see Feed._lines).
 PARSERS = min(4, os.cpu_count() or 1)
+# The host ends every line; one without its end means the host exited before the pipe took all it wrote.
+CUT_SHORT = 'The decoder\'s output stopped in the middle of a line: it exited before writing all of it'
 
 
 class Feed:
@@ -341,6 +343,8 @@ class Feed:
         stdout = self._process.stdout
         if sys._is_gil_enabled():
             for line in stdout:
+                if not line.endswith(b'\n'):
+                    raise BriskError(CUT_SHORT)
                 yield json.loads(line), line
             return
         chunks: queue.Queue = queue.Queue(maxsize=64)   # at most 64 MB read ahead
@@ -367,7 +371,7 @@ class Feed:
                     if cut:
                         put(pool.submit(parse, data[:cut].splitlines(keepends=True)))
                 if tail:
-                    put(pool.submit(parse, [tail]))
+                    raise BriskError(CUT_SHORT)
             except BaseException as error:  # noqa: BLE001 - the feed thread raises it
                 put(error)
             finally:
