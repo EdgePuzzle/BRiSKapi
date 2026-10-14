@@ -144,12 +144,18 @@ class Feed:
         self._worker = ThreadPoolExecutor(1, thread_name_prefix='brisk-day')
         if self._spooling:
             self._worker.submit(self._recover)
-        self._process = (subprocess.Popen(command, stdout=subprocess.PIPE, env=env) if command
+        # A broker host serving a gateway has a fast lane (see brisk.cjs): it is told on stdin which symbols for.
+        lanes = bool(command and gateway)
+        self._lanes_lock = threading.Lock()
+        self._process = (subprocess.Popen(command, stdout=subprocess.PIPE, env={**(env or os.environ), 'BRISK_LANES': '1'},
+                                          stdin=subprocess.PIPE) if lanes else
+                         subprocess.Popen(command, stdout=subprocess.PIPE, env=env) if command
                          else _decoder(cache, codes, speed, limit_frames, node))
         if gateway:
             try:
                 # A broker's stream is XTKS.BRISK, as its recordings are in the cloud API; the demo's XTKS.BRISKDEMO.
-                self.gateway = _gateway.Gateway('XTKS.BRISK' if command else 'XTKS.BRISKDEMO')
+                self.gateway = _gateway.Gateway('XTKS.BRISK' if command else 'XTKS.BRISKDEMO',
+                                                on_fast=self._fast_codes if lanes else None)
             except BriskError as error:
                 warnings.warn(str(error))
         self._thread = threading.Thread(target=self._run, name='brisk-feed', daemon=True)
@@ -381,6 +387,10 @@ class Feed:
         spool, days, ended = None, 0, False
         try:
             for batch, line in self._lines():
+                if batch.get('lane') == 'fast' or batch.get('type') == 'lanes':  # out of band: the gateway's
+                    if self.gateway:
+                        self.gateway.lane(batch, line)
+                    continue
                 if batch.get('type') == 'waiting':  # out of band, not a day's record: kept nowhere
                     with self._changed:
                         self.waiting = {key: batch.get(key) for key in ('date', 'session_status')}
@@ -457,6 +467,15 @@ class Feed:
             for q in quotes:
                 if wanted is None or q['issue_id'] in wanted:
                     deliver(view(q))
+
+    def _fast_codes(self, codes):
+        """Tell the host which symbols the fast lane reads (the gateway's, as Live sessions subscribe)."""
+        with self._lanes_lock:
+            try:
+                self._process.stdin.write(json.dumps({'fast': sorted(codes)}).encode() + b'\n')
+                self._process.stdin.flush()
+            except (OSError, ValueError):   # the host has ended
+                pass
 
     def _progress(self):
         """The running day: its trading date, seconds since its bootstrap, its quote updates and its latest source

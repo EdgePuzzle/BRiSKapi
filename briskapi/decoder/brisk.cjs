@@ -108,6 +108,8 @@ const NEW_DAY_US = 3600e6;  // a clock an hour behind the last frame's belongs t
 // With quote workers, how far the output may fall behind the stream (quotes read, not yet written) before the
 // session stops rather than fill the memory.
 const OUTPUT_BACKLOG_BYTES = 2 ** 30;
+// The fast lane's capacity: symbols per worker of its pool (see live and _gateway.py).
+const FAST_SYMBOLS_PER_WORKER = 500;
 
 // Fetch the frames between the snapshot and the stream's first frame. Mirrors the vendor
 // client: up to five retries, but never for an expired session or a snapshot that is too old.
@@ -218,7 +220,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   protocolVersion, profile: overrides = {}, trace = null, catchUp = null, heartbeatMs = HEARTBEAT_MS,
   staleSeconds = 90, connectTimeoutMs = 15000, catchUpBackoffMs, site: siteId = 'sbi', after = null,
   dayCheckMs = DAY_CHECK_MS, streamCheckMs = STREAM_CHECK_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), onBoot = null,
-  resumable = false, stop = null, log = null, workers = null }) {
+  resumable = false, stop = null, log = null, workers = null, lanes = null }) {
   const where = site(siteId);
   const profile = resolveProfile(overrides);
   const session = new Session(cookies, fetchImpl, where);
@@ -273,7 +275,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     link?.close();
     settle({ code: -1, reason: '' });
   };
-  let monitor = null, timer = null, dayTimer = null, pool = null;  // started with the link and always stopped, so a failure cannot leave the process hanging
+  let monitor = null, timer = null, dayTimer = null, pool = null, fastPool = null;  // started with the link and always stopped, so a failure cannot leave the process hanging
   const endDay = why => {
     if (dayOver) return;
     dayOver = true;
@@ -319,11 +321,34 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
 
   let seq = 0, frames = 0, updates = 0, started = false, starting = false, work = Promise.resolve();
   const start = performance.now();
+  // The fast lane (with `lanes`, the Python feed's gateway): the symbols Live sessions subscribed to, read by a
+  // pool of their own on each frame's arrival and written at once, out of band, ahead of the recording's batch
+  // of that frame, which may wait behind the whole market's. `lanes.codes` says which; the feed changes it.
+  let fast = new Set(), fastWork = Promise.resolve();
+  const fastOf = () => new Set(lanes ? master.filter(m => lanes.codes.has(m.code)).map(m => m.issue_id) : []);
+  const lineOf = (head, quotes, tail) =>
+    `${JSON.stringify(head).slice(0, -1)},"quotes":[${quotes.join(',')}],${JSON.stringify(tail).slice(1)}`;
+  // A symbol added while the day runs: its quote as the fast lane's decoders hold it now, after batch `seq - 1`.
+  const join = () => {
+    const next = fastOf();
+    const added = [...next].filter(id => !fast.has(id));
+    fast = next;
+    if (!started || !fastPool || !added.length) return;
+    const after = seq - 1, read = fastPool.join(added);
+    read.catch(() => {});
+    fastWork = fastWork.then(async () => {
+      if (failure) return;
+      const { quotes } = await read;
+      const head = { lane: 'fast', type: 'join', seq: after }, tail = { codes: added.map(id => decoder.master[id].code) };
+      await emit({ ...head, quotes, ...tail }, lineOf(head, quotes, tail));
+    }).catch(fail);
+  };
 
   const finishStart = caughtUp => {
     clearTimeout(timer);
     decoder.begin();
     pool?.begin(master.map(m => m.issue_id));
+    fastPool?.begin(master.map(m => m.issue_id));
     const now = decoder.time();
     const { quotes, skipped } = decoder.quotes(master.map(m => m.issue_id));
     // The stock view layout is unverified for the broker build: refuse implausible values.
@@ -340,6 +365,8 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     // Trades the snapshot restored (the session's so far) follow the bootstrap, at its clock.
     const history = decoder.history(ids).map(trades => ({ type: 'history', seq: seq++, source_time_us: now, trades }));
     work = work.then(async () => { for (const b of [batch, ...history]) if (!failure) await emit(b); }).catch(fail);
+    fast = fastOf();
+    fastWork = work;   // the fast lane's lines come after the day's bootstrap and history
   };
 
   // The snapshot is normally older than the stream's first frame. The vendor client feeds
@@ -353,6 +380,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
       const reply = await requestCatchUp(lagging);
       decoder.catchUp(reply, lagging);
       pool?.catchUp(reply, lagging);
+      fastPool?.catchUp(reply, lagging);
       finishStart(lagging.length);
     }).catch(fail);
   };
@@ -388,6 +416,22 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     const changed = decoder.changed().filter(id => ids.has(id));
     const trades = decoder.trades(ids);
     const decoded_ns = Number(process.hrtime.bigint() - t0);
+    const batchSeq = seq++;
+    if (fastPool && fast.size) {
+      const tail = { trades: trades.filter(t => fast.has(t.issue_id)) };
+      const read = fastPool.feed(frame, changed.filter(id => fast.has(id)), { only: true });
+      read.catch(() => {});
+      fastWork = fastWork.then(async () => {
+        if (failure) return;
+        const { quotes, skipped, decode_ns } = await read;
+        if (skipped.length) tail.skipped_issues = skipped.sort((a, b) => a - b);
+        const head = { lane: 'fast', type: 'quotes', seq: batchSeq, source_time_us: clock, received_unix_ms,
+          decode_ns: decoded_ns + decode_ns, replay_lateness_ms: null };
+        await emit({ ...head, quotes, ...tail }, lineOf(head, quotes, tail));
+      }).catch(fail);
+    } else {
+      fastPool?.feed(frame);   // its decoders stay current while no Live session wants the fast lane
+    }
     let bytes = 0;
     const read = pool.feed(frame, changed).then(result => {
       bytes = result.quotes.reduce((n, quote) => n + quote.length, 0);
@@ -402,12 +446,11 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
       if (failure) return;
       const { quotes, skipped, decode_ns } = await read;
       updates += quotes.length;
-      const head = { type: 'quotes', seq: seq++, source_time_us: clock, received_unix_ms, decode_ns: decoded_ns + decode_ns,
+      const head = { type: 'quotes', seq: batchSeq, source_time_us: clock, received_unix_ms, decode_ns: decoded_ns + decode_ns,
         replay_lateness_ms: null };
       const tail = { trades, ...(skipped.length && { skipped_issues: skipped.sort((a, b) => a - b) }) };
-      const line = `${JSON.stringify(head).slice(0, -1)},"quotes":[${quotes.join(',')}],${JSON.stringify(tail).slice(1)}`;
       held -= bytes;
-      await emit({ ...head, quotes, ...tail }, line);
+      await emit({ ...head, quotes, ...tail }, lineOf(head, quotes, tail));
     }).catch(fail);
   };
 
@@ -430,6 +473,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
       decoder.feed(frame);
       decoder.applyBasePrice();
       pool?.feed(frame);
+      fastPool?.feed(frame);
       if (!starting && decoder.initialFrames) { starting = true; begin(); }
     } catch (error) { fail(error); }
   };
@@ -437,11 +481,24 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   try {
     // Workers for a large selection (by default; `workers` sets how many, 0 none), started before the stream so
     // that they see every frame the host's decoder does.
-    const count = workers ?? (ids.size >= POOL_MIN_ISSUES ? workerCount() : 0);
-    if (count > 0) {
-      pool = await QuotePool.start({ assets, ids, count, options: { protocolVersion, schedule: app.schedule_info ?? null,
-        boot: { exceptional_sq: app.exceptional_sq, base_prices: app.base_prices } } });
-      trace?.(`quotes read by ${count} worker threads`);
+    // With lanes, a quarter of them (at least one) make the fast lane's pool, the rest the recording's.
+    const budget = workers ?? (ids.size >= POOL_MIN_ISSUES ? workerCount() : 0);
+    const fastCount = lanes && budget > 0 ? Math.max(1, Math.floor(budget / 4)) : 0;
+    const count = budget > 0 ? Math.max(1, budget - fastCount) : 0;
+    const options = { protocolVersion, schedule: app.schedule_info ?? null,
+      boot: { exceptional_sq: app.exceptional_sq, base_prices: app.base_prices } };
+    const launched = await Promise.allSettled([count ? QuotePool.start({ assets, ids, count, options }) : null,
+      fastCount ? QuotePool.start({ assets, ids, count: fastCount, options }) : null]);
+    [pool, fastPool] = launched.map(r => (r.status === 'fulfilled' ? r.value : null));   // closed below, either way
+    const unlaunched = launched.find(r => r.status === 'rejected');
+    if (unlaunched) throw unlaunched.reason;
+    if (count) trace?.(`quotes read by ${count} worker threads${fastCount ? `, the fast lane's by ${fastCount}` : ''}`);
+    // Out of band, before the day's bootstrap: whether this session has a fast lane, for how many symbols, and
+    // which it reads; the gateway admits Live sessions to it by that.
+    if (lanes) {
+      await emit({ type: 'lanes', fast: Boolean(fastPool), capacity: fastCount * FAST_SYMBOLS_PER_WORKER,
+        codes: [...lanes.codes].sort() });
+      lanes.onChange = join;
     }
     monitor = heartbeatMonitor({ intervalMs: heartbeatMs, checkEveryMs: Math.min(1000, heartbeatMs / 4), onFail: fail,
       staleCheck: stale && (() => stale.check(decoder.time())) });
@@ -464,7 +521,10 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
 
     const closed = await ended;
     // A catch-up that finishes extends the chain (it queues the bootstrap), so wait until it stops growing.
-    for (let pending = null; pending !== work;) { pending = work; await pending; }
+    for (let pending = null, lane = null; pending !== work || lane !== fastWork;) {
+      [pending, lane] = [work, fastWork];
+      await Promise.all([pending, lane]);
+    }
     const lost = failure || ((closed.code !== 1000 && !marketFinished && !dayOver) || !started
       ? new Error(`${where.name} stream closed (${[closed.code, closed.reason].filter(Boolean).join(' ')})`) : null);
     if (lost && (!resumable || !started || fatal(lost))) throw lost;
@@ -480,6 +540,8 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     monitor?.stop();
     link?.close();
     pool?.close();
+    fastPool?.close();
+    if (lanes) lanes.onChange = null;
     if (stop) stop.end = null;
   }
 }
@@ -512,6 +574,22 @@ async function record({ days = Infinity, retryMs = RETRY_MS, sleep = ms => new P
       await sleep(wait);
     }
   }
+}
+
+// BRISK_LANES=1 (the Python feed, serving briskapi.Live): its gateway says on stdin, one JSON line at a time,
+// which symbols Live sessions want on the fast lane ({"fast": [codes]}, all of them each time). live() reads
+// `codes` and is told of a change by `onChange`.
+function readLanes(input) {
+  const lanes = { codes: new Set(), onChange: null };
+  require('node:readline').createInterface({ input }).on('line', line => {
+    let message;
+    try { message = JSON.parse(line); } catch { return; }
+    if (!Array.isArray(message?.fast)) return;
+    lanes.codes = new Set(message.fast.map(String));
+    lanes.onChange?.();
+  });
+  input.unref?.();   // the feed's stdin never keeps the host running
+  return lanes;
 }
 
 const USAGE = 'Usage: [BRISK_SITE=sbi|e-shiten] BRISK_SBI_COOKIES=...|BRISK_ESHITEN_COOKIES=... brisk.cjs [--codes 7203,6758] [--trace-protocol]';
@@ -547,7 +625,8 @@ async function main(argv, env = process.env) {
   };
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
-  await record({ cookies: JSON.parse(env[where.cookies] || 'null'), codes, profile, site: where.id, stop,
+  const lanes = env.BRISK_LANES === '1' ? readLanes(process.stdin) : null;
+  await record({ cookies: JSON.parse(env[where.cookies] || 'null'), codes, profile, site: where.id, stop, lanes,
     trace: trace ? line => process.stderr.write(`[brisk protocol] ${line}\n`) : null,
     // A batch whose quotes workers read comes with its line already made.
     emit: async (record, line = JSON.stringify(record)) => {
@@ -555,7 +634,7 @@ async function main(argv, env = process.env) {
     } });
 }
 
-module.exports = { Session, SITES, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, fetchCatchUp, CATCH_UP_FORMATS, DEFAULT_CATCH_UP,
+module.exports = { Session, SITES, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, readLanes, fetchCatchUp, CATCH_UP_FORMATS, DEFAULT_CATCH_UP,
   Interrupted, fatal, RETRY_MS,
   HEARTBEAT_MS,
   PROTOCOL_VERSION, REQUIRED };

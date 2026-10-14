@@ -83,13 +83,23 @@ class QuotePool {
 
   // Every frame the host's decoder is fed, in the same order. With `changed` (the issues the host's decoder
   // traced for the frame, in its order, as selected), the workers also read those quotes; the result is
-  // { quotes: their JSON, in that order, skipped, decode_ns: the longest worker's }.
-  feed(frame, changed = null) {
-    this.post({ op: 'feed', frame, extract: changed !== null });
-    if (changed === null) return null;
+  // { quotes: their JSON, in that order, skipped, decode_ns: the longest worker's }. `only` instead names the
+  // changed issues to read (the fast lane's, see brisk.cjs), which each worker checks against its own trace.
+  feed(frame, changed = null, { only = false } = {}) {
+    this.post({ op: 'feed', frame, extract: changed !== null, ...(only && { ids: changed }) });
+    return changed === null ? null : this.expect(changed);
+  }
+
+  // The quotes of `ids` as they are now (after the last frame fed), changed or not.
+  join(ids) {
+    this.post({ op: 'join', ids });
+    return this.expect(ids);
+  }
+
+  expect(ids) {
     return new Promise((resolve, reject) => {
       this.pending.push({ results: new Array(this.count), waiting: this.count, resolve, reject });
-    }).then(results => merge(changed, results, this.count));
+    }).then(results => merge(ids, results, this.count));
   }
 
   catchUp(reply, lagging) { this.post({ op: 'catchUp', reply, lagging }); }
@@ -133,19 +143,30 @@ async function work() {
   const mine = id => selected.has(id) && id % count === index;
   const queue = [];
   let decoder = null, running = false;
+  const read = (share, began) => {
+    const { quotes } = decoder.quotes(share);
+    const byIssue = new Map(quotes.map(q => [q.issue_id, q]));
+    const json = share.map(id => (byIssue.has(id) ? JSON.stringify(byIssue.get(id)) : null));
+    parentPort.postMessage({ ids: share, quotes: json, decode_ns: Number(process.hrtime.bigint() - began) });
+  };
   const step = message => {
     if (message.op === 'feed') {
       const began = process.hrtime.bigint();
       decoder.feed(view(message.frame));
       decoder.applyBasePrice();
       if (!decoder.began) return;
-      const share = decoder.changed().filter(mine);
+      const traced = decoder.changed();
       decoder.qrm.take();   // the host's decoder reports the trades
       if (!message.extract) return;
-      const { quotes } = decoder.quotes(share);
-      const byIssue = new Map(quotes.map(q => [q.issue_id, q]));
-      const json = share.map(id => (byIssue.has(id) ? JSON.stringify(byIssue.get(id)) : null));
-      parentPort.postMessage({ ids: share, quotes: json, decode_ns: Number(process.hrtime.bigint() - began) });
+      let share = traced.filter(mine);
+      if (message.ids) {
+        const changed = new Set(share);
+        share = message.ids.filter(mine);
+        if (share.some(id => !changed.has(id))) throw new Error('the host named issues this decoder did not trace: it has diverged');
+      }
+      read(share, began);
+    } else if (message.op === 'join') {
+      read(message.ids.filter(mine), process.hrtime.bigint());
     } else if (message.op === 'catchUp') {
       decoder.catchUp(view(message.reply), message.lagging);
     } else if (message.op === 'begin') {

@@ -528,6 +528,53 @@ test('with quote workers a session writes the same batches, its quotes read in p
   assert.deepEqual(await run(2, true), caughtUp);
 });
 
+test('the fast lane writes the subscribed symbols of each frame at once, as the recording has them, and joins new ones',
+  { skip: !cache }, async () => {
+  const { files } = demo();
+  const chunks = [...frames(files['ws.dat'])].slice(0, 300).map(f => f.data);
+  const lanes = { codes: new Set(['7203', '6758']), onChange: null };
+  const lines = [];
+  let joined = false;
+  const emit = async (record, line) => {
+    const b = JSON.parse(line ?? JSON.stringify(record));
+    lines.push(b);
+    if (b.lane === 'fast' && !joined) {   // a Live session subscribes to another symbol while the day runs
+      joined = true;
+      lanes.codes = new Set(['7203', '6758', '9984']);
+      lanes.onChange();
+    }
+  };
+  await live({ cookies: { s: 'v' }, emit, protocolVersion: 16000, fetchImpl: server(files).fetchImpl, workers: 3, lanes,
+    WebSocketImpl: laterSocket(chunks, 120, 1000) });   // the join comes in the pause
+  assert.deepEqual(lines[0], { type: 'lanes', fast: true, capacity: 500, codes: ['6758', '7203'] });
+  assert.equal(lines[1].type, 'bootstrap');
+  const master = new Map(lines[1].master.map(m => [m.code, m.issue_id]));
+  const recording = new Map(lines.filter(b => b.type === 'quotes' && !b.lane).map(b => [b.seq, b]));
+  const fastLines = lines.filter(b => b.lane === 'fast' && b.type === 'quotes');
+  const join = lines.find(b => b.type === 'join');
+  assert.ok(fastLines.length > 200 && join, `${fastLines.length} fast lines`);
+  const softbank = master.get('9984');
+  // The joined symbol's state is the recording's last quote of it up to the join's batch.
+  let last = lines[1].quotes.find(q => q.issue_id === softbank);
+  for (const [seq, b] of recording) if (seq <= join.seq) last = b.quotes.find(q => q.issue_id === softbank) ?? last;
+  assert.deepEqual(join.codes, ['9984']);
+  assert.deepEqual(join.quotes, [last]);
+  for (const f of fastLines) {
+    const wanted = new Set([master.get('7203'), master.get('6758'), ...(f.seq > join.seq ? [softbank] : [])]);
+    const b = recording.get(f.seq);
+    assert.deepEqual(f.quotes, b.quotes.filter(q => wanted.has(q.issue_id)), `batch ${f.seq}`);
+    assert.deepEqual(f.trades, b.trades.filter(t => wanted.has(t.issue_id)), `batch ${f.seq}`);
+    assert.equal(f.source_time_us, b.source_time_us);
+  }
+  assert.ok(fastLines.some(f => f.seq > join.seq && f.quotes.some(q => q.issue_id === softbank)), 'the joined symbol updates');
+  assert.equal(lines.at(-1).type, 'end');
+  // Without lanes there is no fast lane, and nothing is said of one.
+  const plain = reading();
+  await live({ cookies: { s: 'v' }, emit: plain.emit, protocolVersion: 16000, fetchImpl: server(files).fetchImpl, workers: 3,
+    WebSocketImpl: socketFrom(chunks.slice(0, 20)) });
+  assert.ok(plain.batches.every(b => !b.lane && b.type !== 'lanes'));
+});
+
 test('the workers\' quotes come back in the host\'s order, and a worker that traced other issues stops the session', () => {
   const results = [{ ids: [2, 4], quotes: ['"q2"', null], decode_ns: 5 }, { ids: [1, 3], quotes: ['"q1"', '"q3"'], decode_ns: 9 }];
   assert.deepEqual(merge([1, 2, 3, 4], results, 2), { quotes: ['"q1"', '"q2"', '"q3"'], skipped: [4], decode_ns: 9 });

@@ -229,6 +229,33 @@ to the broker; a session needs the gateway's key and nothing else.
   them, and a replay meets the live batches exactly; batches that arrive meanwhile wait behind
   it. At a day's end the gateway stops offering replays: the worker packages and deletes the
   spool, and a replay already under way keeps it until it is read.
+- **The fast lane.** A broker feed's recording reads every quote of the whole market, frame by
+  frame, and at the opening auction it can fall behind the stream. The host (with
+  `BRISK_LANES=1`, which the feed sets when it serves a gateway) also runs a pool of its own
+  for the fast lane, a quarter of its quote workers (at least one). Its decoders are fed every
+  frame, read the quotes of the symbols Live sessions are on the lane for, as each frame
+  arrives, and write them at once as out-of-band lines (`"lane": "fast"`) of the frame's
+  batch number, ahead of the recording's batch. Lines come in one stream, so the feed reads
+  them in order with the recording's; the feed passes them to `Gateway.lane`, never to the
+  recording. The gateway tells the host on its stdin which symbols the lane reads
+  (`{"fast": [codes]}`). A symbol added while the day runs is read once at once
+  (`"type": "join"`, its quote after the lane's last frame), and the subscription waits for that
+  answer, so its snapshot and its updates meet. Before each session's bootstrap the host says
+  whether it has the lane, for how many symbols (500 per worker) and which it reads
+  (`"type": "lanes"`).
+  A Live session is on the lane from its first subscription if that asks for no replay and, with
+  the lane's other sessions, for no more symbols than it takes; `ALL_SYMBOLS` never is. Until
+  the host has said, a session that would fit gets the recording's batches; at that word
+  (before any batch of the session) it moves. A session on the lane gets the recording's
+  bootstrap, history and end, but its quotes from the lane only. One whose later subscription
+  does not fit leaves it for the recording's batches: up to the last batch the lane brought it,
+  those batches without the symbols it had there (`fast_until`, `old_codes`), and its new
+  symbols' snapshot from the recording's state, so it misses nothing and gets nothing twice.
+  A symbol's updates come from one lane at a time, in frame order, so trade IDs (an issue's
+  frame and the trade's place in it) and bars are as the cloud's. Tested from the host
+  (each fast line is the recording batch's quotes and trades of those symbols, a join the
+  recording's state) through the gateway (records equal to the recording's, across a join and
+  a move back) to a live host behind the feed.
 - **Slow sessions.** Each session has its own sending thread and queue. The feed never waits
   for one: a session more than `MAX_BEHIND` (1 GiB) behind has its queue dropped, is sent an
   error and is disconnected (after 10 seconds if it still reads nothing), so a stalled program
@@ -595,7 +622,8 @@ opening auction the whole market changes within seconds (a live open has sent so
 quote updates a second), so for a selection of 500 issues or more (a recording is the whole
 market) the host reads quotes with worker threads (`workers.cjs`). By default there are as
 many as the computer has cores less four, from two to twelve; `BRISK_WORKERS` sets the number,
-and 0 turns them off.
+and 0 turns them off. When the feed serves a gateway, a quarter of them (at least one) read the
+fast lane's quotes instead ([Live gateway](#live-gateway)).
 
 Each worker runs a decoder of its own, loaded from the same files and boot response. It is
 fed every frame the host's decoder is, in the same order, with the catch-up and begin()

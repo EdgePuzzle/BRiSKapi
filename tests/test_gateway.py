@@ -5,6 +5,7 @@ import datetime as dt
 import io
 import json
 import os
+from pathlib import Path
 import socket
 import threading
 import time
@@ -400,3 +401,155 @@ def test_records_read_as_attributes():
     assert repr(record) == "Record('trades', {'price': 1.5})"
     with pytest.raises(AttributeError):
         record.size
+
+
+def _fast(batch, codes):
+    """A frame's batch as a broker host's fast lane writes it: only these symbols' quotes and trades."""
+    return {**{k: v for k, v in batch.items() if k not in ('quotes', 'trades')}, 'lane': 'fast',
+            'quotes': [q for q in batch['quotes'] if q['code'] in codes],
+            'trades': [t for t in batch['trades'] if t['code'] in codes]}
+
+
+def _line_of(batch):
+    return json.dumps(batch).encode() + b'\n'
+
+
+def _records(schemas, symbols):
+    """A Live session's records, as dicts, by schema and symbol."""
+    live, got = brisk.Live(), collections.defaultdict(list)
+    for schema in schemas:
+        live.subscribe('XTKS.BRISK', schema, symbols=symbols)
+    live.add_callback(lambda r: got[r.schema, r.symbol].append(dict(r)))
+    live.start()
+    return live, got
+
+
+def test_a_session_on_the_fast_lane_gets_its_symbols_ahead_of_the_recording_and_the_same_records():
+    batches = session(0, 60)
+    told = []
+    gateway = _gateway.Gateway('XTKS.BRISK', on_fast=told.append)
+    fast, fast_got = _records(['trades', 'mbp-10'], ['7203'])   # before the day's session: waiting to know its lanes
+    slow, slow_got = _records(['trades', 'mbp-10'], 'ALL_SYMBOLS')  # never on the fast lane
+    wait_for(lambda: sorted(c.lane for c in gateway._clients) == ['pending', 'slow'])
+    assert told[-1] == {'7203'}, 'the host is told which symbols the fast lane reads'
+    gateway.lane({'type': 'lanes', 'fast': True, 'capacity': 500, 'codes': ['7203']}, None)
+    assert sorted(c.lane for c in gateway._clients) == ['fast', 'slow']
+    gateway.publish(batches[0], _line_of(batches[0]))
+    # The whole day on the fast lane before any of the recording's batches (which wait behind the whole market).
+    for b in batches[1:-1]:
+        gateway.lane(_fast(b, {'7203'}), None)
+    wait_for(lambda: len(fast_got['trades', '7203']) == 6 and len(fast_got['mbp-10', '7203']) == 61)   # with the bootstrap's
+    assert not slow_got['trades', '7203'], 'nothing yet on the recording'
+    for b in batches[1:]:
+        gateway.publish(b, _line_of(b))
+    wait_for(lambda: len(slow_got['mbp-10', '7203']) == 61)
+    gateway.close()
+    fast.block_for_close(timeout=10)
+    slow.block_for_close(timeout=10)
+    assert fast_got['trades', '7203'] == slow_got['trades', '7203'] and len(fast_got['trades', '7203']) == 6
+    assert fast_got['mbp-10', '7203'] == slow_got['mbp-10', '7203'], 'each record once, the same as the recording\'s'
+    assert not any(symbol == '167A' for _, symbol in fast_got)
+
+
+def test_a_session_leaving_the_fast_lane_or_joining_it_a_symbol_misses_nothing_and_gets_nothing_twice():
+    batches = session(0, 60)
+    told = []
+    gateway = _gateway.Gateway('XTKS.BRISK', on_fast=told.append)
+    gateway.lane({'type': 'lanes', 'fast': True, 'capacity': 2, 'codes': []}, None)
+    gateway.publish(batches[0], _line_of(batches[0]))
+    joins, joins_got = _records(['mbp-10'], ['7203'])
+    leaves, leaves_got = _records(['mbp-10'], ['7203'])
+    reference, reference_got = _records(['mbp-10'], 'ALL_SYMBOLS')
+    wait_for(lambda: len(gateway._clients) == 3 and sum(c.lane == 'joining' for c in gateway._clients) == 2
+             and any(c.lane == 'slow' and c.codes is None for c in gateway._clients))
+    gateway.lane({'lane': 'fast', 'type': 'join', 'seq': 0, 'quotes': [], 'codes': ['7203']}, None)
+    wait_for(lambda: sorted(c.lane for c in gateway._clients) == ['fast', 'fast', 'slow'])
+    # The fast lane is at batch 30, the recording at 10.
+    for b in batches[1:11]:
+        gateway.publish(b, _line_of(b))
+    for b in batches[1:31]:
+        gateway.lane(_fast(b, {'7203'}), None)
+    wait_for(lambda: len(joins_got['mbp-10', '7203']) == 30 and len(leaves_got['mbp-10', '7203']) == 30)
+    # One adds 167A, which fits (two symbols); the other asks for a replay of it, which the fast lane has not.
+    joining, leaving = [c for c in gateway._clients if c.lane == 'fast']
+    joins.subscribe('XTKS.BRISK', 'mbp-10', symbols=['167A'])
+    wait_for(lambda: joining.lane == 'joining' or leaving.lane == 'joining')
+    if leaving.lane == 'joining':
+        joining, leaving = leaving, joining
+    assert told[-1] == {'7203', '167A'}
+    leaves.subscribe('XTKS.BRISK', 'mbp-10', symbols=['167A'], start=0)
+    wait_for(lambda: leaving.lane == 'slow')
+    assert (leaving.fast_until, leaving.old_codes) == (30, {'7203'})
+    gateway.lane({'lane': 'fast', 'type': 'join', 'seq': 30, 'quotes': [batches[30]['quotes'][1]], 'codes': ['167A']}, None)
+    wait_for(lambda: joining.lane == 'fast')
+    for b in batches[31:-1]:
+        gateway.lane(_fast(b, {'7203', '167A'}), None)
+    for b in batches[11:]:
+        gateway.publish(b, _line_of(b))
+    wait_for(lambda: len(reference_got['mbp-10', '7203']) == 60)   # joined after the bootstrap
+    gateway.close()
+    for live in (joins, leaves, reference):
+        live.block_for_close(timeout=10)
+    # 7203 throughout, from either lane, exactly as the recording has it.
+    assert joins_got['mbp-10', '7203'] == leaves_got['mbp-10', '7203'] == reference_got['mbp-10', '7203']
+    # 167A: on the fast lane after its join; from the recording after the subscription for the one that left.
+    after = lambda records, seq: [r for r in records if r['sequence'] > seq + 1]  # noqa: E731 - sequence is the frame
+    assert joins_got['mbp-10', '167A'] == after(reference_got['mbp-10', '167A'], 30)
+    assert leaves_got['mbp-10', '167A'] == after(reference_got['mbp-10', '167A'], 10)
+
+
+HOST = """'use strict';
+// The live host against a fake broker site serving the demo's frames, a few at a time, with its fast lane told
+// on stdin, as the Python feed runs it.
+const fs = require('fs'), path = require('path');
+const { once } = require('events');
+const { live, readLanes } = require(%(brisk)s);
+const { frames } = require(%(decoder)s);
+const cache = process.env.BRISK_MOCK_CACHE;
+const files = Object.fromEntries(['fita.js', 'fita.wasm', 'master.dat', 'snapshot.dat', 'ws.dat'].map(n => [n, fs.readFileSync(path.join(cache, n))]));
+const chunks = [...frames(files['ws.dat'])].slice(0, 600).map(f => f.data);
+const routes = {
+  '/api/frontend/boot': () => JSON.stringify({ api_token: 't', identity: 'a'.repeat(64) }),
+  '/api/app/boot': () => JSON.stringify({ date: '2021-09-27', series: 0, master: 'm1', snapshot: 's1', ws_url: '/realtime/0?session=abc' }),
+  '/': () => '<html><script src="/main.abc.js"></script></html>',
+  '/main.abc.js': () => 'load("assets/wasm/fita.test.js");load("assets/wasm/fita.test.wasm")',
+  '/assets/wasm/fita.test.js': () => files['fita.js'], '/assets/wasm/fita.test.wasm': () => files['fita.wasm'],
+  '/api/master/m1': () => files['master.dat'], '/api/snapshot/s1': () => files['snapshot.dat'],
+};
+const fetchImpl = async url => new Response(routes[url.pathname] ? routes[url.pathname]() : '', { status: routes[url.pathname] ? 200 : 404 });
+class Socket extends EventTarget {
+  constructor() {
+    super();
+    let i = 0;
+    const send = n => { for (const end = Math.min(chunks.length, i + n); i < end; i++) {
+      const c = chunks[i]; this.dispatchEvent(new MessageEvent('message', { data: c.buffer.slice(c.byteOffset, c.byteOffset + c.length) })); } };
+    setImmediate(() => send(3));
+    this.timer = setInterval(() => { send(5); if (i >= chunks.length) { clearInterval(this.timer); setTimeout(() => this.close(1000), 50); } }, 25);
+  }
+  send() {}
+  close(code = 1000) { clearInterval(this.timer); if (this.closed) return; this.closed = true; this.dispatchEvent(Object.assign(new Event('close'), { code, reason: '' })); }
+}
+live({ cookies: { s: 'v' }, protocolVersion: 16000, fetchImpl, WebSocketImpl: Socket, staleSeconds: 0, heartbeatMs: 1e9,
+  lanes: readLanes(process.stdin),
+  emit: async (record, line = JSON.stringify(record)) => { if (!process.stdout.write(line + '\\n')) await once(process.stdout, 'drain'); } })
+  .then(() => process.exit(0), error => { console.error(error.message); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not os.environ.get('BRISK_MOCK_CACHE'), reason='set BRISK_MOCK_CACHE for fixture replay')
+def test_a_live_session_joins_the_fast_lane_of_a_running_host_through_the_feed(tmp_path):
+    decoders = Path(_live.__file__).parent / 'decoder'
+    script = tmp_path / 'host.cjs'
+    script.write_text(HOST % {'brisk': json.dumps(str(decoders / 'brisk.cjs')), 'decoder': json.dumps(str(decoders / 'decoder.cjs'))})
+    feed = _live.Feed(command=['node', str(script)], env={**os.environ, 'BRISK_WORKERS': '3'}, upload=False, gateway=True).ready()
+    assert feed.gateway._lanes == {'fast': True, 'capacity': 500}
+    slow, slow_got = _records(['mbp-10'], 'ALL_SYMBOLS')
+    wait_for(lambda: [c.lane for c in feed.gateway._clients] == ['slow'] and feed.gateway._clients[0].codes is None)
+    fast, fast_got = _records(['mbp-10', 'trades'], ['7203'])
+    wait_for(lambda: sorted(c.lane for c in feed.gateway._clients) == ['fast', 'slow'])   # joined: the host read it
+    feed.wait()
+    fast.block_for_close(timeout=30)
+    slow.block_for_close(timeout=30)
+    got, expected = fast_got['mbp-10', '7203'], slow_got['mbp-10', '7203']
+    assert len(got) > 20 and got == expected[-len(got):], 'from its join, the recording\'s records, each once'
+    assert all(symbol == '7203' for _, symbol in fast_got)

@@ -188,6 +188,13 @@ for record in live:             # or live.add_callback(fn); live.start(); live.b
   `stop()` ends it. Subscribe before or after `start()`: a later subscription gets its own
   replay or snapshot, and its symbols from then on. A session's subscriptions share one
   dataset. `symbology_map` maps `instrument_id` to the code.
+- **The fast lane:** a broker feed records the whole market, which at the opening auction can
+  fall seconds behind the stream on a slower computer. A session that subscribes to its own
+  symbols, without `start`, gets them on the fast lane: read as each frame arrives, ahead of the
+  recording, with the same records. The lane takes about 500 symbols per worker it has (a
+  quarter of the feed's). `ALL_SYMBOLS`, a `start` replay, or symbols beyond what it takes come at
+  the recording's pace instead; a session whose later subscription no longer fits moves there
+  without missing or repeating a record.
 - **Only this computer:** the feed listens on 127.0.0.1 and admits a session only with the key
   it keeps, with its port, in an owner-only file (`~/.config/brisk/gateway/XTKS.BRISK.json`),
   which `Live()` reads. Nothing it serves leaves your computer. A session that falls more than

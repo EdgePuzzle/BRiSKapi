@@ -21,6 +21,16 @@ exactly as the decoder wrote it, and {"gateway": "live", "id"}. Every batch is p
 with only the quotes and trades of the symbols subscribed so far, and last {"gateway": "closed"}. A client
 that falls more than MAX_BEHIND bytes behind the feed is sent {"gateway": "error"} and dropped, so a slow
 reader never slows the feed or its recording.
+
+A broker feed's gateway has a fast lane. The recording reads the whole market's quotes frame by frame, and
+in the opening auction they can fall behind the stream; the fast lane reads only the symbols of the Live
+sessions on it, as each frame arrives, and they come ahead of the recording's batches (as batches of the
+same numbers, with only those symbols). A session is on it from its first subscription if that asks for no
+replay and, with the other sessions on it, for no more symbols than the lane takes; ALL_SYMBOLS never is.
+The others, and a session whose later subscription no longer fits, get the recording's batches as before:
+a session leaving the fast lane gets them from where the fast lane left it (and for its new symbols, from
+its subscription's snapshot), so it misses nothing and gets nothing twice. A subscription that adds
+symbols to the lane is answered once the lane has read their quotes.
 """
 from __future__ import annotations
 
@@ -96,8 +106,14 @@ class Gateway:
     """Serves one feed's batches to Live clients on this computer (see the module docstring). The feed calls
     publish() with each batch in order on its own thread, and close() when it ends."""
 
-    def __init__(self, dataset):
+    def __init__(self, dataset, on_fast=None):
         self.dataset, self.key = dataset, secrets.token_urlsafe(32)
+        self._on_fast = on_fast         # tells the host which symbols the fast lane reads; None: no fast lane
+        self._lanes = None              # the host's, said before each session's bootstrap: {'fast', 'capacity'}
+        self._fast_quotes = {}          # issue_id -> its latest quote on the fast lane
+        self._fast_seq = -1             # the batch the fast lane's quotes are at
+        self._fast_codes = set()        # the symbols the host was last told
+        self._fast_read = set()         # those it says it reads
         self._server = socket.create_server((HOST, 0))
         self._server.settimeout(0.25)
         self.port = self._server.getsockname()[1]
@@ -131,6 +147,7 @@ class Gateway:
             if batch['type'] == 'bootstrap':
                 self._bootstrap = {k: v for k, v in batch.items() if k not in ('quotes', 'trades')}
                 self._quotes, self._day = {}, [spool, 0] if spool else None
+                self._fast_quotes, self._fast_seq = {q['issue_id']: q for q in batch.get('quotes', ())}, batch['seq']
             if self._day:
                 self._day[1] += 1
             for quote in batch.get('quotes', ()):
@@ -138,9 +155,87 @@ class Gateway:
             if batch['type'] == 'end':
                 self._day = None   # the feed packages and removes the day's spool
             for client in self._clients:
+                if client.lane in ('fast', 'joining') and batch['type'] == 'quotes':
+                    continue   # the fast lane brings them
                 client.send(batch, line)
                 if batch['type'] == 'bootstrap':
-                    client.known = self._bootstrap
+                    client.known, client.fast_until = self._bootstrap, None
+                    if client.lane == 'joining':
+                        self._answer(client)   # the bootstrap holds every quote
+
+    def lane(self, batch, line):
+        """Pass on a line of the fast lane: which lanes the host's session has, a joined symbol's quotes, or a
+        frame's quotes of the lane's symbols."""
+        with self._lock:
+            if self._closed:
+                return
+            if batch['type'] == 'lanes':
+                # A new session, before its bootstrap (nothing of it has reached a session yet): what it can take
+                # and what it reads. The sessions waiting to know, and those on the lane, go on it if they fit.
+                self._lanes = {'fast': batch['fast'], 'capacity': batch['capacity']}
+                self._fast_read = set(batch['codes']) if batch['fast'] else set()
+                fits = self._fits(set())
+                for client in self._clients:
+                    if client.lane in ('pending', 'fast') and fits:
+                        client.lane, client.fast_codes, client.fast_until = 'fast', client.codes, None
+                    elif client.lane in ('pending', 'fast', 'joining') and not fits:
+                        self._fall_back(client, new_session=True)
+                self._tell_host()
+                return
+            for quote in batch.get('quotes', ()):
+                self._fast_quotes[quote['issue_id']] = quote
+            self._fast_seq = batch['seq']
+            if batch['type'] == 'join':
+                self._fast_read |= set(batch['codes'])
+                for client in self._clients:
+                    if client.lane == 'joining' and client.codes <= self._fast_read:
+                        self._answer(client)
+                return
+            for client in self._clients:
+                if client.lane in ('fast', 'joining') and client.fast_codes:
+                    client.send_fast(batch)
+                    client.fast_seq = batch['seq']
+
+    def _fast_union(self, extra=frozenset()):
+        return set().union(*(c.codes for c in self._clients if c.lane in ('pending', 'fast', 'joining')), extra)
+
+    def _fits(self, codes):
+        """Whether the fast lane can take these symbols as well as its sessions'."""
+        lanes = self._lanes
+        if self._on_fast is None or codes is None or (lanes is not None and not lanes['fast']):
+            return False
+        return lanes is None or len(self._fast_union(codes)) <= lanes['capacity']
+
+    def _tell_host(self):
+        codes = self._fast_union()
+        if self._on_fast is not None and codes != self._fast_codes:
+            self._fast_codes = codes
+            self._fast_read &= codes   # it stops reading the others
+            self._on_fast(codes)
+
+    def _answer(self, client, slow=False):
+        """Answer a session's subscription that waited for the fast lane to read its new symbols (or, `slow`, for
+        the recording's batches, if it left the lane first)."""
+        ids, codes, snapshot = client.joining
+        client.joining = None
+        if not slow:
+            client.lane, client.fast_codes, client.fast_seq = 'fast', client.codes, self._fast_seq
+        bootstrap = self._bootstrap if client.known is not self._bootstrap else None
+        client.known = self._bootstrap
+        quotes = (self._quotes if slow else self._fast_quotes) if snapshot and self._bootstrap else None
+        client.put(_Subscribed(ids, codes, bootstrap, None if quotes is None else list(quotes.values()), None,
+                               without=client.old_codes if slow else None))
+
+    def _fall_back(self, client, new_session=False):
+        """Move a session from the fast lane to the recording's batches. Up to the batch the fast lane brought
+        it, it gets them only for the symbols the lane did not (none, at a new session, which nothing has
+        reached)."""
+        if not new_session and client.fast_codes:
+            client.fast_until, client.old_codes = client.fast_seq, set(client.fast_codes)
+        client.lane, client.fast_codes = 'slow', set()
+        if client.joining:
+            self._answer(client, slow=True)
+            client.lane = 'slow'
 
     def close(self, status='closed', error=None):
         """End every session with the feed's status and stop serving."""
@@ -196,6 +291,7 @@ class Gateway:
             if client:
                 with self._lock:
                     self._clients.remove(client)
+                    self._tell_host()   # its symbols may leave the fast lane
                 client.discard()
             sock.close()
 
@@ -223,22 +319,40 @@ class Gateway:
                 with self._lock:
                     # Taken under the lock that publish() holds: the answer comes after every batch the
                     # session had without these symbols, and before every batch it gets with them.
+                    fits = client.lane != 'slow' and not message.get('replay') and \
+                        self._fits(None if codes is None else (client.codes or set()) | codes)
+                    if fits and self._lanes is not None and self._lanes['fast'] and client.lane != 'pending':
+                        client.widen(codes)
+                        client.lane = 'joining'
+                        client.joining = (ids, codes, bool(message.get('snapshot')))
+                        self._tell_host()
+                        if self._bootstrap is None or client.codes <= self._fast_read:
+                            self._answer(client)   # no day running (its bootstrap holds every quote), or read already
+                        continue
+                    if client.lane in ('fast', 'joining'):
+                        self._fall_back(client)
+                    # Before the host has said which lanes its session has (none if it never does, as the demo's),
+                    # a session that would fit waits on the recording's batches to know.
+                    client.lane = 'pending' if fits and self._lanes is None and self._bootstrap is None else 'slow'
                     client.widen(codes)
+                    self._tell_host()
                     bootstrap = self._bootstrap if client.known is not self._bootstrap else None
                     client.known = self._bootstrap
                     quotes = list(self._quotes.values()) if message.get('snapshot') and self._bootstrap else None
                     replay = (self._day[0].replay(self._day[1])) if message.get('replay') and self._day else None
-                    client.put(_Subscribed(ids, codes, bootstrap, quotes, replay))
+                    client.put(_Subscribed(ids, codes, bootstrap, quotes, replay, without=client.old_codes))
         except (OSError, ValueError):
             client.end()
 
 
-def _filtered(batch, codes):
-    """A batch's line with only these codes' quotes and trades (the master whole); None when nothing is left."""
-    out = dict(batch)
+def _filtered(batch, codes, without=None):
+    """A batch's line with only the quotes and trades of these codes (None: all) but not of those `without` (the
+    master whole, and as a recording's batch: no fast lane mark); None when nothing is left."""
+    out = {k: v for k, v in batch.items() if k != 'lane'}
+    keep = lambda code: (codes is None or code in codes) and not (without and code in without)  # noqa: E731
     for name in ('quotes', 'trades'):
         if name in batch:
-            out[name] = [item for item in batch[name] if item['code'] in codes]
+            out[name] = [item for item in batch[name] if keep(item['code'])]
     if batch['type'] in ('quotes', 'history') and not out.get('quotes') and not out.get('trades'):
         return None
     return _line(out)
@@ -248,12 +362,14 @@ class _Subscribed:
     """The gateway's answer to a subscription, written out on the session's thread: the line saying so (with
     the bootstrap and quotes it needs), then the replay, if any."""
 
-    def __init__(self, ids, codes, bootstrap, quotes, replay):
+    def __init__(self, ids, codes, bootstrap, quotes, replay, without=None):
         self.ids, self.codes, self.bootstrap, self.quotes, self.replay = ids, codes, bootstrap, quotes, replay
+        self.without = without or set()   # symbols the session has newer quotes of (from the fast lane)
 
     def send(self, sock):
         snapshot = None if self.quotes is None else \
-            sorted((q for q in self.quotes if self.codes is None or q['code'] in self.codes), key=lambda q: q['issue_id'])
+            sorted((q for q in self.quotes if (self.codes is None or q['code'] in self.codes) and q['code'] not in self.without),
+                   key=lambda q: q['issue_id'])
         sock.sendall(_line({'gateway': 'subscribed', 'id': self.ids, 'bootstrap': self.bootstrap, 'snapshot': snapshot,
                             'replay': self.replay is not None}))
         if self.replay:
@@ -279,6 +395,11 @@ class _Client:
 
     def __init__(self, sock):
         self.sock, self.codes, self.known = sock, set(), None   # the symbols so far; the bootstrap it has
+        # Its lane: 'new' until it subscribes, then 'fast' (or 'joining' while the fast lane reads its new
+        # symbols' quotes: it gets the lane's batches of `fast_codes` meanwhile) or 'slow' for good.
+        self.lane, self.joining, self.fast_codes, self.fast_seq = 'new', None, set(), -1
+        # After leaving the fast lane: the recording's batches up to `fast_until` only without `old_codes`.
+        self.fast_until, self.old_codes = None, set()
         self._items, self._behind, self._last = deque(), 0, False
         self._ready = threading.Condition()
 
@@ -286,7 +407,14 @@ class _Client:
         self.codes = None if codes is None or self.codes is None else self.codes | codes
 
     def send(self, batch, line):
-        data = line if self.codes is None else _filtered(batch, self.codes)
+        without = self.old_codes if self.fast_until is not None and batch['type'] == 'quotes' \
+            and batch['seq'] <= self.fast_until else None
+        data = line if self.codes is None and without is None else _filtered(batch, self.codes, without)
+        if data:
+            self.put(data)
+
+    def send_fast(self, batch):
+        data = _filtered(batch, self.fast_codes)
         if data:
             self.put(data)
 
