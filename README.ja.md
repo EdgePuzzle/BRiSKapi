@@ -272,7 +272,9 @@ toyota.quote()                              # 他のフィードと同じ呼び�
 （`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded`）で、`on_day=callback` はその日ごとに呼ばれます。
 `output` を指定しないと、終わった日は自分のアーカイブにだけ残り、アップロードもオフならどこにも残りません。
 フィードを止めると（`feed.close()`、Ctrl-C）その日はそこで終わり、ほかの日と同じように保存・アップロード
-されます。接続が切れたときは自動で再接続します（[記録する](#記録する)）。
+されます。接続が切れたときは自動で再接続します（[記録する](#記録する)）。どちらの証券会社も BRiSK は
+1ユーザー1セッションまでです。フィードを始める前にブラウザの BRiSK を閉じてください。開いたままだと、
+数秒のうちに互いを切断します。
 
 結果は下記の規約に従います。エラーは `briskapi.brisk.SessionExpiredError`（再ログインが
 必要）、`briskapi.NotFoundError`、`briskapi.brisk.RateLimitError`、`briskapi.brisk.APIError` です。

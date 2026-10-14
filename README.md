@@ -274,7 +274,9 @@ also keeps each finished day in DIR, in a folder named
 `name`, `path`, `uploaded`, `timing_uploaded`), and `on_day=callback` is called for each.
 Without `output`, a finished day is kept only in your archive, and with uploads off, nowhere.
 Stopping the feed (`feed.close()`, Ctrl-C) ends the day there, so it is kept and uploaded like any
-day; a lost connection reconnects by itself ([Recording](#recording)).
+day; a lost connection reconnects by itself ([Recording](#recording)). Both brokers allow one BRiSK
+session per user: close BRiSK in your browser before you start the feed, or the two cut each other off
+within seconds.
 
 Results use the conventions below. Errors are `briskapi.brisk.SessionExpiredError` (log in
 again), `briskapi.NotFoundError`, `briskapi.brisk.RateLimitError` and `briskapi.brisk.APIError`.
