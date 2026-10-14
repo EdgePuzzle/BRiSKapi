@@ -74,7 +74,7 @@ _pool, _pool_lock = None, threading.Lock()
 def _threads():
     """The shared pool, or None with the GIL on. Its tasks never wait for one another."""
     global _pool
-    if sys._is_gil_enabled():
+    if getattr(sys, '_is_gil_enabled', lambda: True)():   # the GIL is on, or (before 3.13, as in the archive's function) always
         return None
     with _pool_lock:
         _pool = _pool or ThreadPoolExecutor(_THREADS, thread_name_prefix='brisk-parquet')
