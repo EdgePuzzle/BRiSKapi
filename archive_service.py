@@ -41,8 +41,8 @@ from botocore.exceptions import ClientError
 import pyarrow as pa
 from briskapi._parquet import BATCHES, FILES, MARKET, file_digest, pack_to, unpack_file, verify_package
 import query_engine
-from briskapi.schema import (OWNER, RECORDING_PREFIX, REFERENCES, TIMING_KEY, encode, max_package, owner, recording_name, validate_manifest,
-                             validate_timing, require, MAX_COMPRESSED, MAX_TIMING_BYTES)
+from briskapi.schema import (LEGACY_SCHEMA, OWNER, RECORDING_PREFIX, REFERENCES, SCHEMA, TIMING_KEY, encode, max_package, owner,
+                             recording_name, validate_manifest, validate_timing, require, MAX_COMPRESSED, MAX_TIMING_BYTES)
 
 BUCKET = os.environ.get('ARCHIVE_BUCKET', '')
 TABLE = os.environ.get('QUOTA_TABLE', '')
@@ -134,10 +134,13 @@ def address(event):
 class NotFound(Exception):
     pass
 
-def reference_prefix(source):
-    """Where the archive keeps a reference replay's market tables, once; None for sources without one."""
+def reference_prefix(source, fmt=SCHEMA):
+    """Where the archive keeps a reference replay's market tables, once for each format (the v2 copy where it
+    always was); None for sources without one."""
     reference = REFERENCES.get(source)
-    return reference and f"reference/{source}/{reference['timeline']}"
+    if not reference:
+        return None
+    return f"reference/{source}/{reference['timeline']}" + ('' if fmt == LEGACY_SCHEMA else f'/{fmt}')
 
 def _part(value):
     """The timing-only part an upload sends instead of the whole recording, or None."""
@@ -191,7 +194,7 @@ def upload(body, who, ip, s3, db):
     require(len(json.dumps(m['summary'])) < 60000, 'Summary too large')
     part = _part(body['part'])
     if part:
-        shared = reference_prefix(m['summary']['source'])
+        shared = reference_prefix(m['summary']['source'], m['schema'])
         require(shared, 'Only a demo or synthetic replay can send its timing alone')
         if not _exists(s3, f'{shared}/complete.json'):
             return response(409, {'error': "The archive holds no copy of this replay's market data yet; "
@@ -268,7 +271,7 @@ def download(body, who, ip, s3, db):
         if e.response['Error']['Code'] == 'NoSuchKey':
             raise NotFound(prefix) from None
         raise
-    shared = reference_prefix(manifest['summary']['source'])
+    shared = reference_prefix(manifest['summary']['source'], manifest['schema'])
     require(isinstance(files, dict) and set(files) == set(FILES)
             and all(key in {f'{prefix}/{name}', f'{shared}/{name}'} for name, key in files.items()), 'Invalid stored recording')
     urls = {name: s3.generate_presigned_url('get_object', Params={'Bucket': BUCKET, 'Key': key}, ExpiresIn=URL_SECONDS)
@@ -489,7 +492,7 @@ def store(zipped, m, part, who, s3):
     """Verify an upload (`zipped`: the whole recording, or a replay's timing table to join the stored market data)
     and store it; returns (prefix, stored manifest). The stored manifest hashes the zip of the four tables as
     stored. A broker's recording is checked a row group at a time (verify_package), a replay whole."""
-    shared = reference_prefix(m['summary']['source'])
+    shared = reference_prefix(m['summary']['source'], m['schema'])
     with tempfile.TemporaryDirectory(dir=zipped.parent) as tmp:
         directory = Path(tmp)
         if part:

@@ -29,7 +29,7 @@ from briskapi import records
 from briskapi._parquet import BATCHES, DEPTHS, EQUITY, FILES, MARKET, TRADES, midnight_ns
 from briskapi.records import (BARS, DATASETS, DAY_NS, EARLIEST, FIELDS, JST_NS, LATEST, SCHEMAS, TIME,  # noqa: F401 - the
                               fields, instrument_id, symbols_of, timestamp)                         # service's names
-from briskapi.schema import BROKER_SOURCE, RECORDING_PREFIX, REFERENCES, require
+from briskapi.schema import BROKER_SOURCE, RECORDING_PREFIX, REFERENCES, SCHEMA, require
 
 LIVE = (BROKER_SOURCE,)   # every broker's BRiSK, one source (schema.BROKER_TRANSPORTS: the sites)
 DEMO_SOURCE = 'historical_mock'
@@ -165,8 +165,10 @@ def _recording(prefix, summary, files, receipt):
 def demo(bucket):
     """The public demo's market tables, as the archive keeps them once."""
     reference = REFERENCES[DEMO_SOURCE]
-    prefix = f"reference/{DEMO_SOURCE}/{reference['timeline']}"
-    if not bucket.exists(f'{prefix}/complete.json'):
+    # The archive keeps a copy in each table format (archive_service.reference_prefix): the newest it holds.
+    base = f"reference/{DEMO_SOURCE}/{reference['timeline']}"
+    prefix = next((p for p in (f'{base}/{SCHEMA}', base) if bucket.exists(f'{p}/complete.json')), None)
+    if prefix is None:
         raise NotFound('The archive holds no copy of the demo yet')
     equity = pq.read_table(io.BytesIO(bucket.read(f'{prefix}/{EQUITY}')))
     meta = bucket.parquet(f'{prefix}/{DEPTHS}').metadata

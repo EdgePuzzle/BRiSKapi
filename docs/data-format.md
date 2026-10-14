@@ -234,12 +234,14 @@ its part. `briskapi.Recording(path)`, `Ticker` and `Market` read them for you;
 
 | File | One row per | Columns |
 | --- | --- | --- |
-| `data/order_book_depths.parquet` | Quote update | `bids`, `asks` (up to ten levels, best first: `price`, `size`, `count`, and v2's `order_id`, always 0), `flags`, `sequence` (the frame), `ts_event`, `ts_init` (the same), `identifier` (`CODE.XTKS`), `issue_id`, `seq` (the batch), then the quote fields as in `brisk-quotes` above, with prices as decimals |
-| `data/trades.parquet` | Execution | `price`, `size`, `aggressor_side` (`BUY`, `SELL`, `NO_AGGRESSOR`), `trade_id`, `ts_event`, `ts_init`, `identifier`, `issue_id`, `seq`, `frame`, `side` (BRiSK's raw type: 1 buyer-initiated, 2 seller-initiated) |
+| `data/order_book_depths.parquet` | Quote update | `bids`, `asks` (up to ten levels, best first: `price`, `size`, `count`, and v2's `order_id`, always 0), `flags`, `sequence` (the frame), `ts_event`, `identifier` (`CODE.XTKS`), `issue_id`, `seq` (the batch), then the quote fields as in `brisk-quotes` above, with prices as decimals |
+| `data/trades.parquet` | Execution | `price`, `size`, `aggressor_side` (`BUY`, `SELL`, `NO_AGGRESSOR`), `trade_id`, `ts_event`, `identifier`, `issue_id`, `seq`, `frame`, `side` (BRiSK's raw type: 1 buyer-initiated, 2 seller-initiated) |
 | `data/equity.parquet` | Security | v2 `Equity`: `id` (`CODE.XTKS`), `raw_symbol` (the code), `currency`, `price_precision`, `price_increment`, `lot_size`, `max_price`/`min_price` (the day's limits), `ts_event`/`ts_init` (JST midnight); then `issue_id`, `tick_type`, `issue_type`, `name`, `base_price` |
 | `data/custom/BriskBatch.parquet` | Decoded batch (frame) | `seq`, `kind` (`bootstrap`, `history`, `quotes`, `end`), `received_unix_ms` (local receipt clock), `decode_ns`, `replay_lateness_ms`, `skipped_issues`, `frames`, `quote_updates`, `replay_wall_ms` (in a day repaired after a crash, the end's `frames` and `replay_wall_ms` are rebuilt from the recording); on the bootstrap row `source`, `trading_date`, `input_transport`, `market_issue_count` |
 
-Receipt times live in `BriskBatch`: join a row's `seq` to the batch's `received_unix_ms`.
+Receipt times live in `BriskBatch`: join a row's `seq` to the batch's `received_unix_ms`. Each table of updates has
+one clock, `ts_event`; recordings made before briskapi 1.5 (format `brisk-nautilus-parquet-v2`) also have
+`ts_init`, a copy of it, and the Nautilus export writes it for NautilusTrader.
 `history` batches hold trades the session's snapshot restored from earlier that day, all at the
 bootstrap's clock.
 

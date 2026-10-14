@@ -19,7 +19,9 @@ MAX_BROKER_COMPRESSED = 4 * 1024**3
 # Bounds on the canonical JSON form of a recording and of each batch.
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_LINE = 16 * 1024 * 1024
-SCHEMA = 'brisk-nautilus-parquet-v2'
+SCHEMA = 'brisk-nautilus-parquet-v3'
+# The format before v3 (the tables of updates also held ts_init, a copy of ts_event): still read and accepted.
+LEGACY_SCHEMA = 'brisk-nautilus-parquet-v2'
 SOURCES = {'historical_mock', 'synthetic_test', 'brisk_live'}
 QUOTE_KEYS = set('issue_id code frame source_time_us max_frame last_price10 open_price10 bid_price10 ask_price10 indicative_price10 indicative_volume indicative_imbalance_side closing_indicative_price10 closing_indicative_volume closing_indicative_imbalance_side quote_flag quote_side special_quote_time_us indicative_open_price10 reference_price10 volume turnover10 issue_status market_buy_quantity market_sell_quantity closing_market_buy_quantity closing_market_sell_quantity bid_quantity bid_orders ask_quantity ask_orders bid_levels ask_levels bid_closing_levels ask_closing_levels bid_total_quantity bid_total_orders bid_closing_total_quantity bid_closing_total_orders ask_total_quantity ask_total_orders ask_closing_total_quantity ask_closing_total_orders'.split())
 # A side of the book (or of its closing-condition orders): up to LEVELS [price10, quantity, orders], best price first.
@@ -421,7 +423,7 @@ def max_package(source):
 
 def validate_manifest(m):
     require(isinstance(m, dict) and set(m) == {'schema', 'sha256', 'bytes', 'summary'}, 'Invalid manifest fields')
-    require(m['schema'] == SCHEMA and isinstance(m['sha256'], str) and re.fullmatch('[0-9a-f]{64}', m['sha256']), 'Invalid schema/hash')
+    require(m['schema'] in (SCHEMA, LEGACY_SCHEMA) and isinstance(m['sha256'], str) and re.fullmatch('[0-9a-f]{64}', m['sha256']), 'Invalid schema/hash')
     summary = m['summary']
     require(isinstance(summary, dict) and summary.get('source') not in LEGACY_BROKER_SOURCES, UPGRADE)
     require(set(summary) == SUMMARY_KEYS and isinstance(summary['source'], str) and summary['source'] in SOURCES,

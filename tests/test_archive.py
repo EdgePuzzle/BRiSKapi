@@ -454,7 +454,6 @@ def replace(table, name, values):
 
 @pytest.mark.parametrize('name,change,error', [
     # Values the decoder does not read are checked against the content they derive from.
-    (_parquet.DEPTHS, lambda t: replace(t, 'ts_init', pa.array([10**18] * len(t), _parquet.TIME)), 'Non-canonical'),
     (_parquet.DEPTHS, lambda t: replace(t, 'flags', pa.array([255] * len(t), pa.uint8())), 'Non-canonical'),
     (_parquet.EQUITY, lambda t: replace(t, 'currency', pa.array(['payload'] * len(t))), 'Non-canonical'),
     (_parquet.EQUITY, lambda t: replace(t, 'info', pa.array(['{"payload":1}'] * len(t))), 'Non-canonical'),
@@ -468,7 +467,6 @@ def replace(table, name, values):
     (_parquet.TRADES, lambda t: replace(t, 'trade_id', pa.array(['payload'] * len(t))), 'Non-canonical'),
     (_parquet.TRADES, lambda t: replace(t, 'aggressor_side', pa.array(['SELL'] * len(t)).dictionary_encode().cast(
         pa.dictionary(pa.int8(), pa.string()))), 'Non-canonical'),
-    (_parquet.TRADES, lambda t: replace(t, 'ts_init', pa.array([10**18] * len(t), _parquet.TIME)), 'Non-canonical'),
 ])
 def test_uploaded_tables_must_be_canonical(packaged, name, change, error):
     directory, m = packaged

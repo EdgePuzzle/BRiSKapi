@@ -13,9 +13,12 @@ data/custom/BriskBatch.parquet  One row per decoded batch, laid out as v2 custom
 
 Rows carry v2's `identifier` column (CODE.XTKS), as v2 returns multi-instrument queries, instead of a
 directory per instrument; `export_nautilus` writes that catalog layout. Prices and sizes are
-decimal128(38, 16) as in v2, and the vendor's zero price sentinel is null. `ts_init` is the source time:
-local receipt clocks stay exact in BriskBatch. Reading gives back the decoder's batches exactly, so the
-archive's checks and reference fingerprints apply unchanged.
+decimal128(38, 16) as in v2, and the vendor's zero price sentinel is null. The tables of updates (depths,
+trades, batches) keep one clock, `ts_event`, BRiSK's stamp: v2's `ts_init` was always a copy of it, so this
+format (SCHEMA, v3) leaves it out, and export_nautilus puts it back; local receipt clocks stay exact in
+BriskBatch. Rising columns (clocks, frame and batch numbers) are written delta-encoded. Recordings in the v2
+format (LEGACY_SCHEMA, with `ts_init`) read and check as before. Reading gives back the decoder's batches
+exactly, so the archive's checks and reference fingerprints apply unchanged.
 """
 from __future__ import annotations
 
@@ -39,7 +42,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from briskapi.schema import (BATCH_KEYS, LEVELS, MASTER_KEYS, MAX_COMPRESSED, MAX_DECODE_NS, MAX_HISTORY,
+from briskapi.schema import (LEGACY_SCHEMA, BATCH_KEYS, LEVELS, MASTER_KEYS, MAX_COMPRESSED, MAX_DECODE_NS, MAX_HISTORY,
                              MAX_SESSION_MS, QUOTE_KEYS, SCHEMA, SKIPPED, TRADE_KEYS, UNIX_MS, canonical, canonical_batches,
                              code, encode, integer, measurement, require, transports, validate_batches, validate_manifest)
 from briskapi.schema import broker as is_broker
@@ -126,8 +129,7 @@ assert set(QUOTE_ORDER) == QUOTE_KEYS and set(TRADE_INTS[1:]) | {'code'} == TRAD
 DEPTH_SCHEMA = pa.schema([
     # NautilusTrader v2 OrderBookDepth, plus the identifier of its multi-instrument queries
     pa.field('bids', BOOK, False), pa.field('asks', BOOK, False), pa.field('flags', pa.uint8(), False),
-    pa.field('sequence', pa.uint64(), False), pa.field('ts_event', TIME, False), pa.field('ts_init', TIME, False),
-    pa.field('identifier', pa.string(), False),
+    pa.field('sequence', pa.uint64(), False), pa.field('ts_event', TIME, False), pa.field('identifier', pa.string(), False),
     # BRiSK's quote beyond the book
     pa.field('issue_id', pa.uint64(), False), pa.field('seq', pa.uint64(), False),
     *[pa.field(k[:-2], DECIMAL) for k in PRICES],
@@ -135,18 +137,18 @@ DEPTH_SCHEMA = pa.schema([
     pa.field('special_quote_time', TIME), pa.field('turnover', DECIMAL, False),
     pa.field('closing_bids', BOOK, False), pa.field('closing_asks', BOOK, False),
 ], metadata={'type_name': 'OrderBookDepth', 'price_precision': '1', 'size_precision': '0', 'brisk_format': SCHEMA})
-V2_DEPTH = DEPTH_SCHEMA.names[:6]
+V2_DEPTH = ['bids', 'asks', 'flags', 'sequence', 'ts_event', 'ts_init']
 
 TRADE_SCHEMA = pa.schema([
     # NautilusTrader v2 TradeTick, plus the identifier of its multi-instrument queries
     pa.field('price', DECIMAL, False), pa.field('size', DECIMAL, False),
     pa.field('aggressor_side', pa.dictionary(pa.int8(), pa.string()), False), pa.field('trade_id', pa.string(), False),
-    pa.field('ts_event', TIME, False), pa.field('ts_init', TIME, False), pa.field('identifier', pa.string(), False),
+    pa.field('ts_event', TIME, False), pa.field('identifier', pa.string(), False),
     # The decoder's own: its trade type, the issue's frame number and the batch
     pa.field('issue_id', pa.uint64(), False), pa.field('seq', pa.uint64(), False), pa.field('frame', pa.uint64(), False),
     pa.field('side', pa.uint8(), False),
 ], metadata={'type_name': 'TradeTick', 'price_precision': '1', 'size_precision': '0', 'brisk_format': SCHEMA})
-V2_TRADE = TRADE_SCHEMA.names[:6]
+V2_TRADE = ['price', 'size', 'aggressor_side', 'trade_id', 'ts_event', 'ts_init']
 
 EQUITY_SCHEMA = pa.schema([
     # NautilusTrader v2 Equity (`info`, JSON in v2, is a plain string here and always null)
@@ -173,13 +175,48 @@ BATCH_SCHEMA = pa.schema([
     pa.field('seq', pa.uint64(), False), pa.field('kind', pa.string(), False),
     *[pa.field(k, t) for k, t in BATCH_TYPES.items()],
     # v2 custom data
-    pa.field('type', pa.string(), False), pa.field('ts_event', TIME, False), pa.field('ts_init', TIME, False),
+    pa.field('type', pa.string(), False), pa.field('ts_event', TIME, False),
 ], metadata={'type_name': 'BriskBatch', 'brisk_format': SCHEMA})
 assert {k for keys in BATCH_FIELDS.values() for k in keys} | {SKIPPED} == set(BATCH_TYPES)
 
 SCHEMAS = {EQUITY: EQUITY_SCHEMA, DEPTHS: DEPTH_SCHEMA, TRADES: TRADE_SCHEMA, BATCHES: BATCH_SCHEMA}
+
+
+def _legacy(schema):
+    """A table's schema in the v2 format: `ts_init`, a copy of `ts_event`, right after it (equity has it in both)."""
+    if 'ts_init' not in schema.names:
+        schema = schema.insert(schema.get_field_index('ts_event') + 1, pa.field('ts_init', TIME, False))
+    return schema.with_metadata({**schema.metadata, b'brisk_format': LEGACY_SCHEMA.encode()})
+
+
+LEGACY_SCHEMAS = {name: _legacy(schema) for name, schema in SCHEMAS.items()}
+FORMATS = {SCHEMA: SCHEMAS, LEGACY_SCHEMA: LEGACY_SCHEMAS}
+
+
+def as_format(table, name, fmt):
+    """A table as this module writes it (SCHEMA), in the format `fmt`: in v2, with `ts_init` back."""
+    if fmt == SCHEMA:
+        return table
+    schema = FORMATS[fmt][name]
+    return pa.Table.from_arrays([table.column('ts_event' if field.name == 'ts_init' else field.name) for field in schema],
+                                schema=schema)
+
+
 WRITE = dict(compression='zstd', compression_level=ZSTD_LEVEL, use_dictionary=True, write_statistics=True,
              version='2.6', data_page_version='1.0', use_compliant_nested_type=False)  # list items named 'item', as v2 writes them
+# Rising columns delta-encoded: within an issue (rows are sorted by issue, then batch) clocks and frame and batch
+# numbers only rise, which halves what they take (with ts_init gone, the demo's depths from 51 bytes an update to 37).
+DELTAS = {EQUITY: (), DEPTHS: ('ts_event', 'sequence', 'seq', 'max_frame'), TRADES: ('ts_event', 'seq', 'frame'),
+          BATCHES: ('ts_event', 'seq')}
+
+
+def options(name):
+    """How a table is written: WRITE, with its rising columns (DELTAS) delta-encoded instead of in dictionaries."""
+    deltas = DELTAS[name]
+    if not deltas:
+        return WRITE
+    return {**WRITE, 'use_dictionary': [c for c in SCHEMAS[name].names if c not in deltas],
+            'column_encoding': {c: 'DELTA_BINARY_PACKED' for c in deltas}}
 
 
 def midnight_ns(date: str) -> int:
@@ -343,13 +380,13 @@ class Columns:
             (directory / name).parent.mkdir(parents=True, exist_ok=True)
         midnight = midnight_ns(self.trading_date)
         try:
-            pq.write_table(self._equity(midnight), directory / EQUITY, row_group_size=ROW_GROUP, **WRITE)
-            pq.write_table(self._batches(midnight), directory / BATCHES, row_group_size=ROW_GROUP, **WRITE)
+            pq.write_table(self._equity(midnight), directory / EQUITY, row_group_size=ROW_GROUP, **options(EQUITY))
+            pq.write_table(self._batches(midnight), directory / BATCHES, row_group_size=ROW_GROUP, **options(BATCHES))
             order = np.arange(len(self)) if self.order is None else self.order
-            with pq.ParquetWriter(directory / DEPTHS, DEPTH_SCHEMA, **WRITE) as writer:
+            with pq.ParquetWriter(directory / DEPTHS, DEPTH_SCHEMA, **options(DEPTHS)) as writer:
                 for start in range(0, len(self), ROW_GROUP):
                     writer.write_table(self.take(order[start:start + ROW_GROUP])._depths(midnight), row_group_size=ROW_GROUP)
-            with pq.ParquetWriter(directory / TRADES, TRADE_SCHEMA, **WRITE) as writer:
+            with pq.ParquetWriter(directory / TRADES, TRADE_SCHEMA, **options(TRADES)) as writer:
                 for start in range(0, len(self.t_code), ROW_GROUP):
                     writer.write_table(self._trades(midnight, slice(start, start + ROW_GROUP)), row_group_size=ROW_GROUP)
         except (TypeError, OverflowError) as error:  # Arrow's own type errors are TypeErrors
@@ -383,7 +420,7 @@ class Columns:
             pa.array(np.select([t['side'] == 1, t['side'] == 2], [1, 2], 0).astype(np.int8)),
             pa.array(['NO_AGGRESSOR', 'BUY', 'SELL']))
         columns = [_decimal(t['price10'], 1), _decimal(t['quantity'], 0), aggressor, pa.array(ids.tolist(), pa.string()),
-                   pa.array(ts, TIME), pa.array(ts, TIME), pa.array([c + '.' + VENUE for c in codes], pa.string()),
+                   pa.array(ts, TIME), pa.array([c + '.' + VENUE for c in codes], pa.string()),
                    pa.array(t['issue_id'], pa.uint64()), pa.array(t['seq'], pa.uint64()), pa.array(t['frame'], pa.uint64()),
                    pa.array(t['side'], pa.uint8())]
         return pa.Table.from_arrays(columns, schema=TRADE_SCHEMA)
@@ -401,7 +438,7 @@ class Columns:
         ts = midnight + q['source_time_us'] * 1000
         special = q['special_quote_time_us']
         columns = [*books[:2], pa.array(np.where(q['seq'] == 0, F_MBP | F_SNAPSHOT, F_MBP).astype(np.uint8)),
-                   pa.array(q['frame'], pa.uint64()), pa.array(ts, TIME), pa.array(ts, TIME),
+                   pa.array(q['frame'], pa.uint64()), pa.array(ts, TIME),
                    pa.array([c + '.' + VENUE for c in self.code], pa.string()),
                    pa.array(q['issue_id'], pa.uint64()), pa.array(q['seq'], pa.uint64()),
                    *[_decimal(q[k], 1, nulls=True) for k in PRICES],
@@ -435,8 +472,7 @@ class Columns:
             if 'input_transport' in fields:
                 fields['input_transport'] = canonical(fields['input_transport'])
             ts = midnight + b['source_time_us'] * 1000
-            row.update(fields, seq=b['seq'], kind=b['type'], skipped_issues=b.get(SKIPPED), type='BriskBatch',
-                       ts_event=ts, ts_init=ts)
+            row.update(fields, seq=b['seq'], kind=b['type'], skipped_issues=b.get(SKIPPED), type='BriskBatch', ts_event=ts)
             rows.append(row)
         return pa.Table.from_pylist(rows, schema=BATCH_SCHEMA)
 
@@ -678,25 +714,31 @@ def _decode_equity(table):
 
 # Files and packages
 
-def check(directory, broker=None):
-    """Refuse a recording whose files are not exactly the expected tables, before reading their data.
+def check(directory, broker=None, fmt=None):
+    """Refuse a recording whose files are not exactly the expected tables, before reading their data; returns
+    their format (SCHEMA or LEGACY_SCHEMA).
 
     Beyond the schema: a pyarrow writer, no file metadata but the schema's, full row groups (the last
     may be shorter), zstd throughout and column chunks that fill the file between its header and footer.
     A broker's recording has larger limits: `broker`, or (None) as its own batches say, for one of your own.
+    The tables are in `fmt` (an upload's manifest says which), or (None) in the format they say they are.
     """
     directory = Path(directory)
     if broker is None:
         broker = is_broker(_source(directory))
+    if fmt is None:
+        fmt = _format(directory)
+    require(fmt in FORMATS, 'Unexpected format')
+    schemas = FORMATS[fmt]
     max_rows, max_decoded = (BROKER_MAX_ROWS, BROKER_MAX_DECODED) if broker else (MAX_ROWS, MAX_DECODED)
     for name in FILES:
         path = directory / name
         require(path.is_file(), f'Missing {name}')
         meta = pq.ParquetFile(path).metadata
-        require(meta.schema.to_arrow_schema().equals(SCHEMAS[name], check_metadata=True), f'Unexpected schema in {name}')
+        require(meta.schema.to_arrow_schema().equals(schemas[name], check_metadata=True), f'Unexpected schema in {name}')
         require(re.fullmatch(r'parquet-cpp-arrow version \d{1,4}\.\d{1,4}\.\d{1,4}', meta.created_by or '')
-                and set(meta.metadata or {}) == {b'ARROW:schema', *SCHEMAS[name].metadata}
-                and all(meta.metadata[k] == v for k, v in SCHEMAS[name].metadata.items()), f'Unexpected file metadata in {name}')
+                and set(meta.metadata or {}) == {b'ARROW:schema', *schemas[name].metadata}
+                and all(meta.metadata[k] == v for k, v in schemas[name].metadata.items()), f'Unexpected file metadata in {name}')
         require(meta.num_rows <= max_rows[name], f'Too many rows in {name}')
         require(all(meta.row_group(i).num_rows == ROW_GROUP for i in range(meta.num_row_groups - 1)), f'Unexpected row groups in {name}')
         require(all(meta.row_group(i).column(j).compression == 'ZSTD' for i in range(meta.num_row_groups)
@@ -718,6 +760,7 @@ def check(directory, broker=None):
                 limit = (max_rows[EQUITY] if name == BATCHES else LEVELS) * max(group.num_rows, 1)
                 require(group.column(c).num_values <= limit, f'Oversized column in {name}')
         require(decoded <= max_decoded, f'{name} exceeds decode limit')
+    return fmt
 
 
 def write(batches, directory):
@@ -775,15 +818,15 @@ def write_part(columns, header, directory, carry=None):
     directory = Path(directory)
     (directory / BATCHES).parent.mkdir(parents=True, exist_ok=True)
     try:
-        pq.write_table(columns._batches(midnight), directory / BATCHES, row_group_size=ROW_GROUP, **WRITE)
+        pq.write_table(columns._batches(midnight), directory / BATCHES, row_group_size=ROW_GROUP, **options(BATCHES))
         rows = columns.sorted()
         issues = rows.q['issue_id']
-        with pq.ParquetWriter(directory / DEPTHS, DEPTH_SCHEMA, **WRITE) as writer:
+        with pq.ParquetWriter(directory / DEPTHS, DEPTH_SCHEMA, **options(DEPTHS)) as writer:
             # A row group per PART_ISSUES issue IDs, so that a piece of the day is read a range of issues at a time.
             starts = np.flatnonzero(np.diff(issues // PART_ISSUES, prepend=-1)) if len(issues) else np.zeros(1, np.int64)
             for start, stop in zip(starts.tolist(), [*starts[1:].tolist(), len(issues)]):
                 writer.write_table(rows.take(np.arange(start, stop))._depths(midnight), row_group_size=ROW_GROUP)
-        pq.write_table(columns._trades(midnight, slice(None)), directory / TRADES, row_group_size=ROW_GROUP, **WRITE)
+        pq.write_table(columns._trades(midnight, slice(None)), directory / TRADES, row_group_size=ROW_GROUP, **options(TRADES))
     except (TypeError, OverflowError) as error:
         raise ValueError(f'Invalid recording value: {error}') from None
 
@@ -962,7 +1005,7 @@ class _DepthWriter:
     the last shorter."""
 
     def __init__(self, path, midnight):
-        self._writer, self._midnight, self._pending, self._count = pq.ParquetWriter(path, DEPTH_SCHEMA, **WRITE), midnight, [], 0
+        self._writer, self._midnight, self._pending, self._count = pq.ParquetWriter(path, DEPTH_SCHEMA, **options(DEPTHS)), midnight, [], 0
 
     def add(self, rows):
         if len(rows):
@@ -1045,8 +1088,8 @@ def write_piece(equity, parts, directory, midnight, cut=None, bootstrap=None, en
     t, t_code = _no_trades()
     shell = Columns(None, None, None, master, rows, t, t_code)
     try:
-        pq.write_table(shell._equity(midnight), directory / EQUITY, row_group_size=ROW_GROUP, **WRITE)
-        pq.write_table(shell._batches(midnight), directory / BATCHES, row_group_size=ROW_GROUP, **WRITE)
+        pq.write_table(shell._equity(midnight), directory / EQUITY, row_group_size=ROW_GROUP, **options(EQUITY))
+        pq.write_table(shell._batches(midnight), directory / BATCHES, row_group_size=ROW_GROUP, **options(BATCHES))
         depths, latest, quote_bytes, quote_rows = _DepthWriter(directory / DEPTHS, midnight), [], 0, 0
         for low, high in _ranges(parts):
             pieces = []
@@ -1088,7 +1131,7 @@ def write_piece(equity, parts, directory, midnight, cut=None, bootstrap=None, en
         t['seq'] = t['seq'] - shift
         order = np.lexsort((np.arange(len(t_code)), t['seq'], t['issue_id']))
         trade_rows = Columns(None, None, None, master, rows, {k: v[order] for k, v in t.items()}, t_code[order])
-        with pq.ParquetWriter(directory / TRADES, TRADE_SCHEMA, **WRITE) as writer:
+        with pq.ParquetWriter(directory / TRADES, TRADE_SCHEMA, **options(TRADES)) as writer:
             for start in range(0, len(trade_rows.t_code), ROW_GROUP):
                 writer.write_table(trade_rows._trades(midnight, slice(start, start + ROW_GROUP)), row_group_size=ROW_GROUP)
     except (TypeError, OverflowError) as error:
@@ -1261,6 +1304,15 @@ def summarize(directory, references=None):
     return validate_batches(Columns.load(directory).iter_batches(), references)
 
 
+def _format(directory):
+    """The format a recording's tables say they are in (their depths table's `brisk_format`)."""
+    try:
+        value = (pq.read_schema(Path(directory) / DEPTHS).metadata or {}).get(b'brisk_format')
+    except (OSError, pa.ArrowException):
+        return None
+    return value and value.decode()
+
+
 def _source(directory):
     try:
         return pq.read_table(Path(directory) / BATCHES, columns=['source']).column(0)[0].as_py()
@@ -1276,7 +1328,7 @@ def verify_package(directory, manifest, references=None):
     return verify_directory(directory, manifest, references)
 
 
-def verify_tables(directory, columns):
+def verify_tables(directory, columns, fmt=SCHEMA):
     """Refuse tables that are not the canonical encoding of their decoded content.
 
     Each row group is compared with the encoding the validated content implies, so columns the
@@ -1292,13 +1344,13 @@ def verify_tables(directory, columns):
     require(not len(keys) or ((keys[1:, 0] > keys[:-1, 0]) | ((keys[1:, 0] == keys[:-1, 0]) & (keys[1:, 1] >= keys[:-1, 1]))).all(),
             'Trades not sorted by issue, then batch')
     for name, expected in ((EQUITY, columns._equity(midnight)), (BATCHES, columns._batches(midnight))):
-        require(pq.read_table(directory / name).equals(expected), f'Non-canonical {name}')
+        require(pq.read_table(directory / name).equals(as_format(expected, name, fmt)), f'Non-canonical {name}')
     source = pq.ParquetFile(directory / DEPTHS)
     at = 0
     for i in range(source.num_row_groups):
         group = source.read_row_group(i)
         rows = columns.take(np.arange(at, at + len(group)))
-        require(group.equals(rows._depths(midnight)), f'Non-canonical {DEPTHS}')
+        require(group.equals(as_format(rows._depths(midnight), DEPTHS, fmt)), f'Non-canonical {DEPTHS}')
         at += len(group)
     require(at == len(columns), f'Non-canonical {DEPTHS}')
     # Parquet rebuilds dictionaries from its pages, so aggressor sides compare as their strings.
@@ -1307,7 +1359,8 @@ def verify_tables(directory, columns):
     at = 0
     for i in range(source.num_row_groups):
         group = source.read_row_group(i)
-        require(plain(group).equals(plain(columns._trades(midnight, slice(at, at + len(group))))), f'Non-canonical {TRADES}')
+        expected = as_format(columns._trades(midnight, slice(at, at + len(group))), TRADES, fmt)
+        require(plain(group).equals(plain(expected)), f'Non-canonical {TRADES}')
         at += len(group)
     require(at == len(columns.t_code), f'Non-canonical {TRADES}')
 
@@ -1400,7 +1453,7 @@ def verify_broker(directory, manifest=None):
     directory = Path(directory)
     if manifest is not None:
         validate_manifest(manifest)
-    check(directory, broker=True)
+    fmt = check(directory, broker=True, fmt=manifest and manifest['schema'])
     batches = _decode_batches(pq.read_table(directory / BATCHES))
     midnight = midnight_ns(batches[0]['trading_date'])
     master = _decode_equity(pq.read_table(directory / EQUITY))
@@ -1408,7 +1461,7 @@ def verify_broker(directory, manifest=None):
     kinds, clocks = _check_batches(batches, master)
     shell = Columns(None, None, None, master, batches, *_no_trades())
     for name, expected in ((EQUITY, shell._equity(midnight)), (BATCHES, shell._batches(midnight))):
-        require(pq.read_table(directory / name).equals(expected), f'Non-canonical {name}')
+        require(pq.read_table(directory / name).equals(as_format(expected, name, fmt)), f'Non-canonical {name}')
     ids = np.array([m['issue_id'] for m in master], np.int64)
     codes = np.array([m['code'] for m in master], dtype=object)
     skipped = np.array(sorted(i << 32 | b['seq'] for b in batches for i in b.get(SKIPPED, ())), np.int64)
@@ -1430,7 +1483,7 @@ def verify_broker(directory, manifest=None):
     for g in range(source.num_row_groups):
         table = source.read_row_group(g)
         rows = _depth_rows(table, midnight, master)
-        require(table.equals(rows._depths(midnight)), f'Non-canonical {DEPTHS}')
+        require(table.equals(as_format(rows._depths(midnight), DEPTHS, fmt)), f'Non-canonical {DEPTHS}')
         issue, seq = rows.q['issue_id'], rows.q['seq']
         identity(issue, rows.code)
         keys = issue << 32 | seq
@@ -1462,7 +1515,7 @@ def verify_broker(directory, manifest=None):
         t, t_code = _decode_trades(table, midnight)
         rows = Columns(None, None, None, master, batches, t, t_code)
         rows.trade_ids(carry)
-        require(plain(table).equals(plain(rows._trades(midnight, slice(None)))), f'Non-canonical {TRADES}')
+        require(plain(table).equals(plain(as_format(rows._trades(midnight, slice(None)), TRADES, fmt))), f'Non-canonical {TRADES}')
         identity(t['issue_id'], t_code)
         keys = t['issue_id'] << 32 | t['seq']
         require(not len(keys) or ((np.diff(keys) >= 0).all() and keys[0] >= (last_key[0] << 32 | last_key[1])),
@@ -1504,11 +1557,11 @@ def verify_directory(directory, manifest, references=None):
     validates, and every value is its canonical encoding (see check and verify_tables). Nothing is written.
     Checked whole, in memory: a demo or synthetic recording, within their limits whatever its tables say."""
     validate_manifest(manifest)
-    check(directory, broker=False)
+    fmt = check(directory, broker=False, fmt=manifest['schema'])
     columns = Columns.load(directory)
     summary = validate_batches(columns.iter_batches(), references)
     require(summary == manifest['summary'], 'Summary mismatch')
-    verify_tables(directory, columns)
+    verify_tables(directory, columns, fmt)
     return summary
 
 
@@ -1517,6 +1570,13 @@ def verify_directory(directory, manifest, references=None):
 def _stamp(ns: int) -> str:
     moment = dt.datetime.fromtimestamp(ns // 10**9, dt.timezone.utc)
     return moment.strftime('%Y-%m-%dT%H-%M-%S-') + f'{ns % 10**9:09d}Z'
+
+
+def _with_init(table):
+    """A table with v2's `ts_init` (a copy of `ts_event`, which this format leaves out), as the catalog needs."""
+    if 'ts_init' in table.column_names:
+        return table
+    return table.append_column(pa.field('ts_init', TIME, False), table.column('ts_event'))
 
 
 def export_nautilus(directory, output) -> list[Path]:
@@ -1547,7 +1607,7 @@ def export_nautilus(directory, output) -> list[Path]:
         put(output / 'data' / 'equity' / ident / f'{_stamp(ts)}_{_stamp(ts)}.parquet',
             row.replace_schema_metadata({'instrument_id': ident, 'type_name': 'Equity'}))
     def instrument(ident, tables, pieces):
-        rows, quoted = pa.concat_tables(tables).combine_chunks(), _join(pieces)
+        rows, quoted = _with_init(pa.concat_tables(tables).combine_chunks()), _join(pieces)
         n = len(quoted)
         ts = rows.column('ts_init').cast(pa.int64())
         span = f'{_stamp(ts[0].as_py())}_{_stamp(ts[-1].as_py())}.parquet'
@@ -1580,7 +1640,7 @@ def export_nautilus(directory, output) -> list[Path]:
             pieces.append(_rows(decoded, np.arange(start, end)))
     if tables:
         instrument(current, tables, pieces)
-    trades = pq.read_table(directory / TRADES)
+    trades = _with_init(pq.read_table(directory / TRADES))
     trades = trades.set_column(2, 'aggressor_side', trades.column(2).cast(pa.string()).dictionary_encode().cast(
         pa.dictionary(pa.int8(), pa.string())))
     ids = trades.column('identifier').to_pylist()

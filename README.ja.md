@@ -221,7 +221,7 @@ briskapi.Market().snapshot(at="09:00:00").to_pandas()
 ほかの気配項目を加えたもの）、`data/trades.parquet`（すべての約定、v2 の `TradeTick`）、
 `data/equity.parquet`（銘柄マスター、v2 の `Equity`）、
 `data/custom/BriskBatch.parquet`（フレームごとの計測値）からなります。デモ全体で約
-41 MB です。pandas、Polars、DuckDB でそのまま読めます。`brisk export` で
+29 MB です。pandas、Polars、DuckDB でそのまま読めます。`brisk export` で
 NautilusTrader のカタログや JSONL に書き出せます。全列の説明と pandas・Polars・DuckDB での読み方は
 [docs/data-format.ja.md](docs/data-format.ja.md)にあります。
 
@@ -552,7 +552,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 - **デモのセッションでアップロードされる内容:** ローカルの計測値（お使いの
   コンピューターの時計を含み、記録した日時がわかります）。デモの再生の市場データは誰にとっても
   同じなので、アーカイブは1つだけ保持します。デモのアップロードで送るのは自分のタイミングの
-  テーブルだけ（約41 MB の代わりに約0.4 MB）で、アーカイブはそれを、検証済みのデモの市場データの
+  テーブルだけ（約29 MB の代わりに約0.2 MB）で、アーカイブはそれを、検証済みのデモの市場データの
   テーブルと結び付け、`brisk pull` はこれまでどおり検証したうえで完全な記録を返します
   （そのアーカイブへの最初のデモのアップロードだけは、記録全体を送ります）。IP アドレスは
   リクエスト回数などの制限にのみ、鍵付きハッシュとして使います。

@@ -108,17 +108,25 @@ reference fingerprints are the same for every format.
 
 | File | Rows | Columns |
 | --- | --- | --- |
-| `data/order_book_depths.parquet` | One per quote update, sorted by issue, then batch | v2 `OrderBookDepth`: `bids`, `asks` (up to ten levels each, best first: `price`, `size`, `count`, `order_id` 0), `flags` (16, plus 32 on the bootstrap snapshot), `sequence` (the frame number), `ts_event` (source time), `ts_init` (the same). Then `identifier`, `issue_id`, `seq` (the batch), `max_frame`, the prices (`last_price`, `open_price`, `bid_price`, `ask_price`, `indicative_price`, `closing_indicative_price`, `indicative_open_price`, `reference_price`; null for the vendor's zero), the counts and enums (`indicative_volume`, `indicative_imbalance_side`, `closing_indicative_volume`, `closing_indicative_imbalance_side`, `quote_flag`, `quote_side`, `volume`, `issue_status`, market and closing market buy/sell quantities, `bid_quantity`, `bid_orders`, `ask_quantity`, `ask_orders`, and the board totals `bid_total_quantity`/`_orders`, `ask_total_…` and their `bid_closing_total_…`/`ask_closing_total_…`), `special_quote_time`, `turnover`, and the closing-condition orders' books `closing_bids` and `closing_asks` (shaped like `bids` and `asks`) |
-| `data/trades.parquet` | One per execution, sorted by issue, then in the decoder's order | v2 `TradeTick`: `price`, `size` (shares), `aggressor_side` (BUY for the decoder's type 1, SELL for 2, NO_AGGRESSOR otherwise), `trade_id` (the issue's frame number and the trade's place in it), `ts_event`/`ts_init` (the trade's time). Then `identifier`, `issue_id`, `seq` (the batch), `frame` and `side` (the raw type) |
+| `data/order_book_depths.parquet` | One per quote update, sorted by issue, then batch | v2 `OrderBookDepth`: `bids`, `asks` (up to ten levels each, best first: `price`, `size`, `count`, `order_id` 0), `flags` (16, plus 32 on the bootstrap snapshot), `sequence` (the frame number), `ts_event` (source time). Then `identifier`, `issue_id`, `seq` (the batch), `max_frame`, the prices (`last_price`, `open_price`, `bid_price`, `ask_price`, `indicative_price`, `closing_indicative_price`, `indicative_open_price`, `reference_price`; null for the vendor's zero), the counts and enums (`indicative_volume`, `indicative_imbalance_side`, `closing_indicative_volume`, `closing_indicative_imbalance_side`, `quote_flag`, `quote_side`, `volume`, `issue_status`, market and closing market buy/sell quantities, `bid_quantity`, `bid_orders`, `ask_quantity`, `ask_orders`, and the board totals `bid_total_quantity`/`_orders`, `ask_total_…` and their `bid_closing_total_…`/`ask_closing_total_…`), `special_quote_time`, `turnover`, and the closing-condition orders' books `closing_bids` and `closing_asks` (shaped like `bids` and `asks`) |
+| `data/trades.parquet` | One per execution, sorted by issue, then in the decoder's order | v2 `TradeTick`: `price`, `size` (shares), `aggressor_side` (BUY for the decoder's type 1, SELL for 2, NO_AGGRESSOR otherwise), `trade_id` (the issue's frame number and the trade's place in it), `ts_event` (the trade's time). Then `identifier`, `issue_id`, `seq` (the batch), `frame` and `side` (the raw type) |
 | `data/equity.parquet` | One per security, by issue | v2 `Equity` (`id`, `raw_symbol`, `currency` JPY, `price_precision` 1, `price_increment` 0.1, `lot_size`, `max_price`/`min_price` from the daily limits, `ts_event`/`ts_init` at JST midnight; `info`, JSON in v2, is a null string), then `issue_id`, `tick_type`, `issue_type`, `name`, `base_price` |
-| `data/custom/BriskBatch.parquet` | One per batch | `seq`, `kind` (bootstrap, history, quotes or end), `received_unix_ms`, `decode_ns`, `replay_lateness_ms`, `skipped_issues`, `frames`, `quote_updates`, `replay_wall_ms`; on the bootstrap row `source`, `trading_date`, `input_transport` (canonical JSON), `source_timestamp_origin`, `exchange_delay_ms`, `market_issue_count`; v2 custom data's `type`, `ts_event` and `ts_init` |
+| `data/custom/BriskBatch.parquet` | One per batch | `seq`, `kind` (bootstrap, history, quotes or end), `received_unix_ms`, `decode_ns`, `replay_lateness_ms`, `skipped_issues`, `frames`, `quote_updates`, `replay_wall_ms`; on the bootstrap row `source`, `trading_date`, `input_transport` (canonical JSON), `source_timestamp_origin`, `exchange_delay_ms`, `market_issue_count`; v2 custom data's `type` and `ts_event` |
 
 Prices and level sizes are `decimal128(38, 16)` as in v2; times are UTC
-`timestamp[ns]`. `ts_init` repeats the source time rather than a local clock, since a
-demo replay's receipt clock is years after its market time; receipt times stay exact
-in `BriskBatch.received_unix_ms`. Tables are zstd-compressed in row groups of 65,536
-rows, so one security's history reads only its row groups. The complete demo replay
-(735,382 updates and 92,263 trades) is 41 MB, against 965 MB of JSONL.
+`timestamp[ns]`. The tables of updates keep one clock, `ts_event`, BRiSK's stamp: v2's
+`ts_init` would only repeat it (a demo replay's receipt clock is years after its market
+time, so it can't be that), and receipt times stay exact in `BriskBatch.received_unix_ms`;
+the Nautilus export adds `ts_init` back. This is the format `brisk-nautilus-parquet-v3`;
+recordings in v2 (the same with `ts_init` in the tables of updates) read, check and upload as
+before, and the archive keeps a replay's shared copy for each. Tables are zstd-compressed in
+row groups of 65,536 rows, so one security's history reads only its row groups; columns that
+rise within an issue (the clocks, frame and batch numbers) are delta-encoded rather than in
+dictionaries (`_parquet.DELTAS`), the archive checking values, not page encodings. The
+complete demo replay (735,382 updates and 92,263 trades) is 29 MB, 39 bytes an update,
+against 40 MB in v2 and 965 MB of JSONL. Databento's MBP-10, the nearest to it (the top ten
+levels with every event), took 27.7 bytes a record for NQ futures, 10.8 of them for its two
+clocks: the same here (the books, the clock, the frame and the identity) takes 23.7, its one clock 4.4.
 
 `brisk export DIR --nautilus CATALOG` writes v2's layout: `equity`, `order_book_depths`
 and `trades` per instrument, readable by v2's `ParquetDataCatalog`, and the rest of each
@@ -1076,7 +1084,7 @@ nothing could make trustworthy:
 - **Canonical tables.** Each table must have exactly its schema and metadata, a
   pyarrow writer, zstd, full row groups and no bytes between its column chunks.
   Every row group must equal the encoding of the validated content, including the
-  columns reading ignores (`ts_init`, `flags`, v2's constant Equity fields), null for
+  columns reading ignores (`flags`, v2's constant Equity fields and a v2 recording's `ts_init`), null for
   every zero price and rows sorted by issue, then batch. Packaging converts recorder
   output to this form and rounds local timings to microseconds.
 - **Exact fields.** Batches, master entries and quotes must have exactly the
@@ -1178,7 +1186,7 @@ results/OWNER/UUID.EXT                       a query result too large to return 
   address per hour (stored as a keyed hash, never the address), eight per owner per hour, 64
   per hour in total, 8 GiB of authorized uploads per owner and 64 GiB in all per UTC day, counted by what is sent (a timing table alone,
   once the copy exists), on top of every request's per-address limit (see
-  [Identity](#identity)). A complete demo replay is a 41 MB package.
+  [Identity](#identity)). A complete demo replay is a 29 MB package.
 - Ticket metadata in staging expires after two days. Stored data is kept until its
   owner deletes it; what an owner deletes can be restored for 30 days and is removed
   after 31.
@@ -1297,7 +1305,7 @@ match, then filters the rest exactly. Each schema is a projection:
 | `mbp-10` | depths | One row per quote update with both books flattened to `bid_px_00`, `bid_sz_00`, `bid_ct_00` … `ask_ct_09` (null past a side's last level). BRiSK gives each update's book, not the order event that changed it, so `action` and `side` are N, `depth` 0, `price` null and `size` 0; `flags` is Databento's snapshot flag (32) on the bootstrap batch's rows (`seq` 0), else 0 |
 | `imbalance` | depths | Per update, an opening (`O`) row where the opening indicative price shows and a closing (`C`) row where the closing one does: `ref_price`, `ind_match_price`, `paired_qty` (indicative volume), `side`, `market_buy_qty`, `market_sell_qty`, `market_imbalance_qty` and `_side` (buy minus sell), `bid_total_qty` and `ask_total_qty` (the board totals; the closing ones for `C`), the day's limit prices as collars and `auction_time` (special quote time) |
 | `definition` | equity | One row per security per recording, stamped JST midnight of its trading day and only when the request reaches that day: `raw_symbol`, `exchange` XTKS, `currency` JPY, lot size, tick increment, limits, base price, name, issue type, tick type |
-| `brisk-quotes` | depths | Every column the update has except `identifier`, `ts_init`, `issue_id` and `seq`; decimals become float64 |
+| `brisk-quotes` | depths | Every column the update has except `identifier`, `issue_id` and `seq` (and a v2 recording's `ts_init`); decimals become float64 |
 | `ohlcv-*` | trades | Below |
 
 Every schema but bars starts with `ts_recv`, `ts_event`, `publisher_id` and `instrument_id`

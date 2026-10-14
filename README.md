@@ -225,7 +225,7 @@ A recording is a folder of Parquet tables laid out like a NautilusTrader v2 cata
 other quote fields), `data/trades.parquet` (every execution, as v2 `TradeTick`),
 `data/equity.parquet` (the securities master, as v2 `Equity`) and
 `data/custom/BriskBatch.parquet` (per-frame timing). The complete demo replay takes about
-41 MB. pandas, Polars and DuckDB read the tables directly; `brisk export` writes a
+29 MB. pandas, Polars and DuckDB read the tables directly; `brisk export` writes a
 NautilusTrader catalog or JSONL. [docs/data-format.md](https://github.com/honvl/BRiSKapi/blob/main/docs/data-format.md)
 describes every column, with examples for pandas, Polars and DuckDB.
 
@@ -553,7 +553,7 @@ Python), until you decide with `brisk consent --accept` or `--revoke`
 - **What a demo session uploads:** local timing measurements (including your computer's
   clock, which shows when you recorded). A demo replay's market data is the same for
   everyone, so the archive keeps it once: a demo upload sends only its own timing table
-  (about 0.4 MB instead of about 41 MB), the archive joins it to its verified copy of the
+  (about 0.2 MB instead of about 29 MB), the archive joins it to its verified copy of the
   demo's market tables, and `brisk pull` returns the complete recording, verified as before.
   (The very first demo upload to an archive sends the whole recording.) Your IP address is
   used only for rate limits, as a keyed hash.

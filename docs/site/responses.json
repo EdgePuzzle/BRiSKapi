@@ -111,8 +111,8 @@
   "Python": "   code                             time    price  quantity  side\n0  1570 2021-09-27 09:00:00.061377+09:00  17300.0    132271   buy\n1  1357 2021-09-27 09:00:00.061508+09:00    367.0   1315414  sell\n2  4098 2021-09-27 09:00:00.062243+09:00   1970.0      2200   NaN\n3  4176 2021-09-27 09:00:00.062262+09:00   1601.0      5700  sell\n4  7367 2021-09-27 09:00:00.062287+09:00   1101.0       200   NaN"
  },
  "python/record": {
-  "Python": "18002 40472003",
-  "CLI": "{\n  \"schema\": \"brisk-nautilus-parquet-v2\",\n  \"sha256\": \"08e95f88f7660a28b9637b691bfd21c609368198c44bb7084037090cbd25843b\",\n  \"bytes\": 40471946,\n  \"summary\": {\n    \"source\": \"historical_mock\",\n    \"trading_date\": \"20210927\",\n    \"first_source_time_us\": 32399999955,\n    \"last_source_time_us\": 32579999896,\n    \"codes\": [\n      \"1301\",\n      \"1305\",\n      \"1306\",\n      \"1308\",\n      \"1309\",\n      \"… 4126 more\"\n    ],\n    \"batches\": 18002,\n    \"quote_updates\": 735382,\n    \"expanded_bytes\": 965408677\n  }\n}"
+  "Python": "18002 28898515",
+  "CLI": "{\n  \"schema\": \"brisk-nautilus-parquet-v3\",\n  \"sha256\": \"2ba597ccf9722e6850797039b90f88060fb5be9186fa73ea9c810a6e8d75d721\",\n  \"bytes\": 28898515,\n  \"summary\": {\n    \"source\": \"historical_mock\",\n    \"trading_date\": \"20210927\",\n    \"first_source_time_us\": 32399999955,\n    \"last_source_time_us\": 32579999896,\n    \"codes\": [\n      \"1301\",\n      \"1305\",\n      \"1306\",\n      \"1308\",\n      \"1309\",\n      \"… 4126 more\"\n    ],\n    \"batches\": 18002,\n    \"quote_updates\": 735382,\n    \"expanded_bytes\": 965391154\n  }\n}"
  },
  "python/ticker_auction": {
   "Python": "code: 7203\ntime: 2021-09-27 08:59:59.993551+09:00\nindicative_price: 10150.0\nindicative_volume: 304700\nindicative_imbalance_side: 1\nindicative_open_price: 10150.0\nmarket_buy_quantity: 201300\nmarket_sell_quantity: 105700\nbid_total_quantity: 1017700\nask_total_quantity: 932700\nmarket_order_imbalance: 95600"
