@@ -486,14 +486,15 @@ function reading() {
   return { batches, emit, timeless };
 }
 
-// A server that sends its first `split` frames, and the rest `afterMs` later (after a catch-up), then closes.
-function laterSocket(chunks, split, afterMs) {
+// A server that sends its first `split` frames, and the rest `afterMs` later (after a catch-up; first calling
+// `between`), then closes.
+function laterSocket(chunks, split, afterMs, between = () => {}) {
   return class extends EventTarget {
     constructor() {
       super();
       const send = list => list.forEach(c => this.dispatchEvent(new MessageEvent('message', { data: c.buffer.slice(c.byteOffset, c.byteOffset + c.length) })));
       setImmediate(() => send(chunks.slice(0, split)));
-      this.timer = setTimeout(() => { send(chunks.slice(split)); setImmediate(() => this.close(1000)); }, afterMs);
+      this.timer = setTimeout(() => { between(); send(chunks.slice(split)); setImmediate(() => this.close(1000)); }, afterMs);
     }
     send() {}
     close(code = 1000) {
@@ -534,18 +535,11 @@ test('the fast lane writes the subscribed symbols of each frame at once, as the 
   const chunks = [...frames(files['ws.dat'])].slice(0, 300).map(f => f.data);
   const lanes = { codes: new Set(['7203', '6758']), onChange: null };
   const lines = [];
-  let joined = false;
-  const emit = async (record, line) => {
-    const b = JSON.parse(line ?? JSON.stringify(record));
-    lines.push(b);
-    if (b.lane === 'fast' && !joined) {   // a Live session subscribes to another symbol while the day runs
-      joined = true;
-      lanes.codes = new Set(['7203', '6758', '9984']);
-      lanes.onChange();
-    }
-  };
+  const emit = async (record, line) => { lines.push(JSON.parse(line ?? JSON.stringify(record))); };
+  // Between the stream's two halves a Live session subscribes to another symbol, while the day runs.
+  const between = () => { lanes.codes = new Set(['7203', '6758', '9984']); lanes.onChange(); };
   await live({ cookies: { s: 'v' }, emit, protocolVersion: 16000, fetchImpl: server(files).fetchImpl, workers: 3, lanes,
-    WebSocketImpl: laterSocket(chunks, 120, 1000) });   // the join comes in the pause
+    WebSocketImpl: laterSocket(chunks, 120, 300, between) });
   assert.deepEqual(lines[0], { type: 'lanes', fast: true, capacity: 500, codes: ['6758', '7203'] });
   assert.equal(lines[1].type, 'bootstrap');
   const master = new Map(lines[1].master.map(m => [m.code, m.issue_id]));
