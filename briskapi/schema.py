@@ -3,7 +3,7 @@
 The archive accepts recordings with exact market/timing fields, checked batch by batch
 in their canonical JSON form whatever the file format (see briskapi/_parquet.py).
 Demo and synthetic market content must match a pinned reference replay. Opted-in
-broker recordings (SBI, e-shiten) have structural and continuity checks, but their market content
+broker recordings have structural and continuity checks, but their market content
 cannot be independently verified. The service writes accepted content itself.
 """
 import datetime as dt
@@ -19,7 +19,8 @@ MAX_COMPRESSED = 64 * 1024 * 1024
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_LINE = 16 * 1024 * 1024
 SCHEMA = 'brisk-nautilus-parquet-v2'
-SOURCES = {'historical_mock', 'synthetic_test', 'sbi_live', 'eshiten_live'}
+SOURCES = {'historical_mock', 'synthetic_test', 'sbi_live', 'eshiten_live', 'matsui_live', 'monex_live',
+           'smbcnikko_live'}
 QUOTE_KEYS = set('issue_id code frame source_time_us max_frame last_price10 open_price10 bid_price10 ask_price10 indicative_price10 indicative_volume indicative_imbalance_side closing_indicative_price10 closing_indicative_volume closing_indicative_imbalance_side quote_flag quote_side special_quote_time_us indicative_open_price10 reference_price10 volume turnover10 issue_status market_buy_quantity market_sell_quantity closing_market_buy_quantity closing_market_sell_quantity bid_quantity bid_orders ask_quantity ask_orders bid_levels ask_levels bid_closing_levels ask_closing_levels bid_total_quantity bid_total_orders bid_closing_total_quantity bid_closing_total_orders ask_total_quantity ask_total_orders ask_closing_total_quantity ask_closing_total_orders'.split())
 # A side of the book (or of its closing-condition orders): up to LEVELS [price10, quantity, orders], best price first.
 BOOK_KEYS = {'bid_levels', 'ask_levels', 'bid_closing_levels', 'ask_closing_levels'}
@@ -42,10 +43,13 @@ SKIPPED = 'skipped_issues'
 MAX_HISTORY = 50_000
 SUMMARY_KEYS = {'source', 'trading_date', 'first_source_time_us', 'last_source_time_us', 'codes', 'batches', 'quote_updates', 'expanded_bytes'}
 DEMO_ORIGIN = 'https://next-demo.brisk.jp/'
-# Broker-hosted BRiSK (SBI, Tachibana e-shiten): the same app and decoder, so the same rules; each
-# keeps only its fixed transport provenance.
+# Broker-hosted BRiSK (SBI, Tachibana e-shiten, Matsui, Monex, SMBC Nikko): the same app and decoder, so the
+# same rules; each keeps only its fixed transport provenance.
 BROKER_TRANSPORT = {'sbi_live': {'kind': 'sbi_websocket', 'origin': 'https://sbi.brisk.jp/'},
-                    'eshiten_live': {'kind': 'eshiten_websocket', 'origin': 'https://next.e-shiten.brisk.jp/'}}
+                    'eshiten_live': {'kind': 'eshiten_websocket', 'origin': 'https://next.e-shiten.brisk.jp/'},
+                    'matsui_live': {'kind': 'matsui_websocket', 'origin': 'https://matsui.brisk.jp/'},
+                    'monex_live': {'kind': 'monex_websocket', 'origin': 'https://monex.brisk.jp/'},
+                    'smbcnikko_live': {'kind': 'smbcnikko_websocket', 'origin': 'https://smbcnikko.brisk.jp/'}}
 SBI_TRANSPORT = BROKER_TRANSPORT['sbi_live']
 REFERENCE_DIR = Path(__file__).resolve().parent / 'references'
 # Local measurements are client reported. Plausible ranges and microsecond
@@ -339,7 +343,7 @@ def validate_stream(stream, references=None):
 def validate_batches(batches, references=None):
     """Validate canonical fields/continuity, plus reference content for demo/synthetic data.
 
-    Broker live content (SBI, e-shiten) is uploader-declared and has no reference
+    Broker live content is uploader-declared and has no reference
     replay. Its transport is exactly its BROKER_TRANSPORT, and replay_lateness_ms must
     be null. End frames include pre-bootstrap catch-up frames as well as the emitted
     quote batches. A batch lists in skipped_issues the issues whose quote could not be
@@ -414,7 +418,7 @@ def validate_manifest(m):
                 'Summary is not a complete reference replay')
     return m
 
-# Timing reports: what a broker session (SBI, e-shiten) uploads besides its market recording.
+# Timing reports: what a broker session uploads besides its market recording.
 TIMING_SCHEMA = 'brisk-timing-v2'
 TIMING_SOURCES = set(BROKER_TRANSPORT)
 TIMING_KEYS = {'schema', 'source', 'trading_date', 'first_minute', 'last_minute', 'frames', 'stalls',

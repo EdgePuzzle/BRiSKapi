@@ -7,9 +7,9 @@ itself. For usage, see the [README](README.md).
 
 | Component | Where | Role |
 | --- | --- | --- |
-| Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `brisk.cjs` drives a broker's BRiSK decoder (SBI's, or e-shiten BRiSK Next's) from an authenticated session, one trading day after another, reading a large selection's quotes with worker threads (`workers.cjs`). Both emit one JSON batch per frame. |
+| Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `brisk.cjs` drives a broker's BRiSK decoder (SBI's, e-shiten BRiSK Next's, Matsui's, Monex's or SMBC Nikko's) from an authenticated session, one trading day after another, reading a large selection's quotes with worker threads (`workers.cjs`). Both emit one JSON batch per frame. |
 | Python API | `briskapi/` | `Recording` (files), `Feed` (live, background thread, with a worker thread that packages and uploads each finished day), `Ticker`/`Market` views and `Archive`. |
-| BRiSK site client | `briskapi/brisk.py` | Cookie login (SBI by default, or e-shiten with `site="e-shiten"`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `briskapi.connect(site=...)` starts the live host through it (`_connect`). |
+| BRiSK site client | `briskapi/brisk.py` | Cookie login (SBI by default, or another broker with `site=`: `e-shiten`, `matsui`, `monex`, `smbcnikko`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `briskapi.connect(site=...)` starts the live host through it (`_connect`). |
 | Archive client | `briskapi/cli.py`, `briskapi/schema.py`, `briskapi/_parquet.py`, `briskapi/identity.py` | The `brisk` CLI, upload consent, your identity, Parquet packaging, upload, verified download, deletion, restore and export. |
 | Auction state | `rust/brisk_quote_ingest` | Optional Rust tools: `brisk_quote_ingest` validates batches, keeps per-security state and publishes latest-state files; `brisk_recording` reconstructs a saved recording. |
 | Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL serves each owner's uploads, listings, downloads, deletions and restores; S3-triggered ingest validates and stores and keeps each owner's OHLCV bars in step; DynamoDB holds quotas. |
@@ -19,7 +19,7 @@ itself. For usage, see the [README](README.md).
 
 ```
 demo assets (HTTPS, pinned) ─► decoder.cjs ─┐
-SBI/e-shiten session ────────► brisk.cjs ───┴─► JSON batches ─┬─► briskapi.Feed: live state, callbacks, iterators
+broker BRiSK session ────────► brisk.cjs ───┴─► JSON batches ─┬─► briskapi.Feed: live state, callbacks, iterators
                                                              │     └─► gateway (127.0.0.1) ─► briskapi.Live: Databento-style records
                                                              ├─► brisk live: JSON lines
                                                              └─► briskapi.record ─► Parquet recording (demo only)
@@ -167,7 +167,7 @@ and put in the canonical order) and writes the same bytes as the day's batches a
 says so, never a failed feed, and the day is then kept in `~/.local/share/brisk/recordings`
 (its package, for `brisk upload` to retry, or its tables); neither is an `on_day` callback that
 raises. `brisk live --output
-DIR` prints each result as `{"day": ...}` on stderr. Broker feeds (SBI, e-shiten) do the
+DIR` prints each result as `{"day": ...}` on stderr. Broker feeds do the
 same with their market recording and also accumulate timing statistics
 (`briskapi/timing.py`). Uploads are on by default
 (`cli.consented`): with no saved choice the CLI asks once, on a terminal, before the first
@@ -302,7 +302,7 @@ to the broker; a session needs the gateway's key and nothing else.
 
 ## Timing reports
 
-A timing report is uploaded even when a broker (SBI, e-shiten) session keeps its market
+A timing report is uploaded even when a broker session keeps its market
 recording local. A report (`brisk-timing-v2`) holds p50/p90/p99/max of decode time, feed-clock age
 at receipt and frame spacing, a stall count (gaps over one second), the frame count,
 trading date, first/last JST minute and client version. It covers one day: a session
@@ -315,7 +315,7 @@ the last 30 days; rate limits it (six per IP address per hour, 600 in total); an
 own canonical JSON to `timing/OWNER/YYYYMMDD/SHA256.json`, so identical reports deduplicate.
 A report is at most 2 KB. `briskapi.Archive().timing()` reads the owner's back.
 
-## Broker BRiSK (SBI, e-shiten)
+## Broker BRiSK
 
 The endpoint sequence was learned from pybrisk: session cookies authenticate
 `/api/frontend/boot`, which returns a bearer token; `/api/app/boot` then gives
@@ -332,8 +332,11 @@ master and snapshot, finds the site's decoder through the app's own bundles (it 
 served only to logged-in sessions and changes with the broker's releases, so it can't be
 pinned), checks that it exports every function the host calls, and decodes
 WebSocket frames with protocol version 18000. Cookies reach it through the
-environment (the site's own variable, `BRISK_SBI_COOKIES` or `BRISK_ESHITEN_COOKIES`;
-`BRISK_SITE` names the site), never the command line.
+environment (the site's own variable, such as `BRISK_SBI_COOKIES` or `BRISK_ESHITEN_COOKIES`;
+`BRISK_SITE` names the site), never the command line. One table names the brokers in each place,
+`SITES` in `brisk.py` and in `brisk.cjs`, with their sources and transports in `schema.py`
+(`tests/test_brisk.py` checks they agree): address, label, cookie variable, `source` and
+transport `kind`.
 
 The page may name its bundles by absolute or relative path, and a bundle names the
 loader either as a literal path or as a template with an exchange variant,
@@ -753,6 +756,25 @@ choice and with the same opt-outs; packaging keeps only `next.e-shiten.brisk.jp`
 transport provenance (`BROKER_TRANSPORT` in `schema.py`). `brisk login` can sign in to it with a passkey (site `e-shiten`; see
 [Tachibana e-shiten's sign-in](#tachibana-e-shitens-sign-in)).
 
+### Matsui, Monex and SMBC Nikko
+
+Matsui (`matsui.brisk.jp`), Monex (`monex.brisk.jp`) and SMBC Nikko (`smbcnikko.brisk.jp`) run
+the same vendor's BRiSK on their own hosts. Checked on 2026-10-14 without an account: each answers
+`/` with 401 to a request without a session, as `sbi.brisk.jp` and `next.e-shiten.brisk.jp` do,
+and, like e-shiten's, none serves SBI's current app bundle by name, so each serves its own build.
+The host never assumes a build: as on e-shiten, it reads the signed-in page for its bundles, finds
+the decoder through them and checks its exports (a build it does not recognise is an explicit
+error, not doubtful records), and the board reader works out the build's ladder layout itself
+(`BoardReader` above), falling back to `_getItaRows` when it cannot. None of the three has been
+tried with an account.
+
+`site="matsui"`, `"monex"` or `"smbcnikko"` selects one (`BRISK_SITE` for the host; saved cookies in
+`<site>-cookies.json`, `BRISK_MATSUI_COOKIES`, `BRISK_MONEX_COOKIES`, `BRISK_SMBCNIKKO_COOKIES`). Their
+batches say `source=<site>_live` and `kind=<site>_websocket`, uploaded as SBI's are, with the site's
+own origin as transport provenance. Their passkey sites (`briskapi/sites.py`) are bound to these
+clients, so `brisk login` hands the cookies to `briskapi.login()`. Their cookie names are not
+known, so `cookie_prefix` is empty and any cookie on the BRiSK host counts as signed in.
+
 ## Passkey sign-in
 
 `briskapi.passkey` (CLI: `brisk sites | enroll | login | forget`) gets a broker's BRiSK session cookies by
@@ -826,9 +848,9 @@ the login URL, button text, cookie host and any user ID box and user ID come in 
    cookie that starts with the site's `cookie_prefix` on exactly its BRiSK host. Only that host's
    cookies are returned, never those of the broker's main site, whose session is destroyed with
    the profile.
-6. **Delivery.** SBI and e-shiten have a data client (`briskapi.brisk`, with `site="e-shiten"` for the
-   latter), so their cookies go to `briskapi.login()` and are saved as that site's cookies; the
-   others are saved to `~/.config/brisk/cookies/<site>.json` (owner-only) for the person's own use.
+6. **Delivery.** The five built-in brokers have a data client (`briskapi.brisk`, with the site's own
+   `site=`), so their cookies go to `briskapi.login()` and are saved as that site's cookies; those of
+   a site added in `sites.json` are saved to `~/.config/brisk/cookies/<site>.json` (owner-only) for the person's own use.
    A data client sends its cookies to one host, so a site bound to a client whose cookie host is not
    that client's host is refused before Chrome starts (a `sites.json` entry can never claim a client).
 
@@ -1007,7 +1029,7 @@ is uploader-declared:
   batch it arrived in) and a hash of the batch clock timeline; it contains no
   market data. Any subset of securities is accepted, but only complete replays.
   `tools/brisk_mock/build_reference.py` regenerates it after a re-audited asset pin.
-  This comparison applies only to demo/synthetic sources, not to `sbi_live` or `eshiten_live`.
+  This comparison applies only to demo/synthetic sources, not to the broker ones (`sbi_live`, ...).
 - **Canonical tables.** Each table must have exactly its schema and metadata, a
   pyarrow writer, zstd, full row groups and no bytes between its column chunks.
   Every row group must equal the encoding of the validated content, including the
@@ -1024,7 +1046,7 @@ is uploader-declared:
   so it can exceed the number of emitted quote batches. Broker packaging removes
   connection/decoder diagnostics and keeps only the site's fixed transport metadata,
   `{"kind":"sbi_websocket","origin":"https://sbi.brisk.jp/"}` for SBI
-  (`eshiten_websocket` and `https://next.e-shiten.brisk.jp/` for e-shiten).
+  (`eshiten_websocket` and `https://next.e-shiten.brisk.jp/` for e-shiten, and so on: `BROKER_TRANSPORT`).
   The service rejects any additional transport fields.
 - **Verified tables, no uploaded zip.** The service stores the uploaded tables
   once verified, each as its own object. The zip that carried them is never kept, so
@@ -1153,10 +1175,10 @@ only the lifecycle does.
 
 ### Sources
 
-The decoded schema accepts `historical_mock`, `synthetic_test`, `sbi_live` and
-`eshiten_live`. The small, self-authored `synthetic_test` fixture verifies uploads;
-filter by source when selecting market data. Uploaded decoded broker recordings retain
-`source=sbi_live` or `eshiten_live` and undergo canonical-field, integrity and continuity checks.
+The decoded schema accepts `historical_mock`, `synthetic_test` and the brokers' `sbi_live`,
+`eshiten_live`, `matsui_live`, `monex_live` and `smbcnikko_live`. The small, self-authored
+`synthetic_test` fixture verifies uploads; filter by source when selecting market data. Uploaded
+decoded broker recordings retain their `source` and undergo canonical-field, integrity and continuity checks.
 Their market accuracy is uploader-declared; they are not silently treated as
 reference-verified demo data. New raw-wire uploads remain unsupported. Objects stored
 while the archive was public (before policy version 6) sit outside any owner's prefix and
@@ -1184,7 +1206,7 @@ zip both functions run. `Historical`'s OHLCV bars therefore come only from the c
 
 ### Datasets and requests
 
-`XTKS.BRISK` (`publisher_id` 1) is an owner's live recordings, `sbi_live` and `eshiten_live`:
+`XTKS.BRISK` (`publisher_id` 1) is an owner's live recordings, from any of the five brokers (`LIVE` in `query_engine.py`):
 any broker's BRiSK is the same app and stream. `XTKS.BRISKDEMO` (`publisher_id` 2) is the
 public demo, read from the archive's one copy of its market tables under
 `reference/historical_mock/TIMELINE/` (the same for every identity; HTTP 404 until a verified

@@ -2,7 +2,7 @@
 
     import briskapi
 
-    feed = briskapi.connect(site="demo")       # live: the demo replay ("sbi" or "e-shiten": your broker's BRiSK)
+    feed = briskapi.connect(site="demo")       # live: the demo replay ("sbi", "e-shiten", ...: your broker's BRiSK)
     briskapi.Ticker("7203").quote()            # current auction quote
     for q in feed.quotes("7203"): ...          # or feed.on_quote(callback)
 
@@ -48,7 +48,7 @@ def current() -> Recording | Feed:
 
 _DEMO_ONLY = {'cache': None, 'speed': 1, 'limit_frames': None}
 _BROKER_ONLY = {'trace_protocol': False, 'profile': None, 'upload_market_data': None}
-SITES = ('demo', 'sbi', 'e-shiten')
+SITES = ('demo', *_brisk.SITES)   # the demo, then the brokers' BRiSK
 
 
 def connect(*, site=None, codes=None, history=False, upload=None, output=None, on_day=None, gateway=False, timeout=None,
@@ -59,7 +59,8 @@ def connect(*, site=None, codes=None, history=False, upload=None, output=None, o
     - site="demo": the public BRiSK Next demo. Not a live connection: a recording of 27 September 2021
       that BRiSK's demo site serves as files, downloaded (or, with cache=DIR, a copy downloaded before)
       and replayed at its recorded pace (`speed`; `limit_frames` stops early).
-    - site="sbi" or "e-shiten": your broker's live BRiSK (experimental), signing in as login(site) does
+    - site="sbi", "e-shiten", "matsui", "monex" or "smbcnikko": your broker's live BRiSK (Matsui's, Monex's
+      and SMBC Nikko's are the same app, not yet tried live), signing in as login(site) does
       unless login already did (`trace_protocol`, `profile`, `upload_market_data`).
 
     The feed records each trading day and uploads it to your private archive unless you opt out
@@ -85,8 +86,9 @@ def connect(*, site=None, codes=None, history=False, upload=None, output=None, o
 
 
 def login(site='sbi', *, cookies=None, remember=False) -> _brisk.Client:
-    """Sign in to your broker's BRiSK, site "sbi" (the default) or "e-shiten", with its session cookies: given
-    (copied from your logged-in browser), from the site's variable (BRISK_SBI_COOKIES, BRISK_ESHITEN_COOKIES;
+    """Sign in to your broker's BRiSK, site "sbi" (the default), "e-shiten", "matsui", "monex" or "smbcnikko",
+    with its session cookies: given (copied from your logged-in browser), from the site's variable
+    (BRISK_SBI_COOKIES, BRISK_ESHITEN_COOKIES, BRISK_MATSUI_COOKIES, BRISK_MONEX_COOKIES, BRISK_SMBCNIKKO_COOKIES;
     JSON) or saved by remember=True or `brisk login` (passkey). Ticker's and Market's broker data
     (candles, margin, turnover, lists, events, schedule, watchlist) then come from it, and
     connect(site=...) uses it."""

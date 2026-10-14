@@ -160,10 +160,10 @@
   }
  },
  "python/connect": {
-  "text": "`brisk live --site` と同じく、サイトを指定してライブフィードを開始し、`Ticker` と `Market` の既定のデータ源にします。`site=\"demo\"` は公開の BRiSK Next デモです。ライブの接続ではなく、デモサイトがファイルとして配信している2021年9月27日の記録を、ダウンロードし、固定したハッシュと照合して、記録されたペースで再生します。`cache=DIR` を指定すると、以前ダウンロードした同じファイルのコピーから再生します。`site=\"sbi\"` または `\"e-shiten\"` は、お使いの証券会社のライブの BRiSK です（[下記](/reference/python/broker_connect.md)）。最後まで正常に終わったセッションは、オプトアウトしない限り自分専用のアーカイブにアップロードされ、`output` を指定するとディスクにも残ります。コマンドラインでは `brisk live` を使います（[記録する](/guides/recording.md)を参照）。",
+  "text": "`brisk live --site` と同じく、サイトを指定してライブフィードを開始し、`Ticker` と `Market` の既定のデータ源にします。`site=\"demo\"` は公開の BRiSK Next デモです。ライブの接続ではなく、デモサイトがファイルとして配信している2021年9月27日の記録を、ダウンロードし、固定したハッシュと照合して、記録されたペースで再生します。`cache=DIR` を指定すると、以前ダウンロードした同じファイルのコピーから再生します。`site=\"sbi\"`、`\"e-shiten\"`、`\"matsui\"`、`\"monex\"`、`\"smbcnikko\"` は、お使いの証券会社のライブの BRiSK です（[下記](/reference/python/broker_connect.md)）。最後まで正常に終わったセッションは、オプトアウトしない限り自分専用のアーカイブにアップロードされ、`output` を指定するとディスクにも残ります。コマンドラインでは `brisk live` を使います（[記録する](/guides/recording.md)を参照）。",
   "returns": "[`Feed`](/reference/python/feed_quotes.md)。選んだすべての銘柄の状態をすでに持っています。",
   "params": {
-   "site": "`\"demo\"`、または `\"sbi\"`、`\"e-shiten\"`（お使いの証券会社のライブの BRiSK）。[`login`](/reference/python/broker_login.md) と同じ方法でサインインします（サインイン済みなら不要です）。",
+   "site": "`\"demo\"`、または `\"sbi\"`、`\"e-shiten\"`、`\"matsui\"`、`\"monex\"`、`\"smbcnikko\"`（お使いの証券会社のライブの BRiSK）。[`login`](/reference/python/broker_login.md) と同じ方法でサインインします（サインイン済みなら不要です）。",
    "codes": "デコードする銘柄（既定: 市場全体）。",
    "history": "すべての更新と約定を保持します（`Ticker.history()` と `.trades()` のため）。",
    "upload": "`False` なら何もアップロードしません。`None` なら設定に従います（既定ではオン）。",
@@ -211,7 +211,7 @@
   "returns": "`{prefix, source, trading_date, securities, batches, quote_updates, bytes, sha256}` の `Table`。",
   "params": {
    "date": "この取引日のみ（`YYYYMMDD`）。",
-   "source": "`sbi_live`、`eshiten_live`、`historical_mock`（デモ）。"
+   "source": "証券会社のもの（`sbi_live`、`eshiten_live`、`matsui_live`、`monex_live`、`smbcnikko_live`）、または `historical_mock`（デモ）。"
   }
  },
  "python/consent": {
@@ -413,19 +413,19 @@
   }
  },
  "python/broker_login": {
-  "text": "証券会社の BRiSK に、そのセッション Cookie でサインインします。Cookie は、直接渡す（ログイン済みのブラウザーからコピーしたもの）、サイトごとの環境変数（`BRISK_SBI_COOKIES`、`BRISK_ESHITEN_COOKIES`。JSON）から読む、または `remember=True` や `brisk login`（パスキー）で保存したものを使います。以後、`Ticker` と `Market` の証券会社のデータ（ローソク足、信用残、売買代金、リスト、イベント、取引スケジュール、ウォッチリスト）はこのセッションから取得され、`connect(site=...)` もこのセッションを使います。`briskapi.logout()` はセッションと保存した Cookie を消去します。",
+  "text": "証券会社の BRiSK に、そのセッション Cookie でサインインします。Cookie は、直接渡す（ログイン済みのブラウザーからコピーしたもの）、サイトごとの環境変数（`BRISK_SBI_COOKIES`、`BRISK_ESHITEN_COOKIES`、`BRISK_MATSUI_COOKIES`、`BRISK_MONEX_COOKIES`、`BRISK_SMBCNIKKO_COOKIES`。JSON）から読む、または `remember=True` や `brisk login`（パスキー）で保存したものを使います。以後、`Ticker` と `Market` の証券会社のデータ（ローソク足、信用残、売買代金、リスト、イベント、取引スケジュール、ウォッチリスト）はこのセッションから取得され、`connect(site=...)` もこのセッションを使います。`briskapi.logout()` はセッションと保存した Cookie を消去します。",
   "returns": "セッションのクライアント。",
   "params": {
-   "site": "`\"sbi\"` または `\"e-shiten\"`。",
+   "site": "`\"sbi\"`、`\"e-shiten\"`、`\"matsui\"`、`\"monex\"`、`\"smbcnikko\"`。",
    "cookies": "サイトのセッション Cookie。",
    "remember": "保存します（本人のみ読み取り可のファイル）。"
   }
  },
  "python/broker_connect": {
-  "text": "お使いの証券会社のライブの BRiSK フィードです。BRiSK 自身のデコーダーを Node 上で動かしてデコードします。閉じるまで取引日を次々に記録し、終わった日ごとにディスクに残し（`output`）、アップロードします。`output` を指定しない場合、終わった日は自分のアーカイブにだけ残り、アップロードもオフならどこにも残りません。コマンドラインでは `brisk live --site sbi` または `--site e-shiten` を使います（[記録する](/guides/recording.md)を参照）。",
+  "text": "お使いの証券会社のライブの BRiSK フィードです。BRiSK 自身のデコーダーを Node 上で動かしてデコードします。閉じるまで取引日を次々に記録し、終わった日ごとにディスクに残し（`output`）、アップロードします。`output` を指定しない場合、終わった日は自分のアーカイブにだけ残り、アップロードもオフならどこにも残りません。コマンドラインでは `brisk live --site sbi`（またはほかの証券会社のサイト）を使います（[記録する](/guides/recording.md)を参照）。",
   "returns": "[`Feed`](/reference/python/feed_quotes.md)。",
   "params": {
-   "site": "`\"sbi\"` または `\"e-shiten\"`。[`login`](/reference/python/broker_login.md) で作ったセッションを使い、なければ同じ方法でサインインします。",
+   "site": "`\"sbi\"`、`\"e-shiten\"`、`\"matsui\"`、`\"monex\"`、`\"smbcnikko\"`。[`login`](/reference/python/broker_login.md) で作ったセッションを使い、なければ同じ方法でサインインします。",
    "codes": "デコードする銘柄。",
    "history": "すべての更新と約定を保持します。",
    "upload": "`False` なら何もアップロードしません。",

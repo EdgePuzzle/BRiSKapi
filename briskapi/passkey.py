@@ -9,7 +9,7 @@ or from Python:
 
     from briskapi import passkey
     passkey.enroll(site="sbi")
-    signin = passkey.login()          # signin.cookies; signin.client for a site with a data client (SBI, e-shiten)
+    signin = passkey.login()          # signin.cookies; signin.client for a site with a data client (the five built in)
 
 How it works. A passkey is a key pair: the broker keeps the public half and your device keeps the
 private half, which proves it is you by signing a challenge the site sends. Normally that private half

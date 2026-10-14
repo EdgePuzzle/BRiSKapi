@@ -23,8 +23,9 @@ enroll` starts, when the first sign-in is not on the passkey login page) and use
 for a user ID box that must be filled before the passkey control works; enroll then asks for the ID and
 keeps it with the passkey; null for none). An id that is already built in only replaces the keys you give.
 
-SBI and e-shiten have a data client in briskapi (`briskapi.brisk`; `brisk live --site sbi`, `brisk live --site
-e-shiten`). For the other sites, signing in captures the BRiSK session cookies for your own use.
+All five have a data client in briskapi (`briskapi.brisk`; `brisk live --site sbi`, `--site e-shiten`, `--site
+matsui`, `--site monex`, `--site smbcnikko`); SBI's and e-shiten's have been used live, the others not yet. For a site
+you add, signing in captures the BRiSK session cookies for your own use.
 """
 from __future__ import annotations
 
@@ -66,18 +67,19 @@ class Site:
     launch_url: str | None = None
     enroll_url: str | None = None
     user_field: str | None = None
-    client: str | None = None  # The briskapi.brisk site ('sbi', 'e-shiten') that serves this BRiSK. Never set from a file.
+    client: str | None = None  # The briskapi.brisk site (a key of brisk.SITES) that serves this BRiSK. Never set from a file.
     source: str = 'built in'
 
 
 BUILTIN = {site.id: site for site in (
     Site('sbi', 'SBI Securities', 'https://login.sbisec.co.jp/', 'sbi.brisk.jp', 'パスキー認証でログイン',
          cookie_prefix='session_', client='sbi'),
-    Site('matsui', 'Matsui Securities', 'https://www.matsui.co.jp/login/', 'matsui.brisk.jp', 'パスキーでログイン'),
+    Site('matsui', 'Matsui Securities', 'https://www.matsui.co.jp/login/', 'matsui.brisk.jp', 'パスキーでログイン',
+         client='matsui'),
     Site('monex', 'Monex Securities', 'https://mst.monex.co.jp/pc/ITS/login/LoginIDPassword.jsp', 'monex.brisk.jp',
-         'パスキーでログイン'),
+         'パスキーでログイン', client='monex'),
     Site('smbcnikko', 'SMBC Nikko Securities', 'https://trade.smbcnikko.co.jp/Login/0/login/ipan_web/hyoji/',
-         'smbcnikko.brisk.jp'),
+         'smbcnikko.brisk.jp', client='smbcnikko'),
     # The passkey form takes the user ID and runs the ceremony in a popup; a first sign-in is by phone.
     Site('e-shiten', 'Tachibana e-shiten', 'https://tr2.e-shiten.jp/e-shiten?auth=passkey', 'next.e-shiten.brisk.jp',
          'パスキーを使う', cookie_prefix='session_', enroll_url='https://tr2.e-shiten.jp/e-shiten',

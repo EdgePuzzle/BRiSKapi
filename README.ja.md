@@ -4,8 +4,8 @@
 
 BRiSK の板寄せデータを扱う、非公式の Python API と `brisk` コマンドラインツールです。
 Databento 風の `Live` と `Historical` クライアントを備えています。ライブフィードの購読、記録データの任意時点での照会、
-自分専用の非公開アーカイブへの保存に加え、ご自身の口座で SBI証券や立花証券
-e支店（BRiSK Next）の BRiSK も利用できます（パスキーでのサインインにも対応）。本プロジェクトは独立したもので、BRiSK、立花証券、SBI証券、
+自分専用の非公開アーカイブへの保存に加え、ご自身の口座で証券会社（SBI証券、立花証券
+e支店の BRiSK Next、松井証券、マネックス証券、SMBC日興証券）の BRiSK も利用できます（パスキーでのサインインにも対応）。本プロジェクトは独立したもので、BRiSK、各証券会社、
 東京証券取引所（TSE）、日本取引所グループ（JPX）とは提携しておらず、承認も
 受けていません。
 
@@ -13,8 +13,8 @@ e支店（BRiSK Next）の BRiSK も利用できます（パスキーでのサ�
 > - **口座不要:** 2021年9月27日の公開 BRiSK Next デモ（寄り前のスナップショット
 >   1件と寄付から3分間）を、記録時のペースで再生したもの。リアルタイムの市場
 >   データではありません。
-> - **お使いの証券会社の BRiSK（SBI証券、または立花証券 e支店の BRiSK Next）を
->   使える場合:** BRiSK の市場データ（ローソク足、信用残、アラート、取引
+> - **お使いの証券会社の BRiSK（SBI証券、立花証券 e支店の BRiSK Next、松井証券、
+>   マネックス証券、SMBC日興証券）を使える場合:** BRiSK の市場データ（ローソク足、信用残、アラート、取引
 >   スケジュール、ウォッチリスト）と、ライブフィード。
 
 ## どの API を使うか
@@ -71,7 +71,7 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 
 | コマンドライン | Python | 記録するもの | ディスクに残るもの | アップロード |
 | --- | --- | --- | --- | --- |
-| `brisk live --site sbi` または `--site e-shiten` | `briskapi.connect(site="sbi")` | 証券会社のライブフィード。止めるまで、取引日ごとに1つの記録 | `--output DIR`（`output=`）を指定すると、終わった日ごと | 終わった日ごと（オプトアウトした場合を除く） |
+| `brisk live --site sbi`（または `e-shiten`、`matsui`、`monex`、`smbcnikko`） | `briskapi.connect(site="sbi")` | 証券会社のライブフィード。止めるまで、取引日ごとに1つの記録 | `--output DIR`（`output=`）を指定すると、終わった日ごと | 終わった日ごと（オプトアウトした場合を除く） |
 | `brisk live --site demo` | `briskapi.connect(site="demo")` | デモの再生（JSON の行として出力） | `--output DIR` を指定した場合 | 再生が最後まで終わった場合 |
 | `brisk record --output DIR` | `briskapi.record(DIR)` | デモの再生 | 常に `DIR` に | 再生が最後まで終わった場合 |
 
@@ -94,7 +94,7 @@ Parquet ファイルで、大きさは完成した記録とほぼ同じなので
 - **`--output` を指定しない場合**、終わった日は[自分のアーカイブ](#自分専用のアーカイブ)に送られ、手元の
   コピーは削除されます。さらにアップロードもオフにすると（`--no-upload`、または証券会社の市場データの記録なら
   `--no-upload-market-data`）、その日はどこにも残らないので、残すには `--output DIR` を付けてください。
-- **接続が切れても**、その日は失われません。`brisk live --site sbi`（または `--site e-shiten`）は、5秒後、続いて
+- **接続が切れても**、その日は失われません。`brisk live --site sbi`（またはほかの証券会社のサイト）は、5秒後、続いて
   10秒、30秒、1分、以後2分ごとに自動で再接続します。切れる前に記録した分はそれだけで完結した記録
   （`..._085800-101500`）として、日と同じように保存・アップロードされ、その日の残りは新しいスナップショットから
   記録されます（`..._102000-153512`）。欠けるのは途切れていた間だけで、クラウド API は2つをまとめて返します。
@@ -135,7 +135,7 @@ feed.wait()           # または feed.close()。`with briskapi.connect(...) as 
   ダウンロードし、固定したハッシュと照合して、記録されたペースで再生します（`speed`: `1` で実時間、
   `0` で最速。`limit_frames` で途中で止める）。`cache=DIR` を指定すると、以前ダウンロードした同じファイルの
   コピーから再生します。
-- `site="sbi"` または `site="e-shiten"`: お使いの証券会社のライブの BRiSK（[下記](#お使いの証券会社の-brisk)）。
+- `site="sbi"`、`"e-shiten"`、`"matsui"`、`"monex"`、`"smbcnikko"`: お使いの証券会社のライブの BRiSK（[下記](#お使いの証券会社の-brisk)）。
 
 そのほかのオプション: `codes`（銘柄コード）、`history=True`（`Ticker.history()` のために更新を保持）、
 `upload`、`output`、`on_day`、`gateway`。コールバックと
@@ -236,7 +236,7 @@ NautilusTrader のカタログや JSONL に書き出せます。全列の説明�
 ## お使いの証券会社の BRiSK
 
 同じクライアントで、SBI証券の BRiSK（[sbi.brisk.jp](https://sbi.brisk.jp)、既定のサイト）と
-立花証券 e支店の BRiSK Next（専用の項が続きます）を使えます。証券会社と BRiSK の契約が
+立花証券 e支店、松井証券、マネックス証券、SMBC日興証券の BRiSK（専用の項が続きます）を使えます。証券会社と BRiSK の契約が
 必要です。SBI では、ブラウザで sbi.brisk.jp にログインし、そのセッション Cookie を
 渡します。Cookie は DevTools からコピーするか、`pycookiecheat` の
 `chrome_cookies("https://sbi.brisk.jp")` で取得できます。パスキーで `briskapi` に
@@ -318,6 +318,28 @@ BRiSK は同時に1セッションまでで、別のタブやブラウザで開�
 相手を止めることがあります。記録やアップロードの前に、立花証券の BRiSK Next 利用規定で
 データの蓄積や二次利用についての定めを確認してください。
 
+### 松井証券、マネックス証券、SMBC日興証券
+
+松井証券（[matsui.brisk.jp](https://matsui.brisk.jp)）、マネックス証券
+（[monex.brisk.jp](https://monex.brisk.jp)）、SMBC日興証券
+（[smbcnikko.brisk.jp](https://smbcnikko.brisk.jp)）の BRiSK は、同じベンダーのアプリが各社のホストで
+動いているものなので、同じクライアントで使えます。`site="matsui"`、`"monex"`、`"smbcnikko"` を付けて、
+ブラウザの Cookie、サイトごとの環境変数（`BRISK_MATSUI_COOKIES`、`BRISK_MONEX_COOKIES`、
+`BRISK_SMBCNIKKO_COOKIES`。JSON）、またはパスキーでのサインイン（初回のみ `brisk enroll --site matsui`、
+その後は `brisk login`）を使います。
+
+```python
+briskapi.login("matsui", cookies={...})   # remember=True でほかの証券会社とは別に保存
+feed = briskapi.connect(site="matsui", codes=["7203"])   # ライブ
+```
+
+上記の説明は日ごとの記録とアップロードも含めてそのまま当てはまり（データ源は `matsui_live`、
+`monex_live`、`smbcnikko_live`）、各サイトの Cookie はそのサイトのホストにのみ送られます。この3社は
+まだ口座で試していません。サイトのアプリが SBI のものと違う場合、フィードは疑わしいものを記録せず、
+何を認識できなかったかを示すエラーで止まります（`--trace-protocol` で接続を表示）。どれも1ユーザーにつき
+BRiSK は1セッションまでなので、先にブラウザの BRiSK を閉じてください。記録やアップロードの前に、
+お使いの証券会社の BRiSK の規定でデータの蓄積や二次利用についての定めを確認してください。
+
 ## パスキーでのサインイン（試験的）
 
 近年は、パスキーでのサインインを求める証券会社が増えています。お使いの証券会社がそうなら、
@@ -351,9 +373,9 @@ Chrome と Node を使います）、Linux でもテストしています。
    パスキーのボタンを押すと、仮想オーセンティケーターが署名します。そのウィンドウで証券会社の
    サイトから BRiSK を開いてください（`--launch-url` を指定すれば自動で開きます）。`briskapi` が
    BRiSK のセッション Cookie を読み取って保存し、Chrome を閉じます。
-3. **あとは使うだけ。** SBI証券と e支店では、保存した Cookie を `brisk live --site sbi` または
-   `brisk live --site e-shiten` と `briskapi.brisk` API が使います。他の証券会社には `briskapi` の
-   データクライアントがまだないため、Cookie はご自身の利用のために保存される
+3. **あとは使うだけ。** 5社のどれでも、保存した Cookie を `brisk live --site sbi`（またはその証券会社の
+   サイト）と `briskapi.brisk` API が使います。ご自身で追加した証券会社には `briskapi` の
+   データクライアントがないため、Cookie はご自身の利用のために保存される
    （`~/.config/brisk/cookies/`）だけです。
 
 スマートフォンやパスワードマネージャーにある既存のパスキーには手を加えません。証券会社の
@@ -403,7 +425,7 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 
 | 呼び出し | 戻り値 |
 | --- | --- |
-| `briskapi.connect(site="demo" \| "sbi" \| "e-shiten")` | デモまたは証券会社の BRiSK のライブの `Feed`（既定のデータ源になる。`gateway=True` で `Live` にも配信） |
+| `briskapi.connect(site="demo" \| "sbi" \| "e-shiten" \| "matsui" \| "monex" \| "smbcnikko")` | デモまたは証券会社の BRiSK のライブの `Feed`（既定のデータ源になる。`gateway=True` で `Live` にも配信） |
 | `briskapi.Live()` | このコンピューターのフィードから Databento 風のライブのレコード: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False)` のあと、イテレーション、または `add_callback(fn)` / `add_stream(path)` と `start()`、`block_for_close(timeout)`。`stop()`、`symbology_map`（[上記](#ライブのレコードdatabento-風)） |
 | `Ticker(code).info()` | 銘柄名、売買単位、呼値の種別、基準値、値幅制限 |
 | `Ticker(code).quote(at=None)` | 買い・売り気配とその数量・件数、板の各側の上位10本（`bids`、`asks`）と引け条件付き注文の上位10本（`closing_bids`、`closing_asks`）、板全体の注文合計、予想約定価格・数量、成行・引け条件付きの数量、直近の約定、売買代金、銘柄の状態、`special_quote`（特別気配の側・価格・タイマーの終了時刻） |
@@ -428,9 +450,9 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | `Historical().metadata.list_datasets()` / `.list_schemas(dataset)` / `.list_fields(schema)` / `.list_publishers()` / `.get_dataset_range(dataset)` | カタログ、データセットにデータのある最初と最後の日付 |
 | `Historical().metadata.get_dataset_condition(dataset, start_date, end_date)` | 各日付が available か missing か、自分の記録がカバーする時間帯（日本時間） |
 | `Historical().metadata.get_record_count(...)` / `.get_cost(...)` | リクエストが返すレコード数、そのコスト（常に 0。無料で、上限あり） |
-| `Ticker(code).candles(interval)` / `.margin(days)` | 証券会社の BRiSK（SBI、e支店）自身のローソク足（`5m` は当日のみ、`1d`/`1w`/`1mo` がどこまでさかのぼるかは BRiSK 次第）、信用残と貸株料 |
+| `Ticker(code).candles(interval)` / `.margin(days)` | 証券会社の BRiSK 自身のローソク足（`5m` は当日のみ、`1d`/`1w`/`1mo` がどこまでさかのぼるかは BRiSK 次第）、信用残と貸株料 |
 | `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | 証券会社の BRiSK の市場データ |
-| `briskapi.login(site=..., cookies=None)` / `briskapi.logout()` | SBI（既定）または e支店の BRiSK のセッション。上の証券会社のデータと `connect(site=...)` が使う |
+| `briskapi.login(site=..., cookies=None)` / `briskapi.logout()` | 証券会社の BRiSK のセッション（既定は SBI）。上の証券会社のデータと `connect(site=...)` が使う |
 | `briskapi.passkey.enroll()` / `.login()` / `.forget()` | 証券会社の BRiSK へのパスキーでのサインイン |
 
 価格は円単位の浮動小数点数で、ベンダーの「値なし」（0）は `None` になります。
@@ -449,6 +471,7 @@ brisk live --site demo --codes 7203,6758 --quotes   # 気配の更新ごとに J
 brisk sites | enroll | login | forget       # Chrome 経由のパスキーで証券会社の BRiSK にサインイン（試験的）
 brisk live --site sbi --codes 7203          # SBI証券の BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_PROFILE）
 brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）または `brisk login` が保存したもの
+brisk live --site matsui --codes 7203       # 松井証券（または --site monex、--site smbcnikko）。Cookie は BRISK_MATSUI_COOKIES（JSON）または `brisk login` が保存したもの。まだ口座で未検証
 brisk live --site sbi --output days         # 日をまたいで動き続け、終わった日ごとに days/ に残し（例: sbi_live_20261013_085800-153512）、stderr に {"day": {...}} を1行出力
 brisk live --site sbi                       # 記録・アップロードし、briskapi.Live() に配信（--no-gateway で配信しない）。10秒ごと（ログでは1分ごと）に stderr に1行: その日、記録した時間、更新数とその速さ
 brisk record --output recordings/s1         # デモを記録（オプトアウトしない限りアップロード）
@@ -472,7 +495,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 | コマンド | Python |
 | --- | --- |
 | `brisk live --site demo`（`--cache DIR`） | `briskapi.connect(site="demo", gateway=True)`（`cache=DIR`。`--no-gateway` なら `gateway` なし） |
-| `brisk live --site sbi`、`--site e-shiten` | `briskapi.connect(site="sbi", gateway=True)` |
+| `brisk live --site sbi`（またはほかの証券会社） | `briskapi.connect(site="sbi", gateway=True)` |
 | `brisk record` | `briskapi.record()` |
 | `brisk query` | `briskapi.Historical().timeseries.get_range()` |
 | `brisk list`（`--deleted`、`--timing`） | `briskapi.recordings()`（`Archive().deleted()`、`.timing()`） |
@@ -481,11 +504,11 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 | `brisk enroll`、`login`、`forget` | `briskapi.passkey.enroll()`、`.login()`、`.forget()` |
 | `brisk export`、`brisk identity` | コマンドラインのみ |
 
-`brisk live --site sbi` と `--site e-shiten` は、止めるまで動き続け、取引日ごとに1つの記録を作ります。
+`brisk live --site sbi`（またはほかの証券会社のサイト）は、止めるまで動き続け、取引日ごとに1つの記録を作ります。
 取引終了後や休日に始めると、そう表示して次の取引日を待ちます。
 オプトアウトしない限り、終わった日ごとの市場データの記録とタイミングの要約を確認なしで
 アップロードします。`--no-upload-market-data` で記録を、`--no-upload` で両方をアップロードしなくなります
-（ディスクに残すには `--output DIR`）。`brisk list --source sbi_live`（または `eshiten_live`）で自分の証券会社の記録を
+（ディスクに残すには `--output DIR`）。`brisk list --source sbi_live`（または `eshiten_live`、`matsui_live`、`monex_live`、`smbcnikko_live`）で自分の証券会社の記録を
 一覧できます。どの `brisk live` も、`--no-gateway` を指定しない限り、このコンピューターの
 `briskapi.Live()` にフィードを配信します（[ライブのレコード](#ライブのレコードdatabento-風)）。
 
@@ -528,7 +551,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
   テーブルと結び付け、`brisk pull` はこれまでどおり検証したうえで完全な記録を返します
   （そのアーカイブへの最初のデモのアップロードだけは、記録全体を送ります）。IP アドレスは
   リクエスト回数などの制限にのみ、鍵付きハッシュとして使います。
-- **証券会社（SBI、e支店）のセッションでアップロードされる内容:** タイミングの要約（デコード
+- **証券会社のセッションでアップロードされる内容:** タイミングの要約（デコード
   時間、受信時のデータの遅れ、フレーム間隔のパーセンタイル、停滞回数、フレーム数、取引日、
   最初と最後の分。`briskapi.Archive().timing()` で一覧できます）と、取引日が終わった時点で
   その日のデコードした市場データの記録（銘柄マスター、価格、数量、板、約定、銘柄コード、

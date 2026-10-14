@@ -19,16 +19,16 @@ def write(tmp_path, document):
     return path
 
 
-def test_the_built_in_sites_are_five_brokers_and_sbi_and_e_shiten_have_a_data_client():
+def test_the_built_in_sites_are_the_five_brisk_brokers_each_with_its_data_client():
     assert list(sites.BUILTIN) == ['sbi', 'matsui', 'monex', 'smbcnikko', 'e-shiten']
     for site in sites.BUILTIN.values():
         assert site.cookie_host.endswith('.brisk.jp')
         assert urlsplit(site.login_url).scheme == 'https' and site.passkey_button and site.source == 'built in'
-    assert {site.id: site.client for site in sites.BUILTIN.values() if site.client} == {'sbi': 'sbi', 'e-shiten': 'e-shiten'}
-    for site in (sites.BUILTIN['sbi'], sites.BUILTIN['e-shiten']):
+        assert site.client == site.id
         assert urlsplit(brisk.SITES[site.client].origin).hostname == site.cookie_host, 'cookies go only to the client of that host'
-        assert site.cookie_prefix == 'session_'
-    assert all(site.cookie_host == f'{site.id}.brisk.jp' for site in sites.BUILTIN.values() if not site.client)
+    # The cookie names seen at SBI and e-shiten; the others' are not known yet, so any cookie counts.
+    assert {site.id: site.cookie_prefix for site in sites.BUILTIN.values()} == {
+        'sbi': 'session_', 'matsui': '', 'monex': '', 'smbcnikko': '', 'e-shiten': 'session_'}
 
 
 def test_e_shiten_starts_enrolling_at_its_phone_sign_in_and_types_the_user_id_before_the_passkey():

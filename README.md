@@ -4,8 +4,9 @@
 
 An unofficial Python API and `brisk` command line for BRiSK auction data, with
 Databento-style `Live` and `Historical` clients. Consume a live feed, query recordings at any
-point in time, keep them in your own private archive, and use BRiSK at SBI Securities or
-Tachibana e-shiten (BRiSK Next) with your own account, signing in with a passkey if you like. This
+point in time, keep them in your own private archive, and use BRiSK at your broker (SBI Securities,
+Tachibana e-shiten's BRiSK Next, Matsui, Monex or SMBC Nikko) with your own account, signing in with a
+passkey if you like. This
 is an independent project, not affiliated with or endorsed by BRiSK, Tachibana,
 SBI, TSE or JPX.
 
@@ -13,7 +14,7 @@ SBI, TSE or JPX.
 > - **No account needed:** the public BRiSK Next demo of 27 September 2021 (one
 >   pre-open snapshot and the first three minutes after the open), replayed at
 >   its recorded pace. This is not live market data.
-> - **With your broker's BRiSK (SBI Securities, or Tachibana e-shiten's BRiSK Next):**
+> - **With your broker's BRiSK (SBI Securities, Tachibana e-shiten's BRiSK Next, Matsui, Monex or SMBC Nikko):**
 >   BRiSK market data (candles, margin, alerts, schedule, watchlist) and a
 >   live feed.
 
@@ -70,7 +71,7 @@ Recording isn't a third API. The live calls record as they run, and `brisk live`
 
 | Command line | Python | Records | Kept on disk | Uploaded |
 | --- | --- | --- | --- | --- |
-| `brisk live --site sbi` or `--site e-shiten` | `briskapi.connect(site="sbi")` | Your broker's live feed, one recording per trading day, until you stop it | Each finished day, with `--output DIR` (`output=`) | Each finished day, unless you opt out |
+| `brisk live --site sbi` (or `e-shiten`, `matsui`, `monex`, `smbcnikko`) | `briskapi.connect(site="sbi")` | Your broker's live feed, one recording per trading day, until you stop it | Each finished day, with `--output DIR` (`output=`) | Each finished day, unless you opt out |
 | `brisk live --site demo` | `briskapi.connect(site="demo")` | The demo replay, printed as JSON lines | With `--output DIR` | If the replay completes |
 | `brisk record --output DIR` | `briskapi.record(DIR)` | The demo replay | Always, in `DIR` | If the replay completes |
 
@@ -138,7 +139,7 @@ feed.wait()           # or feed.close(); `with briskapi.connect(...) as feed:` a
   stream), which are downloaded, checked against pinned hashes and replayed at their recorded
   pace (`speed`: `1` real time, `0` as fast as possible; `limit_frames` stops early).
   `cache=DIR` replays a copy of those files downloaded before instead.
-- `site="sbi"` or `site="e-shiten"`: your broker's live BRiSK ([below](#your-brokers-brisk)).
+- `site="sbi"`, `"e-shiten"`, `"matsui"`, `"monex"` or `"smbcnikko"`: your broker's live BRiSK ([below](#your-brokers-brisk)).
 
 Other options: `codes`, `history=True` (keep updates for `Ticker.history()`), `upload`,
 `output`, `on_day` and `gateway`. Callbacks and iterators
@@ -238,7 +239,7 @@ the legacy `brisk-sbi-wire-jsonl-v1` format the tool no longer reads.
 ## Your broker's BRiSK
 
 The same client serves SBI Securities' BRiSK ([sbi.brisk.jp](https://sbi.brisk.jp), the
-default site) and Tachibana e-shiten's BRiSK Next (its own subsection follows); you need a
+default site) and those of Tachibana e-shiten, Matsui, Monex and SMBC Nikko (subsections follow); you need a
 BRiSK subscription with the broker. For SBI, log in on sbi.brisk.jp in your browser, then
 pass its session cookies: copy them from DevTools, or use `pycookiecheat`'s
 `chrome_cookies("https://sbi.brisk.jp")`. Or let `briskapi` sign in with your passkey
@@ -320,6 +321,28 @@ BRiSK session at a time: opening it in a second tab or browser has stopped the f
 record or upload, read what Tachibana's BRiSK Next terms say about storing and reusing
 its data.
 
+### Matsui, Monex and SMBC Nikko
+
+BRiSK for Matsui Securities ([matsui.brisk.jp](https://matsui.brisk.jp)), Monex Securities
+([monex.brisk.jp](https://monex.brisk.jp)) and SMBC Nikko Securities
+([smbcnikko.brisk.jp](https://smbcnikko.brisk.jp)) is the same vendor's app on hosts of their own, so the
+same client serves them: `site="matsui"`, `"monex"` or `"smbcnikko"`, with cookies from your browser, the
+site's variable (`BRISK_MATSUI_COOKIES`, `BRISK_MONEX_COOKIES`, `BRISK_SMBCNIKKO_COOKIES`; JSON) or a
+passkey sign-in (`brisk enroll --site matsui` once, then `brisk login`).
+
+```python
+briskapi.login("matsui", cookies={...})   # remember=True keeps them apart from the other brokers'
+feed = briskapi.connect(site="matsui", codes=["7203"])   # live
+```
+
+Everything above applies, daily recordings and uploads included (sources `matsui_live`,
+`monex_live`, `smbcnikko_live`), and each site's cookies go only to its own host. These three have
+not been tried with an account yet: should a site's app differ from SBI's, the feed stops with an
+error that says what it did not recognise (`--trace-protocol` shows the connection) rather than
+record anything doubtful. Each allows one BRiSK session per user, so close BRiSK in your browser
+first. Before you record or upload, read what your broker's BRiSK terms say about storing and
+reusing its data.
+
 ## Signing in with a passkey (experimental)
 
 Many brokers now have you sign in with a passkey. If yours does, `briskapi` can do the
@@ -351,9 +374,9 @@ without asking. The broker's site cannot tell the difference.
    login page and presses the passkey button, and the virtual authenticator signs. Open BRiSK from
    the broker's site in that window (or pass `--launch-url` to have it opened for you).
    `briskapi` reads the BRiSK session cookies, saves them and closes Chrome.
-3. **Then use it.** For SBI and e-shiten, `brisk live --site sbi` or `brisk live --site e-shiten` and the
-   `briskapi.brisk` API use the saved cookies. For the other brokers `briskapi` has no data client
-   yet, so the cookies are only saved (under `~/.config/brisk/cookies/`) for your own use.
+3. **Then use it.** For each of the five brokers, `brisk live --site sbi` (or its own site) and the
+   `briskapi.brisk` API use the saved cookies. For a broker you add yourself `briskapi` has no data
+   client, so the cookies are only saved (under `~/.config/brisk/cookies/`) for your own use.
 
 Your existing passkeys on your phone or in a password manager are not touched. The broker simply
 lists one more passkey, which you can delete in its security settings.
@@ -403,7 +426,7 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 
 | Call | Returns |
 | --- | --- |
-| `briskapi.connect(site="demo" \| "sbi" \| "e-shiten")` | Live `Feed` of the demo or your broker's BRiSK; becomes the default source (`gateway=True` also serves it to `Live`) |
+| `briskapi.connect(site="demo" \| "sbi" \| "e-shiten" \| "matsui" \| "monex" \| "smbcnikko")` | Live `Feed` of the demo or your broker's BRiSK; becomes the default source (`gateway=True` also serves it to `Live`) |
 | `briskapi.Live()` | Databento-style live records from the feed on this computer: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False)`, then iteration or `add_callback(fn)` / `add_stream(path)` with `start()` and `block_for_close(timeout)`; `stop()`, `symbology_map` ([above](#live-records-databento-style)) |
 | `Ticker(code).info()` | Name, lot size, tick type, base price and daily limits |
 | `Ticker(code).quote(at=None)` | Bid/ask with their quantities and orders, the ten best book levels per side (`bids`, `asks`) and of the closing-condition orders (`closing_bids`, `closing_asks`), the board's order totals, indicative price/volume, market-order and closing quantities, last trade, turnover, issue status and `special_quote` (side, price, when its timer ends) |
@@ -428,9 +451,9 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | `Historical().metadata.list_datasets()` / `.list_schemas(dataset)` / `.list_fields(schema)` / `.list_publishers()` / `.get_dataset_range(dataset)` | The catalogue; a dataset's first and last date with data |
 | `Historical().metadata.get_dataset_condition(dataset, start_date, end_date)` | Each date available or missing, and the clock windows (JST) your recordings cover |
 | `Historical().metadata.get_record_count(...)` / `.get_cost(...)` | How many records a request returns; its cost, always 0 (free, with quotas) |
-| `Ticker(code).candles(interval)` / `.margin(days)` | BRiSK's own price bars from your broker (SBI, e-shiten): `5m` today only, how far back `1d`/`1w`/`1mo` go is up to BRiSK; margin balances and lending fees |
+| `Ticker(code).candles(interval)` / `.margin(days)` | BRiSK's own price bars from your broker: `5m` today only, how far back `1d`/`1w`/`1mo` go is up to BRiSK; margin balances and lending fees |
 | `Market().turnover()` / `.lists()` / `.events()` / `.schedule()` / `.watchlist()` | Broker BRiSK market data |
-| `briskapi.login(site=..., cookies=None)` / `briskapi.logout()` | Your SBI (default) or e-shiten BRiSK session, for the broker data above and `connect(site=...)` |
+| `briskapi.login(site=..., cookies=None)` / `briskapi.logout()` | Your broker's BRiSK session (SBI by default), for the broker data above and `connect(site=...)` |
 | `briskapi.passkey.enroll()` / `.login()` / `.forget()` | Passkey sign-in to your broker's BRiSK |
 
 Prices are yen floats, with `None` for the vendor's zero "unavailable" value.
@@ -449,6 +472,7 @@ brisk live --site demo --codes 7203,6758 --quotes   # one JSON object per quote 
 brisk sites | enroll | login | forget       # sign in to your broker's BRiSK with a passkey through Chrome (experimental)
 brisk live --site sbi --codes 7203          # BRiSK at SBI Securities; cookies from BRISK_SBI_COOKIES (JSON) or `brisk login`; --trace-protocol shows the handshake, wire details in BRISK_PROFILE
 brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; cookies from BRISK_ESHITEN_COOKIES (JSON) or `brisk login`
+brisk live --site matsui --codes 7203       # Matsui (or --site monex, --site smbcnikko); cookies from BRISK_MATSUI_COOKIES (JSON) or `brisk login`; not yet tried live
 brisk live --site sbi --output days         # runs day after day; keeps each finished day in days/ (e.g. sbi_live_20261013_085800-153512) and prints a {"day": {...}} line on stderr
 brisk live --site sbi                       # records, uploads and serves briskapi.Live() (--no-gateway: serves nothing), with a line on stderr every 10 s (a minute in a log): the day, how long it has recorded, its updates and their rate
 brisk record --output recordings/s1         # record the demo (uploaded unless you opt out)
@@ -472,7 +496,7 @@ Each command is the command-line form of a Python call:
 | Command | Python |
 | --- | --- |
 | `brisk live --site demo` (`--cache DIR`) | `briskapi.connect(site="demo", gateway=True)` (`cache=DIR`; `--no-gateway`: without `gateway`) |
-| `brisk live --site sbi`, `--site e-shiten` | `briskapi.connect(site="sbi", gateway=True)` |
+| `brisk live --site sbi` (or another broker) | `briskapi.connect(site="sbi", gateway=True)` |
 | `brisk record` | `briskapi.record()` |
 | `brisk query` | `briskapi.Historical().timeseries.get_range()` |
 | `brisk list` (`--deleted`, `--timing`) | `briskapi.recordings()` (`Archive().deleted()`, `.timing()`) |
@@ -481,10 +505,10 @@ Each command is the command-line form of a Python call:
 | `brisk enroll`, `login`, `forget` | `briskapi.passkey.enroll()`, `.login()`, `.forget()` |
 | `brisk export`, `brisk identity` | Command line only |
 
-`brisk live --site sbi` and `--site e-shiten` run until you stop them, one recording per trading
-day; started after the close or on a holiday, they say so and wait for the next trading day. Unless you opt out, they upload each finished day's market recording and timing summary
+`brisk live --site sbi` (or another broker's site) runs until you stop it, one recording per trading
+day; started after the close or on a holiday, it says so and waits for the next trading day. Unless you opt out, it uploads each finished day's market recording and timing summary
 without asking; `--no-upload-market-data` stops uploading the recordings and `--no-upload` both
-(add `--output DIR` to keep them on disk). `brisk list --source sbi_live` (or `eshiten_live`) lists
+(add `--output DIR` to keep them on disk). `brisk list --source sbi_live` (or `eshiten_live`, `matsui_live`, `monex_live`, `smbcnikko_live`) lists
 your broker recordings. Every `brisk live` also serves its feed to `briskapi.Live()` on this computer
 ([Live records](#live-records-databento-style)) unless you pass `--no-gateway`.
 
@@ -527,7 +551,7 @@ Python), until you decide with `brisk consent --accept` or `--revoke`
   demo's market tables, and `brisk pull` returns the complete recording, verified as before.
   (The very first demo upload to an archive sends the whole recording.) Your IP address is
   used only for rate limits, as a keyed hash.
-- **What a broker session (SBI, e-shiten) uploads:** a timing summary (percentiles of
+- **What a broker session uploads:** a timing summary (percentiles of
   decode time, data age at receipt and frame spacing, a stall count, the frame count, the
   trading date and the first and last minute; `briskapi.Archive().timing()` lists yours)
   and, once a trading day has ended, that day's decoded market recording: securities master,

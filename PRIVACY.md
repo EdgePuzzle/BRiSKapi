@@ -2,7 +2,7 @@
 
 [English](PRIVACY.md) | [日本語](PRIVACY.ja.md)
 
-Policy version 8, effective 13 October 2026. Applies to the `brisk` Python API and
+Policy version 9, effective 14 October 2026. Applies to the `brisk` Python API and
 CLI in this repository, the private recording archive they upload to and its cloud API.
 
 ## Your private archive
@@ -31,7 +31,7 @@ wire-format sample capture.
   it can't be restored, and the storage removes it within a day.
 - The archive's operator (below) runs the storage and can access what it holds, as with
   any hosted service. The operator does not publish or share it.
-- **Your bars.** For each trading day of your broker recordings (SBI or e-shiten), the
+- **Your bars.** For each trading day of your broker recordings (SBI, e-shiten, Matsui, Monex or SMBC Nikko), the
   archive builds OHLCV bars (open, high, low, close and volume per security, from one second
   to one day) from the trades in your own current recordings of that day, counting each trade
   once, and keeps them under your owner ID. They hold only the bars your recordings cover
@@ -50,8 +50,8 @@ Uploads are on by default. The first time you record, package or open a live ses
 the command line, the tool shows a short notice of everything described below and asks
 once. Pressing Enter accepts, and the choice is saved for future runs. After that, every
 clean and complete session is uploaded to your private archive without further prompts: demo sessions (`brisk record`, `brisk live`,
-`briskapi.connect()`, `briskapi.record()`), and broker sessions (SBI or Tachibana
-e-shiten: `brisk live --site sbi`, `--site e-shiten`, `briskapi.connect(site=...)`), which upload a timing
+`briskapi.connect()`, `briskapi.record()`), and broker sessions (SBI, Tachibana e-shiten, Matsui,
+Monex or SMBC Nikko: `brisk live --site sbi` or another broker's site, `briskapi.connect(site=...)`), which upload a timing
 summary and their decoded market recording. A broker session records one trading day after
 another until you stop it, and each day is uploaded once it ends (when the site serves the
 next trading date, or the server closes the stream). If the connection to your broker's BRiSK
@@ -93,14 +93,15 @@ for everyone, so the archive keeps them once and each demo upload sends and stor
 own timing table; downloading it returns the whole recording.
 
 - **Market data you recorded**: the BRiSK demo's securities master and decoded auction
-  quotes, or a broker session's (SBI or e-shiten) decoded securities
+  quotes, or a broker session's decoded securities
   master and auction quotes (prices, quantities, turnover, issue status, codes, flags and
   source clocks; on each side of the order book the ten best prices holding orders, with
   their quantities and order counts, the same for the closing-condition orders, and the
   whole board's order totals); and every trade, with its time, price, shares and side,
   including those the session's snapshot restores from earlier that day. Version 5 added
   the order book, turnover and broker issue status; version 6 the trades, the
-  closing-condition books and the board totals. Demo content is checked against the pinned
+  closing-condition books and the board totals; version 9 the same from Matsui, Monex and SMBC
+  Nikko sessions. Demo content is checked against the pinned
   reference replay. Broker content is uploader-declared, with exact field and continuity
   checks rather than a reference replay.
 - **Local timing measurements**: per-frame decode time (`decode_ns`), your computer's
@@ -112,8 +113,8 @@ own timing table; downloading it returns the whole recording.
   sizes and SHA-256).
 
 Broker packages include per-frame receipt/decode timing and session duration. They retain
-only the site's fixed WebSocket origin as transport provenance (`sbi.brisk.jp` or
-`next.e-shiten.brisk.jp`); connection and decoder diagnostics are removed before packaging.
+only the site's fixed WebSocket origin as transport provenance (`sbi.brisk.jp`,
+`next.e-shiten.brisk.jp`, `matsui.brisk.jp`, `monex.brisk.jp` or `smbcnikko.brisk.jp`); connection and decoder diagnostics are removed before packaging.
 
 ## What is never collected
 
@@ -124,21 +125,23 @@ prove which owner ID a request is for; the service keeps the owner ID, never the
 archive service accepts only the fields listed above and rejects any recording that
 contains other fields.
 
-## Broker BRiSK (SBI, e-shiten)
+## Broker BRiSK
 
-The BRiSK site client (`briskapi.brisk`; `brisk live --site sbi` for SBI, `site="e-shiten"` and
-`brisk live --site e-shiten` for Tachibana e-shiten BRiSK Next) uses session cookies
-from your own browser. They are credentials:
+The BRiSK site client (`briskapi.brisk`; `brisk live --site sbi` for SBI, and `site=` and
+`brisk live --site` `e-shiten` for Tachibana e-shiten BRiSK Next, `matsui` for Matsui, `monex` for
+Monex and `smbcnikko` for SMBC Nikko) uses session cookies from your own browser. They are credentials:
 
-- They are sent only to the site that issued them, `https://sbi.brisk.jp` or
-  `https://next.e-shiten.brisk.jp`, together with the API token it issues. The
+- They are sent only to the site that issued them (`https://sbi.brisk.jp`,
+  `https://next.e-shiten.brisk.jp`, `https://matsui.brisk.jp`, `https://monex.brisk.jp` or
+  `https://smbcnikko.brisk.jp`), together with the API token it issues. The
   client never follows redirects, so they can't be forwarded elsewhere. The live
   stream may be on another BRiSK host (`api.brisk.jp`); like a browser, the client
   sends it the session named in the site's boot response, not your cookies, and
   refuses a stream outside `brisk.jp`.
 - They stay in memory unless you call `briskapi.login(..., remember=True)`, which saves
-  them to `~/.config/brisk/sbi-cookies.json` (`e-shiten-cookies.json` for e-shiten;
-  or `$XDG_CONFIG_HOME/brisk/`), readable only by you. `briskapi.logout()` deletes both.
+  them to `~/.config/brisk/sbi-cookies.json` (`<site>-cookies.json` for the others, such as
+  `e-shiten-cookies.json`; or `$XDG_CONFIG_HOME/brisk/`), readable only by you. `briskapi.logout()`
+  deletes them.
 - The live host receives them through its environment, not its command line.
 - `brisk enroll` / `brisk login` (passkey sign-in to the broker you choose: SBI, Matsui, Monex,
   SMBC Nikko, Tachibana e-shiten or one you add) capture a passkey that you register at that broker and use it to
@@ -150,16 +153,15 @@ from your own browser. They are credentials:
   folder), is passed to the sign-in helper over stdin and never on a command line,
   and is never logged, uploaded or included in any recording. `brisk forget` deletes it here;
   remove it at the broker as well. The user ID is typed into the broker's login page and is never
-  logged either. SBI's and e-shiten's cookies are saved as described above; those of a broker
-  without a data client are kept in an owner-only file under `~/.config/brisk/cookies/`. The Chrome profile used for sign-in is
+  logged either. The five brokers' cookies are saved as described above; those of a broker you
+  add, which has no data client, are kept in an owner-only file under `~/.config/brisk/cookies/`. The Chrome profile used for sign-in is
   temporary and deleted afterwards (one left by a force-killed run is removed at the next start),
   and only the BRiSK host's cookies are taken from it.
-- With uploads on, each trading day of a broker session's decoded market recording (SBI or
-  e-shiten) is uploaded after that day ends, the part of a day before a lost connection once the
+- With uploads on, each trading day of a broker session's decoded market recording is uploaded after that day ends, the part of a day before a lost connection once the
   session reconnects, and the day so far when you stop the session, or when it crashes or is
   killed (repaired, as above). `--no-upload-market-data` or
   `briskapi.connect(site=..., upload_market_data=False)` keeps it local.
-- With uploads on, a broker session (SBI or e-shiten) uploads one **timing summary** per
+- With uploads on, a broker session uploads one **timing summary** per
   trading day (per part of a day, when a lost connection or a stop splits it) to your private
   archive when the day ends, or is stopped (after at least 100 frames): the
   p50/p90/p99/max of per-frame decode time, of the feed clock's age at local receipt and of

@@ -60,11 +60,11 @@ live architecture reference; it is not a verified Tachibana BRiSK Next connector
 The reader also polls every 500 ms and extracts QR events, which does not provide
 the complete auction state this collector needs.
 
-briskapi's own broker live feed (`briskapi.connect(site=...)`, `brisk live --site sbi` or
-`--site e-shiten`) does not use a browser or CDP. `briskapi/decoder/brisk.cjs` logs in
+briskapi's own broker live feed (`briskapi.connect(site=...)`, `brisk live --site sbi` or another
+broker's site) does not use a browser or CDP. `briskapi/decoder/brisk.cjs` logs in
 with your session cookies, downloads the site's decoder, master and snapshot, opens the
 WebSocket itself and runs the same Node `Decoder` as this demo host (protocol version
-18000 for the brokers' BRiSK: SBI, e-shiten). It is experimental and has not been
+18000 for the brokers' BRiSK: SBI, e-shiten, Matsui, Monex, SMBC Nikko). It is experimental and has not been
 validated against a live broker session.
 
 Its 18000 master record layout, the session schedule and the catch-up can be checked
@@ -237,7 +237,7 @@ node tools/brisk_mock/benchmark.cjs /tmp/brisk-mock-cache
 `tools/brisk_mock/test_reference.py` (same cache variable) replays the demo and
 checks that it matches the archive's committed reference fingerprint, which the
 service uses to accept only genuine demo replays. Uploaded live broker recordings
-(SBI, e-shiten) have separate structural and continuity checks without a reference replay.
+have separate structural and continuity checks without a reference replay.
 
 The last check uses installed Playwright/Chromium and compares six auction fields
 for six securities with the public demo's own JS accessors while its tutorial

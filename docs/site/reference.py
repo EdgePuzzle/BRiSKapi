@@ -223,18 +223,19 @@ PYTHON = [
            'Start a live feed and make it the default source for `Ticker` and `Market`, from a site, as `brisk live --site` '
            'does. `site="demo"` is the public BRiSK Next demo: not a live connection but a recording of 27 September '
            '2021 that the demo site serves as files, downloaded, checked against pinned hashes and replayed at its recorded '
-           'pace; `cache=DIR` replays a copy of those files downloaded before. `site="sbi"` or `"e-shiten"` is your '
-           'broker\'s live BRiSK ([below](/reference/python/broker_connect.md)). A complete session is uploaded to your private '
+           'pace; `cache=DIR` replays a copy of those files downloaded before. `site="sbi"`, `"e-shiten"`, `"matsui"`, `"monex"` or '
+           '`"smbcnikko"` is your broker\'s live BRiSK ([below](/reference/python/broker_connect.md)). A complete session is uploaded to your private '
            'archive unless you opt out; `output` also keeps it on disk. On the command line: `brisk live` (see '
            '[Recording](/guides/recording.md)).',
-           'briskapi.connect(\n    *,\n    site: str,                              # "demo", "sbi" or "e-shiten"\n'
+           'briskapi.connect(\n    *,\n    site: str,                              # "demo", or a broker: "sbi", ...\n'
            '    codes: list[str] | None = None,\n    history: bool = False,\n    upload: bool | None = None,\n'
            '    output: str | Path | None = None,\n    on_day: Callable | None = None,\n    gateway: bool = False,\n'
            '    timeout: float | None = None,\n    node: str = "node",\n    cache: str | Path | None = None,        # the demo\n'
            '    speed: float = 1,                       # the demo\n'
            '    limit_frames: int | None = None,        # the demo\n    trace_protocol: bool = False,           # a broker\n'
            '    profile: dict | None = None,            # a broker\n    upload_market_data: bool | None = None,  # a broker\n) -> Feed',
-           [P('site', 'str', '`"demo"`, or `"sbi"` or `"e-shiten"`: your broker\'s live BRiSK, signing in as '
+           [P('site', 'str', '`"demo"`, or `"sbi"`, `"e-shiten"`, `"matsui"`, `"monex"` or `"smbcnikko"`: your '
+              'broker\'s live BRiSK, signing in as '
               '[`login`](/reference/python/broker_login.md) does unless it already has.', required=True),
             P('codes', 'list[str] | None', 'Securities to decode (default: the whole market).'),
             P('history', 'bool', 'Keep every update and trade, for `Ticker.history()` and `.trades()`.'),
@@ -290,7 +291,8 @@ PYTHON = [
            'Your recordings in your private archive.',
            'briskapi.recordings(\n    date: str | None = None,\n    source: str | None = None,\n) -> Table',
            [P('date', 'str | None', 'Only this trading date (`YYYYMMDD`).'),
-            P('source', 'str | None', '`sbi_live`, `eshiten_live` or `historical_mock` (the demo).')],
+            P('source', 'str | None', 'A broker\'s (`sbi_live`, `eshiten_live`, `matsui_live`, `monex_live`, '
+              '`smbcnikko_live`) or `historical_mock` (the demo).')],
            'A `Table` of `{prefix, source, trading_date, securities, batches, quote_updates, bytes, sha256}`.',
            {'Python': 'import briskapi\n\nprint(briskapi.recordings(source="sbi_live").to_pandas())', 'CLI': 'brisk list --source sbi_live'},
            {'Python': '                                      prefix    source trading_date  securities  batches  quote_updates     bytes  …\n'
@@ -508,11 +510,12 @@ ARCHIVE = [
 BROKER = [
     Method('python/broker_login', 'briskapi.login', 'login',
            'Sign in to your broker\'s BRiSK with its session cookies: given (copied from your logged-in browser), from the '
-           'site\'s variable (`BRISK_SBI_COOKIES`, `BRISK_ESHITEN_COOKIES`; JSON) or saved by `remember=True` or by '
+           'site\'s variable (`BRISK_SBI_COOKIES`, `BRISK_ESHITEN_COOKIES`, `BRISK_MATSUI_COOKIES`, `BRISK_MONEX_COOKIES`, '
+           '`BRISK_SMBCNIKKO_COOKIES`; JSON) or saved by `remember=True` or by '
            '`brisk login` (passkey). `Ticker` and `Market`\'s broker data (candles, margin, turnover, lists, events, schedule, '
            'watchlist) then come from it, and `connect(site=...)` uses it. `briskapi.logout()` forgets it and the saved cookies.',
            'briskapi.login(\n    site: str = "sbi",\n    *,\n    cookies: dict | None = None,\n    remember: bool = False,\n) -> Client',
-           [P('site', 'str', '`"sbi"` or `"e-shiten"`.'), P('cookies', 'dict | None', 'The site\'s session cookies.'),
+           [P('site', 'str', '`"sbi"`, `"e-shiten"`, `"matsui"`, `"monex"` or `"smbcnikko"`.'), P('cookies', 'dict | None', 'The site\'s session cookies.'),
             P('remember', 'bool', 'Save them (an owner-only file).')], 'The session client.',
            {'Python': 'import briskapi\n\nbriskapi.login("e-shiten")   # BRISK_ESHITEN_COOKIES, or cookies saved by `brisk login`'},
            {'Python': '<briskapi.brisk.Client object>'}, illustrative=True),
@@ -520,12 +523,12 @@ BROKER = [
            'Your broker\'s live BRiSK feed, decoded by BRiSK\'s own decoder under Node. It records one trading '
            'day after another until closed, keeping (`output`) and uploading each finished day. Without `output`, a '
            'finished day is kept only in your archive, and with uploads off, nowhere. On the command line: '
-           '`brisk live --site sbi` or `--site e-shiten` (see [Recording](/guides/recording.md)).',
+           '`brisk live --site sbi` or another broker\'s site (see [Recording](/guides/recording.md)).',
            'briskapi.connect(\n    *,\n    site: str,\n    codes: list[str] | None = None,\n    history: bool = False,\n'
            '    upload: bool | None = None,\n    upload_market_data: bool | None = None,\n    output: str | Path | None = None,\n'
            '    on_day: Callable | None = None,\n    gateway: bool = False,\n    trace_protocol: bool = False,\n'
            '    profile: dict | None = None,\n    timeout: float | None = None,\n) -> Feed',
-           [P('site', 'str', '`"sbi"` or `"e-shiten"`. Uses the session [`login`](/reference/python/broker_login.md) made, '
+           [P('site', 'str', '`"sbi"`, `"e-shiten"`, `"matsui"`, `"monex"` or `"smbcnikko"`. Uses the session [`login`](/reference/python/broker_login.md) made, '
               'or signs in as it does.', required=True),
             P('codes', 'list[str] | None', 'Securities to decode.'), P('history', 'bool', 'Keep every update and trade.'),
             P('upload', 'bool | None', '`False` uploads nothing.'),

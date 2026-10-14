@@ -336,15 +336,18 @@ def test_the_site_supplies_the_defaults_and_the_chosen_site_is_remembered(tmp_pa
 
 def test_a_site_without_a_data_client_keeps_its_cookies_in_a_file_and_leaves_the_sbi_client_alone(tmp_path, helper):
     helper('login-ok')
-    store = saved(tmp_path, {'site': 'monex', 'credential': PASSKEY})
-    signin = passkey.login(store=store)
-    assert signin.site.id == 'monex' and signin.client is None and brisk._client is None
-    file = tmp_path / 'config' / 'brisk' / 'cookies' / 'monex.json'
+    mine = tmp_path / 'sites.json'   # a broker you add has no data client
+    mine.write_text(json.dumps({'sites': [{'id': 'mine', 'name': 'Mine', 'login_url': 'https://broker.example/login',
+                                           'cookie_host': 'mine.brisk.jp', 'passkey_button': 'パスキーでログイン'}]}))
+    store = saved(tmp_path, {'site': 'mine', 'credential': PASSKEY})
+    signin = passkey.login(store=store, sites_file=mine)
+    assert signin.site.id == 'mine' and signin.client is None and brisk._client is None
+    file = tmp_path / 'config' / 'brisk' / 'cookies' / 'mine.json'
     assert signin.saved_to == file and json.loads(file.read_text(encoding='utf-8')) == {'session_x': 'cookie-value', 'other': 'o'}
     assert_private(file, 0o600)
     assert_private(file.parent, 0o700)
     assert not (tmp_path / 'config' / 'brisk' / 'sbi-cookies.json').exists()
-    assert passkey.login(store=store, remember=False).saved_to is None
+    assert passkey.login(store=store, remember=False, sites_file=mine).saved_to is None
 
 
 def test_login_without_remember_keeps_the_sbi_cookies_in_memory(tmp_path, helper):
@@ -615,7 +618,7 @@ def test_cli_sites_lists_the_built_ins_and_your_own(tmp_path, capsys):
     cli.main(['sites'])
     lines = capsys.readouterr().out.splitlines()
     assert [line.split()[0] for line in lines] == ['sbi', 'matsui', 'monex', 'smbcnikko', 'e-shiten']
-    assert [line.split()[0] for line in lines if 'data client: yes' in line] == ['sbi', 'e-shiten']
+    assert [line.split()[0] for line in lines if 'data client: yes' in line] == ['sbi', 'matsui', 'monex', 'smbcnikko', 'e-shiten']
     assert 'next.e-shiten.brisk.jp' in lines[-1]
     path = tmp_path / 'config' / 'brisk' / 'sites.json'
     path.parent.mkdir(parents=True)

@@ -1,9 +1,10 @@
 """Your broker's BRiSK session: login, REST data and a live feed.
 
 Each broker runs BRiSK on its own address. SBI Securities' (sbi.brisk.jp, the default
-site) and Tachibana e-shiten's BRiSK Next (next.e-shiten.brisk.jp) are the same app, so one
-client serves both: briskapi.login(site="e-shiten", cookies={...}), or `brisk login` after
-`brisk enroll --site e-shiten`. This module is its implementation; the calls are briskapi's:
+site), Tachibana e-shiten's BRiSK Next (next.e-shiten.brisk.jp), Matsui's, Monex's and SMBC
+Nikko's (matsui, monex, smbcnikko.brisk.jp) are the same app, so one client serves them all:
+briskapi.login(site="e-shiten", cookies={...}), or `brisk login` after `brisk enroll --site e-shiten`.
+This module is its implementation; the calls are briskapi's:
 
     import briskapi
 
@@ -50,9 +51,14 @@ class _Site(NamedTuple):
     source: str  # the archive's label for its sessions
 
 
-# Brokers whose BRiSK is this app; decoder/brisk.cjs keeps the same table.
+# Brokers whose BRiSK is this app; decoder/brisk.cjs keeps the same table, briskapi.schema their sources and
+# transports. SBI's and e-shiten's have been used live; Matsui's, Monex's and SMBC Nikko's are the same
+# vendor's app on their own hosts, not yet tried with an account.
 SITES = {'sbi': _Site('https://sbi.brisk.jp', 'SBI BRiSK', 'BRISK_SBI_COOKIES', 'sbi_live'),
-         'e-shiten': _Site('https://next.e-shiten.brisk.jp', 'e-shiten BRiSK Next', 'BRISK_ESHITEN_COOKIES', 'eshiten_live')}
+         'e-shiten': _Site('https://next.e-shiten.brisk.jp', 'e-shiten BRiSK Next', 'BRISK_ESHITEN_COOKIES', 'eshiten_live'),
+         'matsui': _Site('https://matsui.brisk.jp', 'Matsui BRiSK', 'BRISK_MATSUI_COOKIES', 'matsui_live'),
+         'monex': _Site('https://monex.brisk.jp', 'Monex BRiSK', 'BRISK_MONEX_COOKIES', 'monex_live'),
+         'smbcnikko': _Site('https://smbcnikko.brisk.jp', 'SMBC Nikko BRiSK', 'BRISK_SMBCNIKKO_COOKIES', 'smbcnikko_live')}
 ORIGIN = SITES['sbi'].origin
 DECODER = Path(__file__).resolve().parent / 'decoder' / 'brisk.cjs'
 INTERVALS = ('5m', '1d', '1w', '1mo')
@@ -246,7 +252,8 @@ _client: Client | None = None
 
 def _login(site='sbi', cookies=None, remember=False) -> Client:
     """briskapi.login: BRiSK session cookies for `site`, given, from the site's variable (BRISK_SBI_COOKIES,
-    BRISK_ESHITEN_COOKIES; JSON) or saved for that site with remember=True or by `brisk login`."""
+    BRISK_ESHITEN_COOKIES, BRISK_MATSUI_COOKIES, BRISK_MONEX_COOKIES, BRISK_SMBCNIKKO_COOKIES; JSON) or saved
+    for that site with remember=True or by `brisk login`."""
     if isinstance(site, dict):
         raise TypeError('Pass the cookies by name: briskapi.login(cookies={...})')
     global _client

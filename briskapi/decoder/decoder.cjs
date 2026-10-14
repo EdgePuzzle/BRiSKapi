@@ -250,7 +250,7 @@ function checkMasterFile(master, data) {
 }
 
 class Decoder {
-  // options.protocolVersion: 16000 for the Next demo (default), 18000 for the brokers' BRiSK (SBI, e-shiten).
+  // options.protocolVersion: 16000 for the Next demo (default), 18000 for the brokers' BRiSK.
   // options.callbacks: { send(Buffer), heartbeat(ns BigInt), frameNumbers(Array), basePrice(issueIndex),
   //   authError(), marketFinished() }, the vendor client's six WASM callbacks.
   // options.boot: { exceptional_sq, base_prices } from the app boot response, applied in the

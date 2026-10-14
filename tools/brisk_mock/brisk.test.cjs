@@ -321,7 +321,26 @@ test('e-shiten: its own address, a relative bundle, a templated decoder and the 
   assert.equal(bootstrap.input_transport.origin, 'https://next.e-shiten.brisk.jp/');
   assert.equal(bootstrap.input_transport.ws_host, 'api.brisk.jp');
   assert.equal(batches.at(-1).type, 'end');
-  await assert.rejects(live({ cookies: { s: 'v' }, site: 'matsui', emit: async () => {} }), /Unknown BRiSK site "matsui"/);
+  await assert.rejects(live({ cookies: { s: 'v' }, site: 'rakuten', emit: async () => {} }), /Unknown BRiSK site "rakuten"; use one of: sbi, e-shiten, matsui, monex, smbcnikko/);
+});
+
+test('Matsui, Monex and SMBC Nikko: each its own address and label, the same app as SBI\'s', { skip: !cache }, async () => {
+  const { files, chunks } = demo();
+  for (const [site, host, source] of [['matsui', 'matsui.brisk.jp', 'matsui_live'], ['monex', 'monex.brisk.jp', 'monex_live'],
+    ['smbcnikko', 'smbcnikko.brisk.jp', 'smbcnikko_live']]) {
+    const { fetchImpl } = server(files);
+    const origins = new Set(), batches = [];
+    await live({ cookies: { s: 'v' }, codes: ['7203'], emit: async b => batches.push(b), site,
+      fetchImpl: async (url, init) => { origins.add(url.origin); return fetchImpl(url, init); },
+      WebSocketImpl: socketFrom(chunks), protocolVersion: 16000 });
+    assert.deepEqual([...origins], [`https://${host}`], 'nothing goes to another host');
+    assert.equal(String(socketFrom.last.url), `wss://${host}/realtime/0?session=abc`);
+    assert.deepEqual(socketFrom.last.init.headers, { origin: `https://${host}`, cookie: 's=v' }, 'its cookies, to its own host');
+    const [bootstrap] = batches;
+    assert.equal(bootstrap.source, source);
+    assert.deepEqual([bootstrap.input_transport.kind, bootstrap.input_transport.origin], [`${site}_websocket`, `https://${host}/`]);
+    assert.equal(batches.at(-1).type, 'end');
+  }
 });
 
 test('bundles on other hosts are never fetched, and a session is never streamed off BRiSK', async () => {

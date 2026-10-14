@@ -31,7 +31,7 @@ from briskapi.records import (BARS, DATASETS, DAY_NS, EARLIEST, FIELDS, JST_NS, 
                               fields, instrument_id, symbols_of, timestamp)                         # service's names
 from briskapi.schema import RECORDING_PREFIX, REFERENCES, require
 
-LIVE = ('sbi_live', 'eshiten_live')
+LIVE = ('sbi_live', 'eshiten_live', 'matsui_live', 'monex_live', 'smbcnikko_live')
 DEMO_SOURCE = 'historical_mock'
 ENCODINGS = {'parquet': ('application/vnd.apache.parquet', 'parquet'), 'csv': ('text/csv', 'csv'),
              'json': ('application/x-ndjson', 'json')}

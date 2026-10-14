@@ -1,10 +1,11 @@
 'use strict';
 // Experimental live host for broker-hosted BRiSK: SBI's (sbi.brisk.jp, BRISK_SITE=sbi, the
-// default) and Tachibana e-shiten's BRiSK Next (next.e-shiten.brisk.jp, BRISK_SITE=e-shiten).
+// default), Tachibana e-shiten's BRiSK Next (next.e-shiten.brisk.jp, BRISK_SITE=e-shiten), and
+// Matsui's, Monex's and SMBC Nikko's (<site>.brisk.jp, BRISK_SITE=matsui|monex|smbcnikko).
 // The session's own WASM decoder under Node, fed from the authenticated WebSocket.
 // No browser or Chrome DevTools. Emits the same JSON batches as decoder.cjs
-// (source=sbi_live or eshiten_live). Cookies come from the site's variable
-// (BRISK_SBI_COOKIES, BRISK_ESHITEN_COOKIES; a JSON object), never from the command line.
+// (source=sbi_live, eshiten_live, ...; SITES below). Cookies come from the site's variable
+// (BRISK_SBI_COOKIES, BRISK_ESHITEN_COOKIES, ...; a JSON object), never from the command line.
 //
 // It follows the vendor client's connect sequence (public Next demo bundle) and
 // upstream's SBI research (pybrisk): feed the WASM from the first frame, wait for its
@@ -19,13 +20,21 @@ const { Decoder } = require('./decoder.cjs');
 const { Link, resolveProfile, heartbeatMonitor, staleDataCheck, redact } = require('./engineio.cjs');
 const { QuotePool, workerCount, POOL_MIN_ISSUES } = require('./workers.cjs');
 
-// Brokers whose BRiSK is this app. On 2026-10-08 both served the same boot (flex_version 18000),
-// master, snapshot and decoder, so only the address differs.
+// Brokers whose BRiSK is this app (briskapi/brisk.py keeps the same table). On 2026-10-08 SBI's and e-shiten's
+// served the same boot (flex_version 18000), master, snapshot and decoder, so only the address differs.
+// Matsui's, Monex's and SMBC Nikko's are the same vendor's app on hosts of their own, not yet tried live: their
+// bundles are found from the signed-in page as SBI's and e-shiten's are, and anything unexpected is an error.
 const SITES = {
   sbi: { origin: 'https://sbi.brisk.jp', name: 'SBI BRiSK', source: 'sbi_live', transport: 'sbi_websocket',
     cookies: 'BRISK_SBI_COOKIES' },
   'e-shiten': { origin: 'https://next.e-shiten.brisk.jp', name: 'e-shiten BRiSK Next', source: 'eshiten_live',
     transport: 'eshiten_websocket', cookies: 'BRISK_ESHITEN_COOKIES' },
+  matsui: { origin: 'https://matsui.brisk.jp', name: 'Matsui BRiSK', source: 'matsui_live', transport: 'matsui_websocket',
+    cookies: 'BRISK_MATSUI_COOKIES' },
+  monex: { origin: 'https://monex.brisk.jp', name: 'Monex BRiSK', source: 'monex_live', transport: 'monex_websocket',
+    cookies: 'BRISK_MONEX_COOKIES' },
+  smbcnikko: { origin: 'https://smbcnikko.brisk.jp', name: 'SMBC Nikko BRiSK', source: 'smbcnikko_live',
+    transport: 'smbcnikko_websocket', cookies: 'BRISK_SMBCNIKKO_COOKIES' },
 };
 const PROTOCOL_VERSION = 18000;
 const MAX_BYTES = 64 * 1024 * 1024;
@@ -35,7 +44,7 @@ const REQUIRED = ['_initialize', '_push', '_applyBasePriceQueue', '_stockCount',
   '_clearTrace', '_getStockView', '_fitItaViewRowPrice10', '_getItaRows', '_malloc', 'addFunction'];
 
 function site(id = 'sbi') {
-  if (!Object.hasOwn(SITES, id)) throw new Error(`Unknown BRiSK site ${JSON.stringify(id)}; use ${Object.keys(SITES).join(' or ')}`);
+  if (!Object.hasOwn(SITES, id)) throw new Error(`Unknown BRiSK site ${JSON.stringify(id)}; use one of: ${Object.keys(SITES).join(', ')}`);
   return { id, ...SITES[id] };
 }
 
@@ -593,7 +602,7 @@ function readLanes(input) {
   return lanes;
 }
 
-const USAGE = 'Usage: [BRISK_SITE=sbi|e-shiten] BRISK_SBI_COOKIES=...|BRISK_ESHITEN_COOKIES=... brisk.cjs [--codes 7203,6758] [--trace-protocol]';
+const USAGE = 'Usage: [BRISK_SITE=sbi|e-shiten|matsui|monex|smbcnikko] BRISK_<SITE>_COOKIES=... brisk.cjs [--codes 7203,6758] [--trace-protocol]';
 
 function parseArgs(argv) {
   const options = { codes: [], trace: false };

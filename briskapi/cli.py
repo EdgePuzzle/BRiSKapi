@@ -21,15 +21,15 @@ import warnings
 
 from briskapi import _https, _parquet, identity
 from briskapi._recording import BriskError, Recording
-from briskapi.schema import (RECORDING_PREFIX, REFERENCES, SCHEMA, MAX_COMPRESSED, TIMING_KEY, canonical_batches, encode,
-                             local_name, owner, recording_name, validate_manifest, validate_timing, require)
+from briskapi.schema import (RECORDING_PREFIX, REFERENCES, SCHEMA, SOURCES, MAX_COMPRESSED, TIMING_KEY, canonical_batches,
+                             encode, local_name, owner, recording_name, validate_manifest, validate_timing, require)
 
 PACKAGE = Path(__file__).resolve().parent
 # BRiSK's own WASM decoder runs under Node; the package ships only this host and SHA-256 pins.
 DECODER = PACKAGE / 'decoder' / 'decoder.cjs'
 MIN_NODE = 22
 # Bump with any PRIVACY.md change to what is collected; saved choices then lapse.
-POLICY_VERSION = 8
+POLICY_VERSION = 9
 NOTICE = '''\
 briskapi uploads your sessions to your private BRiSK archive: a free, off-computer copy
 of every complete session, reachable from any computer with your identity and checked on
@@ -47,9 +47,9 @@ so does the part of a broker day recorded before a lost connection, a stop or a 
   - demo sessions: the decoded market data and local timing measurements (decode
     durations, replay lateness, asset download time and your computer's receipt clock,
     which shows when you recorded);
-  - broker BRiSK sessions (SBI, Tachibana e-shiten): a timing summary (decode time, data
-    age and frame spacing percentiles, stalls, frame count, date and start/end minute)
-    and the decoded market recording: securities master, prices, quantities, the ten best
+  - broker BRiSK sessions (SBI, Tachibana e-shiten, Matsui, Monex, SMBC Nikko):
+    a timing summary (decode time, data age and frame spacing percentiles, stalls, frame
+    count, date and start/end minute) and the decoded market recording: securities master, prices, quantities, the ten best
     order-book levels on each side (and of the closing-condition orders), the board's
     order totals, every trade (time, price, shares and side), codes and per-frame timing.
 Cookies, tokens and connection diagnostics are never uploaded. Your IP address is used
@@ -482,6 +482,12 @@ def _progress(feed, every):
         last = now
 
 
+def brisk_sites():
+    """The brokers' BRiSK sites briskapi has a data client for (briskapi.brisk.SITES)."""
+    from briskapi import brisk  # brisk builds on this module
+    return tuple(brisk.SITES)
+
+
 def _interrupt(signum, frame):
     raise KeyboardInterrupt
 
@@ -549,17 +555,18 @@ def _main(argv):
                         'file; default: yes)')
     p.add_argument('--output', type=Path, metavar='DIR',
                    help='Keep each finished day here as SOURCE_YYYYMMDD_FROM-TO (its first and last clock, JST HHMMSS)')
-    p.add_argument('--site', choices=('demo', 'sbi', 'e-shiten'), required=True,
-                   help="demo: the public BRiSK Next demo, a 2021 recording replayed here; sbi: SBI Securities' live BRiSK "
-                        '(experimental), cookies from BRISK_SBI_COOKIES, saved with briskapi.login(remember=True) or by '
-                        "`brisk login`; e-shiten: Tachibana e-shiten's BRiSK Next, the same with BRISK_ESHITEN_COOKIES and "
-                        "briskapi.login('e-shiten', remember=True)")
+    p.add_argument('--site', choices=('demo', *brisk_sites()), required=True,
+                   help="demo: the public BRiSK Next demo, a 2021 recording replayed here; sbi: SBI Securities' live BRiSK, "
+                        'cookies from BRISK_SBI_COOKIES, saved with briskapi.login(remember=True) or by `brisk login`; '
+                        "e-shiten (Tachibana e-shiten's BRiSK Next), matsui, monex, smbcnikko: the same with their own "
+                        "variable (BRISK_ESHITEN_COOKIES, BRISK_MATSUI_COOKIES, ...) and briskapi.login('matsui', remember=True); "
+                        "Matsui's, Monex's and SMBC Nikko's not yet tried live")
     p.add_argument('--trace-protocol', action='store_true',
-                   help='With --site sbi or e-shiten: print the connection steps to stderr, every token redacted (wire details in BRISK_PROFILE)')
+                   help="With a broker's site: print the connection steps to stderr, every token redacted (wire details in BRISK_PROFILE)")
     p.add_argument('--upload', action=argparse.BooleanOptionalAction, default=None,
                    help='Upload this session to your private archive (default: yes once you agreed); --no-upload keeps all of it local, timing summary included')
     p.add_argument('--upload-market-data', action=argparse.BooleanOptionalAction, default=None,
-                   help='With --site sbi or e-shiten: upload the decoded market recording too (default: yes unless you opt out); --no-upload-market-data keeps it local')
+                   help="With a broker's site: upload the decoded market recording too (default: yes unless you opt out); --no-upload-market-data keeps it local")
     sub.add_parser('sites', help='List the brokers you can sign in to (built in, plus your own in sites.json)')
     for name, text in (('enroll', 'Once: pick your broker, sign in by hand and register a passkey; it is saved to the Keychain'),
                        ('login', 'Sign in with the saved passkey in Chrome and keep the BRiSK session cookies')):
@@ -575,11 +582,11 @@ def _main(argv):
             p.add_argument('--passkey-button', help='Text of the passkey sign-in control on the login page')
             p.add_argument('--headless', action='store_true', help='No Chrome window: needs --launch-url and a login page that works unattended')
             p.add_argument('--remember', action=argparse.BooleanOptionalAction, default=True,
-                           help='Save the cookies (default: yes; owner-only file); `brisk live --site sbi` and `--site e-shiten` read them')
+                           help='Save the cookies (default: yes; owner-only file); `brisk live --site` with that broker reads them')
     sub.add_parser('forget', help='Delete the saved passkey (it stays registered at your broker until you remove it there)')
     p = sub.add_parser('upload', help='Upload a prepared package to your private archive'); p.add_argument('directory', type=Path)
     p = sub.add_parser('list', help='List your archived recordings (or timing reports)')
-    p.add_argument('--date'); p.add_argument('--source', choices=['historical_mock','synthetic_test','sbi_live','eshiten_live'])
+    p.add_argument('--date'); p.add_argument('--source', choices=sorted(SOURCES))
     p.add_argument('--timing', action='store_true', help='Your timing reports instead')
     p.add_argument('--deleted', action='store_true', help='What you deleted and can still restore (30 days)')
     p = sub.add_parser('pull', help='Download and verify one of your recordings'); p.add_argument('prefix'); p.add_argument('--output', type=Path, required=True)
@@ -615,7 +622,7 @@ def _main(argv):
     group.add_argument('--revoke', action='store_true')
     args = parser.parse_args(argv)
     if args.command == 'live' and args.upload_market_data and args.site == 'demo':
-        parser.error('--upload-market-data is for a broker: --site sbi or e-shiten')
+        parser.error('--upload-market-data is for a broker: --site with one other than demo')
     if args.command == 'live' and args.cache and args.site != 'demo':
         parser.error('--cache is for the demo: --site demo')
     if args.command == 'live' and args.raw and not args.quotes:

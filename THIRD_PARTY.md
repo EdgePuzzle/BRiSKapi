@@ -16,7 +16,7 @@ replace pybrisk's interface. The master file layout and the 18000 master record
 layout rest on pybrisk's research too: `tools/brisk_mock/sbi_master_layout.py`
 downloads, at the user's request and into the user's own cache, pinned copies of the
 SBI decoder and master file published there. No vendor bundles or raw captures from
-that repository are bundled here. A broker's BRiSK decoder (SBI's or e-shiten's) is
+that repository are bundled here. A broker's BRiSK decoder (SBI's, e-shiten's, Matsui's, Monex's or SMBC Nikko's) is
 downloaded at runtime with the user's own session and is never stored or redistributed by this project.
 Dependencies retain their own licenses. Cargo.lock records Rust dependencies;
 boto3 uses Apache-2.0.

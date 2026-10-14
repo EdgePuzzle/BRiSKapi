@@ -226,8 +226,8 @@ def test_connect_signs_in_from_the_sites_variable_when_login_has_not(fake_host, 
 
 
 def test_connect_takes_a_site_and_only_its_options(tmp_path):
-    for site in (None, 'web', 'matsui'):
-        with pytest.raises(ValueError, match="Choose a site: 'demo', 'sbi', 'e-shiten'"):
+    for site in (None, 'web', 'rakuten'):
+        with pytest.raises(ValueError, match="Choose a site: 'demo', 'sbi', 'e-shiten', 'matsui', 'monex', 'smbcnikko'"):
             briskapi.connect(site=site)
     with pytest.raises(ValueError, match='cache, speed: only for the demo'):
         briskapi.connect(site='sbi', cache=tmp_path, speed=0)
@@ -635,7 +635,31 @@ def test_e_shiten_has_its_own_address_cookies_and_variable(monkeypatch):
     briskapi.logout()
     assert not brisk.cookies_path('e-shiten').exists() and not brisk.cookies_path().exists()
     with pytest.raises(ValueError, match='Unknown BRiSK site'):
-        briskapi.login(cookies={'a': 'b'}, site='matsui')
+        briskapi.login(cookies={'a': 'b'}, site='rakuten')
+
+
+@pytest.mark.parametrize('site,variable,name,host', [
+    ('matsui', 'BRISK_MATSUI_COOKIES', 'Matsui BRiSK', 'matsui.brisk.jp'),
+    ('monex', 'BRISK_MONEX_COOKIES', 'Monex BRiSK', 'monex.brisk.jp'),
+    ('smbcnikko', 'BRISK_SMBCNIKKO_COOKIES', 'SMBC Nikko BRiSK', 'smbcnikko.brisk.jp')])
+def test_matsui_monex_and_smbc_nikko_each_have_their_own_address_cookies_and_variable(monkeypatch, site, variable, name, host):
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"for": "sbi"}')
+    with pytest.raises(brisk.SessionExpiredError, match=f"No {name} cookies.*site='{site}'"):  # never SBI's
+        briskapi.login(site=site)
+    monkeypatch.setenv(variable, '{"from": "env"}')
+    c = briskapi.login(site=site)
+    assert c.site == site and c.session.cookies == {'from': 'env'}
+    opener = Opener({})
+    c.session._opener, c.session.rate_limit = opener, 0
+    with pytest.raises(NotFoundError):
+        c.session.get('/api/frontend/boot')
+    assert opener.requests[0].full_url == f'https://{host}/api/frontend/boot'
+    monkeypatch.delenv(variable)
+    briskapi.login(cookies={'saved': site}, remember=True, site=site)
+    assert brisk.cookies_path(site).name == f'{site}-cookies.json'
+    assert json.loads(brisk.cookies_path(site).read_text()) == {'saved': site}
+    briskapi.logout()
+    assert not brisk.cookies_path(site).exists()
 
 
 @pytest.fixture
@@ -729,3 +753,17 @@ def test_a_broker_feed_on_a_python_with_the_gil_warns_that_it_can_fall_behind(fa
     with pytest.warns(UserWarning, match=r'has the GIL.*free-threaded Python 3\.14'):
         feed = briskapi.connect(site='sbi', upload=False)
     assert feed.wait().source == 'sbi_live'
+
+
+def test_every_broker_is_the_same_in_the_host_the_client_and_the_archive_schema():
+    """decoder/brisk.cjs, briskapi.brisk and briskapi.schema each list the brokers; they must agree."""
+    import subprocess
+    host = json.loads(subprocess.run(['node', '-e', f"console.log(JSON.stringify(require({json.dumps(str(brisk.DECODER))}).SITES))"],
+                                     capture_output=True, text=True, check=True).stdout)
+    assert list(host) == list(brisk.SITES) == list(briskapi.SITES[1:])
+    for site, ours in brisk.SITES.items():
+        theirs = host[site]
+        assert (theirs['origin'], theirs['name'], theirs['cookies'], theirs['source']) == (ours.origin, ours.name, ours.cookies_env, ours.source)
+        assert schema.BROKER_TRANSPORT[ours.source] == {'kind': theirs['transport'], 'origin': ours.origin + '/'}
+        assert ours.source in schema.SOURCES
+    assert set(schema.BROKER_TRANSPORT) == {site.source for site in brisk.SITES.values()}

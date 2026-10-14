@@ -104,10 +104,10 @@ class Feed:
     def __init__(self, cache=None, codes=None, speed=1, limit_frames=None, upload=None,
                  history=False, node='node', *, command=None, env=None, timing=None, upload_market_data=None, output=None,
                  on_day=None, gateway=False):
-        # A broker session (SBI, e-shiten) uploads its timing summary and its market recording;
-        # upload_market_data=False keeps the market recording local.
+        # A broker session uploads its timing summary and its market recording; upload_market_data=False keeps
+        # the market recording local.
         if upload_market_data is not None and (command is None or timing not in schema.BROKER_TRANSPORT):
-            raise BriskError('upload_market_data applies to a broker live session (SBI or e-shiten)')
+            raise BriskError('upload_market_data applies to a broker live session (a site other than the demo)')
         if upload is False and upload_market_data:
             raise BriskError('upload=False keeps the whole session local; drop upload_market_data=True')
         cli.check_node(command[0] if command else node)

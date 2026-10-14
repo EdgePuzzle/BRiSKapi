@@ -63,7 +63,7 @@ against the cloud API's records for it. `PRIVACY.md` describes each owner's OHLC
 from its own broker recordings, so a change to what they hold or who receives them (`build_bars`,
 `covered` in `query_engine.py`) updates it like any change to what is collected. The BRiSK site client's tests (`tests/test_brisk.py`, `tools/brisk_mock/brisk.test.cjs`) use
 pybrisk's SBI sample payloads and a fake server. Unless a user
-opts out, broker sessions (SBI, e-shiten) upload a timing report
+opts out, broker sessions upload a timing report
 (`briskapi/timing.py`, validated by `validate_timing` in `briskapi/schema.py`) and, after each
 day's clean end, their market recording; `--no-upload-market-data` keeps the recording local and
 `--no-upload` both. Live market content has no reference replay; it passes structural

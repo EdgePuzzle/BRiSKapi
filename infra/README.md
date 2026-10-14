@@ -35,7 +35,7 @@ only and refuses non-TLS requests. ACLs are disabled, encryption and versioning 
 Logs expire after 14 days.
 
 Ingest accepts canonical demo/synthetic recordings that match a reference replay
-and decoded broker recordings (SBI, e-shiten) with structural/continuity checks,
+and decoded broker recordings (SBI, e-shiten, Matsui, Monex, SMBC Nikko) with structural/continuity checks,
 and timing reports from either. It
 stores the verified Parquet tables, each as its own object (see the integrity and storage
 sections of [ARCHITECTURE.md](../ARCHITECTURE.md)). The bucket's prefixes:
