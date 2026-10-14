@@ -154,6 +154,8 @@ def deploy(bucket):
         # Recordings' tables are stored in Intelligent-Tiering (archive_service._put); this moves those stored before.
         *({'ID':f'IntelligentTiering-{prefix[:-1]}','Status':'Enabled','Filter':{'Prefix':prefix},
            'Transitions':[{'Days':0,'StorageClass':'INTELLIGENT_TIERING'}]} for prefix in ('archive/', 'reference/'))]})
+    # Uploads come through AWS's edge locations (archive_service.poster): several times as fast from far away.
+    s3.put_bucket_accelerate_configuration(Bucket=bucket, AccelerateConfiguration={'Status':'Enabled'})
     ignore_exists(db.create_table, TableName=NAME, AttributeDefinitions=[{'AttributeName':'id','AttributeType':'S'}],
         KeySchema=[{'AttributeName':'id','KeyType':'HASH'}], BillingMode='PAY_PER_REQUEST')
     db.get_waiter('table_exists').wait(TableName=NAME)
@@ -192,7 +194,8 @@ def deploy(bucket):
     # group at a time on disk: its zip, then its tables, then the stored zip, so 10 GB of /tmp and the most time.
     config=dict(Runtime='python3.12',Role=role_arn,Handler='archive_service.handler',Timeout=900,MemorySize=3008,
                 Layers=[publish_layer(lam,s3,bucket)],
-                Environment={'Variables':{'ARCHIVE_BUCKET':bucket,'QUOTA_TABLE':NAME,'QUOTA_SALT':salt}},
+                Environment={'Variables':{'ARCHIVE_BUCKET':bucket,'QUOTA_TABLE':NAME,'QUOTA_SALT':salt,
+                                          'UPLOAD_ACCELERATION':'1'}},
                 EphemeralStorage={'Size':10240})
     try:
         lam.get_function(FunctionName=NAME)

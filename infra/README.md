@@ -29,7 +29,10 @@ owner's delete leaves noncurrent versions it cannot purge, and it can delete not
 `reference/`). It also updates the quota table and writes its own logs. The function URL accepts requests
 without AWS credentials; each names its owner with an identity secret, and the function
 scopes it to that owner's prefixes. S3 POST policies grant only the ticket's particular key
-and exact size, and downloads are 15-minute presigned URLs for the owner's own objects.
+and exact size, and downloads are 15-minute presigned URLs for the owner's own objects. The bucket
+has S3 Transfer Acceleration on, and upload forms are for its endpoint (the function's
+`UPLOAD_ACCELERATION`), so an upload enters AWS at its nearest edge location; AWS charges $0.04/GB
+for it only where it is faster.
 The bucket blocks public ACLs; its policy allows anonymous reads and listings of `samples/`
 only and refuses non-TLS requests. ACLs are disabled, encryption and versioning enabled.
 Logs expire after 14 days.

@@ -1163,7 +1163,12 @@ results/OWNER/UUID.EXT                       a query result too large to return 
   Without a copy the service answers 409 and the client (`cli.upload`) sends the whole
   recording; `market=True` sends it regardless. Ingest verifies the assembled recording in
   full either way (see Integrity).
-- Upload tickets last 15 minutes and bind the object key, exact size and encryption.
+- Upload tickets last 15 minutes and bind the object key, exact size and encryption. Their form is
+  for S3 Transfer Acceleration's endpoint (`poster`, with `UPLOAD_ACCELERATION`, which `deploy.py`
+  sets with the bucket's acceleration): an upload enters AWS at its nearest edge location and
+  crosses AWS's network to Tokyo, from the US east coast 22-32 MB/s against 6-14 straight to S3.
+  AWS charges for it ($0.04/GB) only where it is faster; downloads, and the function's own S3
+  traffic, go straight.
 - Uploads are bound to their first S3 object version. Retries of that event are
   safe, and overwriting an upload cannot replace a stored recording.
 - Limits: a demo or synthetic replay, a 64 MiB package, 2 GiB in canonical JSON form and

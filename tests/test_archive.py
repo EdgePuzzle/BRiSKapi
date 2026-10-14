@@ -1314,3 +1314,14 @@ def test_export(packaged, tmp_path, capsys):
     (tmp_path / 'old').mkdir(); (tmp_path / 'old/events.jsonl').write_bytes(canon(batches()))
     with pytest.raises(ValueError, match='Parquet'):
         cli.export(tmp_path / 'old', nautilus=tmp_path / 'other')
+
+def test_an_upload_form_goes_to_the_accelerated_endpoint_when_the_bucket_has_it(monkeypatch):
+    # Signed here, offline: the form takes the upload through AWS's nearest edge location (S3 Transfer Acceleration).
+    monkeypatch.setenv('AWS_ACCESS_KEY_ID', 'AKIDEXAMPLE')
+    monkeypatch.setenv('AWS_SECRET_ACCESS_KEY', 'example')
+    monkeypatch.setattr(service, 'ACCELERATED', True)
+    post = service.poster(None).generate_presigned_post(Bucket='brisk-test-bucket', Key='incoming/t/recording.zip')
+    assert post['url'] == 'https://brisk-test-bucket.s3-accelerate.amazonaws.com/'
+    monkeypatch.setattr(service, 'ACCELERATED', False)
+    s3 = S3()
+    assert service.poster(s3) is s3

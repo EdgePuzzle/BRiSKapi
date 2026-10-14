@@ -177,7 +177,9 @@ Monex and `smbcnikko` for SMBC Nikko) uses session cookies from your own browser
 ## Network metadata
 
 Uploading, listing, downloading, deleting and querying contact AWS Lambda function URLs and
-Amazon S3 in Tokyo (`ap-northeast-1`). These services receive your IP address with each request.
+Amazon S3 in Tokyo (`ap-northeast-1`); an upload enters AWS at its nearest edge location (S3
+Transfer Acceleration) and reaches Tokyo over AWS's own network. These services receive your IP
+address with each request.
 
 - The services use your IP address only for rate limits: every request counts against it
   (120 a minute), and so do upload tickets, timing reports, deletes and restores, and the bytes
