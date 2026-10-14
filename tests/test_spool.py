@@ -194,3 +194,65 @@ def test_parts_close_on_time_too(tmp_path, monkeypatch):
     spool.close_part(wait=True)
     assert len(spool.parts()) == 5
     assert repr(spool).startswith('Spool(') and _spool.data_dir().name == 'brisk'
+
+
+def _pieces(spool, tmp_path, final=True, repair=False):
+    out = []
+    while (shipped := spool.ship(tmp_path / f'piece{len(out)}', final=final, repair=repair)) is not None:
+        out.append((tmp_path / f'piece{len(out)}', *shipped))
+    return out
+
+
+def _content(directory):
+    """A recording's quotes (issue, frame, values) and trades, whatever its batches are numbered."""
+    columns = _parquet.Columns.load(directory)
+    quotes = {(q['issue_id'], q['frame']): q for b in columns.iter_batches() if b['type'] != 'bootstrap'
+              for q in b.get('quotes', ())}
+    trades = [(t['issue_id'], t['frame'], t['quantity']) for b in columns.iter_batches() for t in b.get('trades', ())]
+    return quotes, trades
+
+
+@pytest.mark.parametrize('rows', [1, 6, 15])
+def test_a_day_ships_in_pieces_each_a_recording_the_archive_accepts_and_together_the_day(tmp_path, monkeypatch, rows):
+    monkeypatch.setattr(_spool, 'SEGMENT_ROWS', rows)
+    batches = session()
+    # Issue 1's trades in batch 9 come without its quote (unreadable there): no piece may end before its next one.
+    batches[9]['quotes'], batches[9]['skipped_issues'] = batches[9]['quotes'][1:], [1]
+    batches[-1]['quote_updates'] -= 1
+    (tmp_path / 'events.jsonl').write_bytes(b''.join(lines(batches)))
+    whole = cli.package(tmp_path / 'events.jsonl', tmp_path / 'whole')
+    spool = spooled(tmp_path, batches)
+    pieces = _pieces(spool, tmp_path)
+    assert len(pieces) > 1 and [repaired for *_, repaired in pieces] == [False] * len(pieces)
+    for directory, manifest, _ in pieces:
+        assert _parquet.inspect_package(directory, manifest) == manifest['summary']   # the archive's own checks
+    quotes, trades = {}, []
+    for directory, *_ in pieces:
+        q, t = _content(directory)
+        assert not set(q) & set(quotes), 'no quote twice'
+        quotes.update(q)
+        trades += t
+    day_quotes, day_trades = _content(tmp_path / 'whole')
+    assert quotes == day_quotes and sorted(trades) == sorted(day_trades)
+    firsts = [m['summary']['first_source_time_us'] for _, m, _ in pieces]
+    lasts = [m['summary']['last_source_time_us'] for _, m, _ in pieces]
+    assert firsts[0] == whole['summary']['first_source_time_us'] and lasts[-1] == whole['summary']['last_source_time_us']
+    assert firsts[1:] == lasts[:-1], 'each piece starts where the one before ended'
+    assert spool.ship(tmp_path / 'more', final=True) is None
+
+
+def test_a_crashed_spool_ships_what_is_left_from_where_it_was(tmp_path, monkeypatch):
+    monkeypatch.setattr(_spool, 'SEGMENT_ROWS', 8)
+    batches = session()[:30]   # cut short: no end
+    spool = spooled(tmp_path, batches)
+    spool.close_part(wait=True)
+    first = spool.ship(tmp_path / 'first')
+    assert first is not None and json.loads((spool.path / 'shipped.json').read_text())['parts'] == len(spool.last_parts)
+    spool._writer.shutdown()
+    again = _spool.Spool.reopen(spool.path)
+    rest = _pieces(again, tmp_path, repair=True)
+    assert rest and rest[-1][2] is True, 'the last piece repaired with the end its host never wrote'
+    for directory, manifest, _ in rest:
+        assert _parquet.inspect_package(directory, manifest) == manifest['summary']
+    shipped = {k for d in [tmp_path / 'first', *(d for d, *_ in rest)] for k in _content(d)[0]}
+    assert len(shipped) == sum(len(b.get('quotes', ())) for b in batches[1:])

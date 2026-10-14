@@ -764,11 +764,11 @@ def _part_columns(part, midnight, master):
     return Columns({k: q[k] for k in INTS}, q['code'], books, master, batches, t, t_code)
 
 
-def load_parts(equity, parts):
+def load_parts(equity, parts, midnight=None):
     """The canonical Columns of a spooled segment: its equity table and its parts, in order. Written, they are
-    the same bytes as the segment's batches written at once (Columns.from_batches(...).write)."""
+    the same bytes as the segment's batches written at once (Columns.from_batches(...).write). Parts that do not
+    start with the bootstrap need its day's `midnight`."""
     master = _decode_equity(pq.read_table(equity))
-    midnight = None
     pieces = []
     for part in parts:
         if midnight is None:
@@ -777,6 +777,90 @@ def load_parts(equity, parts):
         pieces.append(_part_columns(Path(part), midnight, master))
     require(pieces, 'Recording has no bootstrap')
     return Columns.concat(pieces, master)
+
+
+# Segments: a day's spool shipped a few minutes at a time (briskapi._spool), each piece a recording of its own
+
+def _no_trades():
+    return {k: np.zeros(0, np.int64) for k in TRADE_INTS}, np.zeros(0, dtype=object)
+
+
+def latest(columns, before=None):
+    """Each issue's last quote row in `columns`, or in `before` (the same, for what came earlier) for an issue that
+    has none there: the book as it stands after them."""
+    rows = [c for c in (before, columns) if c is not None and len(c)]
+    if not rows:
+        return before
+    t, t_code = _no_trades()
+    both = Columns.concat([Columns(c.q, c.code, c.books, c.master, [], t, t_code) for c in rows], columns.master)
+    order = both.order
+    issues = both.q['issue_id'][order]
+    last = np.ones(len(order), bool)
+    last[:-1] = issues[1:] != issues[:-1]
+    out = both.take(order[last])
+    out.batches, out.order = [], None
+    return out
+
+
+def after(columns, cut, bootstrap):
+    """Consecutive batches of a day (`columns`, from a spool's parts) as a recording of its own: a bootstrap like
+    the day's (`bootstrap`, its batch row) at the clock of the batch before them, holding each issue's quote as
+    of then (`cut.latest`; the issues with none skipped), then the batches, numbered on from it."""
+    shift = columns.batches[0]['seq'] - 1
+    head = {k: v for k, v in bootstrap.items() if k != SKIPPED} | {'seq': 0, 'source_time_us': cut.clock}
+    quoted = set(cut.latest.q['issue_id'].tolist()) if cut.latest is not None else set()
+    skipped = sorted(m['issue_id'] for m in columns.master if m['issue_id'] not in quoted)
+    if skipped:
+        head[SKIPPED] = skipped
+    t, t_code = _no_trades()
+    pieces = [Columns({**columns.q, 'seq': columns.q['seq'] - shift}, columns.code, columns.books, columns.master,
+                      [dict(b, seq=b['seq'] - shift) for b in columns.batches], {**columns.t, 'seq': columns.t['seq'] - shift},
+                      columns.t_code)]
+    if cut.latest is not None:
+        state = cut.latest
+        pieces.insert(0, Columns({**state.q, 'seq': np.zeros(len(state), np.int64)}, state.code, state.books,
+                                 columns.master, [head], t, t_code))
+    else:
+        pieces.insert(0, Columns({k: np.zeros(0, np.int64) for k in INTS}, np.zeros(0, dtype=object),
+                                 {side: (np.zeros(1, np.int64), np.zeros((0, 3), np.int64)) for side in BOOKS},
+                                 columns.master, [head], t, t_code))
+    return Columns.concat(pieces, columns.master)
+
+
+def recount_end(columns):
+    """A segment's end counts its own quote updates (the host's counts the whole day's)."""
+    end = columns.batches[-1]
+    kinds = {b['seq']: b['type'] for b in columns.batches}
+    per_batch = np.bincount(columns.q['seq'], minlength=end['seq'] + 1) if len(columns.q['seq']) else np.zeros(end['seq'] + 1, int)
+    columns.batches[-1] = dict(end, quote_updates=int(sum(int(n) for seq, n in enumerate(per_batch)
+                                                          if kinds.get(seq) == 'quotes')))
+
+
+def bootstrap_row(part):
+    """The batch row of the bootstrap that starts a spool's first part."""
+    first = _decode_batches(pq.read_table(Path(part) / BATCHES))[0]
+    require(first['type'] == 'bootstrap', 'Recording has no bootstrap')
+    return first
+
+
+def part_index(part):
+    """What choosing where to cut a spool needs of a part, from its small columns only: its quote rows, whether it
+    holds the end, and each issue's last quote and last trade (restored ones aside, being in the bootstrap's volumes
+    already) as {issue_id: batch}."""
+    part = Path(part)
+    kinds = pq.read_table(part / BATCHES, columns=['seq', 'kind'])
+    history = set(np.asarray(_numbers(kinds.column('seq')))[np.asarray(kinds.column('kind').to_pylist()) == 'history'].tolist())
+    quotes = pq.read_table(part / DEPTHS, columns=['issue_id', 'seq'])
+    trades = pq.read_table(part / TRADES, columns=['issue_id', 'seq'])
+    def last(table, skip=()):
+        issues, seqs = _numbers(table.column('issue_id')).tolist(), _numbers(table.column('seq')).tolist()
+        out = {}
+        for issue, seq in zip(issues, seqs):
+            if seq not in skip and seq > out.get(issue, -1):
+                out[issue] = seq
+        return out
+    return {'rows': quotes.num_rows, 'end': kinds.column('kind')[-1].as_py() == 'end',
+            'quoted': last(quotes), 'traded': last(trades, history)}
 
 
 def repair_end(columns) -> bool:

@@ -169,7 +169,28 @@ and put in the canonical order) and writes the same bytes as the day's batches a
 `tests/test_spool.py` checks it. Its manifest's summary comes from those columns
 (`Columns.summary`) rather than from the archive's checks run here, which took the demo's three
 minutes 35 seconds and would take a day most of an hour: the archive runs them on every upload, and
-an upload it rejects is kept like a failed one. A packaging or upload failure is a warning and a result that
+an upload it rejects is kept like a failed one.
+
+A broker's day is shipped as it runs, in pieces (`Spool.ship`): a whole-market day has some 50
+million quote updates, against a package of at most 64 MiB that the archive's function checks in
+memory (the demo's 735,000 make 39 MiB and take 1.7 GB of its 3 GB), and packaging it at once would take
+a computer's memory and most of an hour. After each part is written the spool tells the feed's worker,
+which ships a piece once the parts not yet shipped hold `SEGMENT_ROWS` (500,000) quote updates and end
+where every issue's trades so far are followed by a quote of it (`_parquet.part_index` reads that from
+the parts' small columns): the archive checks that the trades account for each quote's volume and
+turnover, which a piece ending between a trade and its issue's next quote would break. Each piece is a
+recording of its own (`_parquet.after`): a bootstrap like the day's, at the clock of the batch before
+it, holding each issue's last quote so far (`_parquet.latest`; an issue with none is skipped), then the
+piece's batches numbered on from it and an end (`repair_end`'s, or the day's own with its own count,
+`recount_end`). Consecutive pieces cover the day without a gap (each starts at the clock where the one
+before ends), and the cloud API reads them as one: its bars merge their clock ranges, and the quotes a
+bootstrap repeats carry the frame numbers already seen, so its deduplication drops them. The worker
+keeps and uploads each piece as it would a day, and at the day's end ships what is left (in more pieces
+if a stop or a slow worker left more than one's worth). `shipped.json` counts the parts shipped, so a
+crashed session's spool is finished from there; where the shipped pieces left the book is rebuilt from
+their parts a part at a time. A demo's replay is one recording, as its reference requires.
+
+A packaging or upload failure is a warning and a result that
 says so, never a failed feed, and the day is then kept in `~/.local/share/brisk/recordings`
 (its package, for `brisk upload` to retry, or its tables); neither is an `on_day` callback that
 raises. `brisk live --output

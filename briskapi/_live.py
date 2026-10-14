@@ -37,6 +37,10 @@ def _decoder(cache, codes, speed, limit_frames, node):
     return subprocess.Popen(command, stdout=subprocess.PIPE)
 
 
+def _stored(result):
+    return bool(result['uploaded']) and result['uploaded'].get('status') == 'stored'
+
+
 def _stop(process):
     if process.poll() is None:
         process.kill()
@@ -120,13 +124,13 @@ class Feed:
             uploads = _consent(wanted, None)[1] if timing else False
             self._package = uploads and upload_market_data is not False
             self._timing = timing if uploads else None  # the source whose timing summaries are uploaded
-        # Each finished day (bootstrap ... end) is packaged, kept in `output` as SOURCE_YYYYMMDD_FROM-TO
-        # and uploaded, on a worker thread while the feed goes on.
+        # Each day (bootstrap ... end) is packaged, kept in `output` as SOURCE_YYYYMMDD_FROM-TO and uploaded, on a
+        # worker thread while the feed goes on; a broker's in pieces as it runs (_spool.Spool.ship).
         self._output = Path(output) if output else None
         if self._output and limit_frames is not None:
             raise BriskError('A partial replay (limit_frames) is not a recording to keep; drop output')
         self._stats, self._on_day = None, on_day
-        self.recordings: list[dict] = []  # one per finished day: trading_date, name, path, uploaded, timing_uploaded, repaired
+        self.recordings: list[dict] = []  # one per recording: trading_date, name, path, uploaded, timing_uploaded, repaired
         self.timing_uploaded = None
         self._history = {} if history else None
         self._trade_history = []
@@ -408,7 +412,10 @@ class Feed:
                     raise BriskError(f'Stream sequence error at {batch.get("seq")}')
                 if first:
                     days += 1
-                    spool = _spool.Spool(intent=self._intent()) if self._spooling else None
+                    # A broker's day that is kept or uploaded ships a piece at a time as it goes (Spool.ship).
+                    ships = self._broker and bool(self._package or self._output)
+                    spool = _spool.Spool(intent=self._intent(), on_part=self._part_written if ships else None) \
+                        if self._spooling else None
                     self._stats = TimingStats(self._timing) if self._timing else None
                 if spool:
                     spool.add(batch, line)
@@ -442,7 +449,7 @@ class Feed:
                 self._worker.submit(self._keep, spool)   # never uploaded
             if self._stats and self.status in {'completed', 'closed'}:
                 self.timing_uploaded = self._upload_timing(self._stats)
-            self._worker.shutdown(wait=True)  # finished days are still kept and uploaded
+            self._worker.shutdown(wait=True)  # finished recordings are still kept and uploaded
 
     def _apply(self, batch, new_day=False):
         quotes = batch.get('quotes', ())
@@ -516,11 +523,10 @@ class Feed:
             if not (upload or output):   # its session kept nothing (a gateway's spool only)
                 spool.remove()
                 continue
-            result = self._finish_segment(spool, None, upload=upload, output=output, repair=True)
-            where = ('uploaded' if result['uploaded'] and result['uploaded'].get('status') == 'stored' else 'not uploaded') + \
-                (f', kept in {result["path"]}' if result['path'] else '')
-            warnings.warn(f'A feed that stopped unexpectedly left {result["name"] or spool.path} behind: repaired with its '
-                          f'end and {where}')
+            for result in self._finish_segment(spool, None, upload=upload, output=output, repair=True):
+                where = ('uploaded' if _stored(result) else 'not uploaded') + (f', kept in {result["path"]}' if result['path'] else '')
+                warnings.warn(f'A feed that stopped unexpectedly left {result["name"] or spool.path} behind: '
+                              + ('repaired with its end and ' if result['repaired'] else '') + where)
 
     def _keep(self, spool):
         """Finish a broker segment cut short (its host did not end it: a crash, a kill, a host that did not stop in
@@ -528,52 +534,96 @@ class Feed:
         if not (self._broker and (self._package or self._output)):
             spool.remove()
             return
-        result = self._finish_segment(spool, None, upload=self._package, output=self._output, repair=True)
-        self._report(result)
-        warnings.warn(f'The day ended early without its end: {result["name"] or spool.path} was repaired with one'
-                      + (' and uploaded' if result['uploaded'] and result['uploaded'].get('status') == 'stored' else ''))
+        results = self._finish_segment(spool, None, upload=self._package, output=self._output, repair=True)
+        for result in results:
+            self._report(result)
+        last = results[-1]
+        warnings.warn(f'The day ended early without its end: {last["name"] or spool.path} was repaired with one'
+                      + (' and uploaded' if _stored(last) else ''))
 
     def _finish_day(self, spool, stats):
-        """Package a finished day, keep it in `output` and upload it and its timing summary, as chosen."""
-        self._report(self._finish_segment(spool, stats, upload=self._package, output=self._output))
+        """Package what is left of a finished day, keep it in `output` and upload it and its timing summary, as
+        chosen."""
+        for result in self._finish_segment(spool, stats, upload=self._package, output=self._output):
+            self._report(result)
+
+    def _part_written(self, spool):
+        """A part of a broker's day is on disk (on the spool's thread): see whether a piece is ready to ship."""
+        try:
+            self._worker.submit(self._ship_ready, spool)
+        except RuntimeError:   # the feed has ended: its days are finished
+            pass
+
+    def _ship_ready(self, spool):
+        """Ship the pieces of a running day that are ready (Spool.ship), reporting each like a day."""
+        while not spool.removed:
+            shipped = spool.shipped
+            result = self._ship(spool, final=False, upload=self._package, output=self._output)
+            if result is None:
+                return
+            self._report(result)
+            if spool.shipped == shipped:
+                return
 
     def _finish_segment(self, spool, stats, *, upload, output, repair=False):
-        """Package a segment (repairing its end if asked), keep it in `output`, upload it and `stats`' timing summary;
-        the spool is removed after. Returns the result (trading_date, name, path, uploaded, timing_uploaded,
-        repaired)."""
-        result = {'trading_date': self._bootstrap and self._bootstrap['trading_date'], 'name': None, 'path': None,
-                  'uploaded': None, 'timing_uploaded': None, 'repaired': False}
+        """Ship what is left of a segment, in pieces (Spool.ship; the last repaired with its end if asked), keep
+        them in `output`, upload them and `stats`' timing summary; the spool is removed after. Returns each
+        piece's result (trading_date, name, path, uploaded, timing_uploaded, repaired), the timing summary's in
+        the last."""
+        results = []
         try:
-            if spool and (upload or output):
-                package = spool.path / 'package'
-                try:
-                    m = spool.package(package, repair=repair)
-                    result['name'] = m and schema.local_name(m['summary'])
-                    result['trading_date'] = m['summary']['trading_date'] if m else result['trading_date']
-                    result['repaired'] = repair and not spool.ended
-                    if output:
-                        target = output / result['name']
-                        if target.exists():
-                            warnings.warn(f'{target} already exists; this day was not kept')
-                        else:
-                            output.mkdir(parents=True, exist_ok=True)
-                            shutil.copytree(package, target)
-                            result['path'] = str(target)
-                    if upload:
-                        result['uploaded'] = cli.upload(package, cli.settings()['api_url'], verify=False, out=sys.stderr)
-                except Exception as error:  # noqa: BLE001 - market data was delivered; report, do not fail
-                    result['uploaded'] = {'status': 'failed', 'error': str(error)}
-                    kept = None if result['path'] else self._rescue(spool, package, result['name'])
-                    result['path'] = result['path'] or (kept and str(kept))
-                    warnings.warn(f'Automatic upload failed: {error}' +
-                                  (f'; the day is kept in {kept}' + (f' (`brisk upload {kept}` retries)' if
-                                                                     (kept / 'manifest.json').exists() else '')
-                                   if kept else ''))
+            while spool and (upload or output):
+                shipped = spool.shipped
+                result = self._ship(spool, final=True, upload=upload, output=output, repair=repair)
+                if result is None:
+                    break
+                results.append(result)
+                if spool.shipped == shipped:
+                    break
+            results = results or [self._result()]
             if stats:
-                result['timing_uploaded'] = self._upload_timing(stats)
+                results[-1]['timing_uploaded'] = self._upload_timing(stats)
         finally:
             if spool:
                 spool.remove()
+        return results
+
+    def _result(self):
+        return {'trading_date': self._bootstrap and self._bootstrap['trading_date'], 'name': None, 'path': None,
+                'uploaded': None, 'timing_uploaded': None, 'repaired': False}
+
+    def _ship(self, spool, *, final, upload, output, repair=False):
+        """Package the spool's next piece (Spool.ship), keep it in `output` and upload it, as chosen. Returns its
+        result, or None when no piece is ready."""
+        result, package = self._result(), spool.path / 'package'
+        shutil.rmtree(package, ignore_errors=True)
+        try:
+            shipped = spool.ship(package, final=final, repair=repair)
+            if shipped is None:
+                return None
+            m, result['repaired'] = shipped
+            if m:
+                result['name'], result['trading_date'] = schema.local_name(m['summary']), m['summary']['trading_date']
+            if output:
+                target = output / result['name']
+                if target.exists():
+                    warnings.warn(f'{target} already exists; this recording was not kept')
+                else:
+                    output.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(package, target)
+                    result['path'] = str(target)
+            if upload:
+                result['uploaded'] = cli.upload(package, cli.settings()['api_url'], verify=False, out=sys.stderr)
+        except Exception as error:  # noqa: BLE001 - market data was delivered; report, do not fail
+            result['uploaded'] = {'status': 'failed', 'error': str(error)}
+            kept = None if result['path'] else self._rescue(spool, package, result['name'])
+            result['path'] = result['path'] or (kept and str(kept))
+            warnings.warn(f'Automatic upload failed: {error}' +
+                          (f'; the recording is kept in {kept}' + (f' (`brisk upload {kept}` retries)' if
+                                                                   (kept / 'manifest.json').exists() else '')
+                           if kept else ''))
+        finally:
+            shutil.rmtree(package, ignore_errors=True)
         return result
 
     def _report(self, result):
@@ -586,8 +636,8 @@ class Feed:
                 warnings.warn(f'on_day callback failed: {error}')
 
     def _rescue(self, spool, package, name):
-        """Keep a finished day whose packaging or upload failed in briskapi._spool.kept_dir(): its package if it
-        has one (an upload can be retried), else the tables so far; None if even that fails."""
+        """Keep a piece whose packaging or upload failed in briskapi._spool.kept_dir(): its package if it has one
+        (an upload can be retried), else its tables (Spool.keep); None if even that fails."""
         try:
             if name and (package / 'manifest.json').exists():
                 target = _spool.kept_dir() / name

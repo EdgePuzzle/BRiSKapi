@@ -240,8 +240,9 @@ PYTHON = [
             P('codes', 'list[str] | None', 'Securities to decode (default: the whole market).'),
             P('history', 'bool', 'Keep every update and trade, for `Ticker.history()` and `.trades()`.'),
             P('upload', 'bool | None', '`False` uploads nothing; `None` follows your choice (on by default).'),
-            P('output', 'str | Path | None', 'Also keep each finished day here, as `SOURCE_YYYYMMDD_FROM-TO`.'),
-            P('on_day', 'Callable | None', 'Called with each finished day\'s result (kept, uploaded).'),
+            P('output', 'str | Path | None', 'Also keep each recording here (a broker\'s day comes as several), as '
+              '`SOURCE_YYYYMMDD_FROM-TO`.'),
+            P('on_day', 'Callable | None', 'Called with each recording\'s result (kept, uploaded).'),
             P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).'),
             P('timeout', 'float | None', 'Seconds to wait for the initial state (default 60, or 120 for a broker; a broker '
               'feed with no session to join waits for the next trading day\'s).'),
@@ -521,8 +522,8 @@ BROKER = [
            {'Python': '<briskapi.brisk.Client object>'}, illustrative=True),
     Method('python/broker_connect', 'briskapi.connect (your broker)', 'connect: broker',
            'Your broker\'s live BRiSK feed, decoded by BRiSK\'s own decoder under Node. It records one trading '
-           'day after another until closed, keeping (`output`) and uploading each finished day. Without `output`, a '
-           'finished day is kept only in your archive, and with uploads off, nowhere. On the command line: '
+           'day after another until closed, keeping (`output`) and uploading each day as it runs, as recordings of about '
+           '500,000 quote updates. Without `output`, a recording is kept only in your archive, and with uploads off, nowhere. On the command line: '
            '`brisk live --site sbi` or another broker\'s site (see [Recording](/guides/recording.md)).',
            'briskapi.connect(\n    *,\n    site: str,\n    codes: list[str] | None = None,\n    history: bool = False,\n'
            '    upload: bool | None = None,\n    upload_market_data: bool | None = None,\n    output: str | Path | None = None,\n'
@@ -533,8 +534,8 @@ BROKER = [
             P('codes', 'list[str] | None', 'Securities to decode.'), P('history', 'bool', 'Keep every update and trade.'),
             P('upload', 'bool | None', '`False` uploads nothing.'),
             P('upload_market_data', 'bool | None', '`False` uploads the timing summary but not the market recording.'),
-            P('output', 'str | Path | None', 'Keep each finished day here as `SOURCE_YYYYMMDD_FROM-TO`.'),
-            P('on_day', 'Callable | None', 'Called with each finished day.'),
+            P('output', 'str | Path | None', 'Keep each recording here as `SOURCE_YYYYMMDD_FROM-TO`.'),
+            P('on_day', 'Callable | None', 'Called with each recording\'s result.'),
             P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).'),
             P('trace_protocol', 'bool', 'Print the connection steps, tokens redacted.'),
             P('profile', 'dict | None', 'Unverified Socket.IO parameters, should the server open with Socket.IO.'),

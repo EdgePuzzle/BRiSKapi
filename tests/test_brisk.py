@@ -584,6 +584,32 @@ def test_a_feed_keeps_and_uploads_each_trading_day_as_it_ends(tmp_path, monkeypa
         briskapi.connect(site='sbi', upload=False).wait()
 
 
+def test_a_broker_day_ships_a_piece_at_a_time_each_a_recording_the_archive_accepts(fake_host, tmp_path, monkeypatch):
+    # A whole-market day is far more than one recording holds, so it goes to the archive a piece at a time as it runs.
+    monkeypatch.setattr(_spool, 'PART_BYTES', 3000)
+    monkeypatch.setattr(_spool, 'SEGMENT_ROWS', 30)
+    sent = []
+
+    def publish(directory, url, **options):
+        m = json.loads((directory / 'manifest.json').read_text())
+        assert _parquet.inspect_package(directory, m) == m['summary']   # the archive's own checks
+        sent.append(m['summary'])
+        return {'status': 'stored'}
+    monkeypatch.setattr(cli, 'upload', publish)
+    monkeypatch.setattr(cli, 'upload_timing', lambda report, url: {'status': 'stored'})
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    briskapi.consent(accept=True)
+    feed = briskapi.connect(site='sbi', output=tmp_path / 'days').wait()
+    day = sbi_session()
+    assert len(sent) > 2 and [r['uploaded'] for r in feed.recordings] == [{'status': 'stored'}] * len(sent)
+    assert sent[0]['first_source_time_us'] == day[0]['source_time_us'] and sent[-1]['last_source_time_us'] == day[-1]['source_time_us']
+    assert [s['first_source_time_us'] for s in sent[1:]] == [s['last_source_time_us'] for s in sent[:-1]]
+    trades = [t['frame'] for d in sorted((tmp_path / 'days').iterdir()) for t in briskapi.Market(briskapi.Recording(d)).trades()]
+    assert len(trades) == sum(len(b.get('trades', ())) for b in day) and len(list((tmp_path / 'days').iterdir())) == len(sent)
+    assert [r['timing_uploaded'] for r in feed.recordings] == [None] * (len(sent) - 1) + [{'status': 'stored'}]
+    assert not any(_spool.spool_root().glob('segment-*'))
+
+
 def test_a_feed_with_no_session_to_join_waits_for_the_next_trading_days(tmp_path, monkeypatch):
     # The host says, outside the days' records, that the site has no session now (after the close, on a holiday);
     # that is kept nowhere, and the feed waits past its start timeout for the next day's session.

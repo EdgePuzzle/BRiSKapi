@@ -42,16 +42,18 @@ stores. What you delete can be restored for 30 days and is then removed.
 The cloud API (`brisk query`) builds OHLC bars from your own broker recordings only, for
 the securities and times they cover: no one else's uploads enter your results, and yours
 enter no one else's.
-Every clean, complete session uploads automatically (the default; you can decline), and
-so does the part of a broker day recorded before a lost connection, a stop or a crash:
+Every clean, complete session uploads automatically (the default; you can decline); a
+broker day uploads a few minutes at a time as it runs, and so does the part of one
+recorded before a lost connection, a stop or a crash:
   - demo sessions: the decoded market data and local timing measurements (decode
     durations, replay lateness, asset download time and your computer's receipt clock,
     which shows when you recorded);
   - broker BRiSK sessions (SBI, Tachibana e-shiten, Matsui, Monex, SMBC Nikko):
     a timing summary (decode time, data age and frame spacing percentiles, stalls, frame
-    count, date and start/end minute) and the decoded market recording: securities master, prices, quantities, the ten best
-    order-book levels on each side (and of the closing-condition orders), the board's
-    order totals, every trade (time, price, shares and side), codes and per-frame timing.
+    count, date and start/end minute) and the decoded market recording: securities
+    master, prices, quantities, the ten best order-book levels on each side (and of the
+    closing-condition orders), the board's order totals, every trade (time, price, shares
+    and side), codes and per-frame timing.
 Cookies, tokens and connection diagnostics are never uploaded. Your IP address is used
 only for upload rate limiting. No account, file, hostname or system details are sent.
 Policy: https://github.com/honvl/BRiSKapi/blob/main/PRIVACY.md
@@ -173,13 +175,17 @@ def package(events, output):
     """Encode decoder JSONL as a package: the recording's tables plus a manifest of their zip."""
     return _package(output, lambda: save_recording(events, output))
 
-def package_parts(equity, parts, output, repair=False):
+def package_parts(equity, parts, output, repair=False, build=None):
     """A spooled segment (briskapi._spool) as a package: the same tables and manifest as package() of its batches.
-    With `repair`, a segment cut short first gets the end its host never wrote (_parquet.repair_end)."""
+    With `repair`, a segment cut short first gets the end its host never wrote (_parquet.repair_end). `build`
+    makes the recording's Columns instead (a piece of a day: see Spool.ship)."""
     def write():
-        columns = _parquet.load_parts(equity, parts)
-        if repair:
-            _parquet.repair_end(columns)
+        if build:
+            columns = build()
+        else:
+            columns = _parquet.load_parts(equity, parts)
+            if repair:
+                _parquet.repair_end(columns)
         columns.write(output)
         return columns.summary()   # not checked here: the archive checks every upload, and a day took minutes
     return _package(output, write)
@@ -557,7 +563,8 @@ def _main(argv):
                    help='Serve the feed to briskapi.Live() on this computer only (127.0.0.1, with a key in an owner-only '
                         'file; default: yes)')
     p.add_argument('--output', type=Path, metavar='DIR',
-                   help='Keep each finished day here as SOURCE_YYYYMMDD_FROM-TO (its first and last clock, JST HHMMSS)')
+                   help='Keep each recording here as SOURCE_YYYYMMDD_FROM-TO (its first and last clock, JST HHMMSS); a broker\'s '
+                        'day comes a few minutes at a time')
     p.add_argument('--site', choices=('demo', *brisk_sites()), required=True,
                    help="demo: the public BRiSK Next demo, a 2021 recording replayed here; sbi: SBI Securities' live BRiSK, "
                         'cookies from BRISK_SBI_COOKIES, saved with briskapi.login(remember=True) or by `brisk login`; '

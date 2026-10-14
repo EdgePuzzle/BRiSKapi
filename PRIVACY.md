@@ -53,13 +53,14 @@ clean and complete session is uploaded to your private archive without further p
 `briskapi.connect()`, `briskapi.record()`), and broker sessions (SBI, Tachibana e-shiten, Matsui,
 Monex or SMBC Nikko: `brisk live --site sbi` or another broker's site, `briskapi.connect(site=...)`), which upload a timing
 summary and their decoded market recording. A broker session records one trading day after
-another until you stop it, and each day is uploaded once it ends (when the site serves the
-next trading date, or the server closes the stream). If the connection to your broker's BRiSK
+another until you stop it, and uploads each day while it runs, as recordings of about 500,000 quote
+updates (a few minutes at the open, longer later), the last when the day ends (when the site serves
+the next trading date, or the server closes the stream). If the connection to your broker's BRiSK
 drops during a day, the session reconnects by itself: what it recorded before the drop is a
-complete recording of its own, uploaded like a finished day, and the rest of the day is recorded
+complete recording of its own, uploaded like the others, and the rest of the day is recorded
 from a fresh snapshot. Stopping a broker session (Ctrl-C, `kill`, shutting the computer down,
-or `close()` in Python) ends its day there, as the day's end would, so the day so far is uploaded
-like any day. While a live session runs, each day is written to your computer as it
+or `close()` in Python) ends its day there, as the day's end would, so what is left of the day is uploaded
+like any recording. While a live session runs, each day is written to your computer as it
 arrives, as Parquet files in briskapi's spool folder (`~/.local/share/brisk/spool`, or under
 `$XDG_DATA_HOME`), so that a crash loses at most its last half-minute; they are deleted once
 that day is packaged.
@@ -157,9 +158,11 @@ Monex and `smbcnikko` for SMBC Nikko) uses session cookies from your own browser
   add, which has no data client, are kept in an owner-only file under `~/.config/brisk/cookies/`. The Chrome profile used for sign-in is
   temporary and deleted afterwards (one left by a force-killed run is removed at the next start),
   and only the BRiSK host's cookies are taken from it.
-- With uploads on, each trading day of a broker session's decoded market recording is uploaded after that day ends, the part of a day before a lost connection once the
-  session reconnects, and the day so far when you stop the session, or when it crashes or is
-  killed (repaired, as above). `--no-upload-market-data` or
+- With uploads on, a broker session's decoded market recording is uploaded while each trading day
+  runs, about 500,000 quote updates at a time (each piece starting from a snapshot of the book, which
+  repeats the latest quote of every security), the rest of the day when it ends, the part of a day
+  before a lost connection once the session reconnects, and what is left of the day when you stop the
+  session, or when it crashes or is killed (repaired, as above). `--no-upload-market-data` or
   `briskapi.connect(site=..., upload_market_data=False)` keeps it local.
 - With uploads on, a broker session uploads one **timing summary** per
   trading day (per part of a day, when a lost connection or a stop splits it) to your private

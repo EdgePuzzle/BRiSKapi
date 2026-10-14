@@ -6,13 +6,17 @@ connection) to a spool folder as its batches arrive, in the recording's own Parq
     spool/segment-ID/owner.json                  the process writing it
     spool/segment-ID/data/equity.parquet         the segment's master, written with its bootstrap
     spool/segment-ID/parts/000001/data/...       the depths, trades and batch tables of each closed part
+    spool/segment-ID/shipped.json                how many parts are already shipped as pieces (see ship())
 
 A part closes every PART_SECONDS, or sooner after PART_BYTES of decoder output, and when the segment ends or
 the feed stops, so a crash loses at most the part still open. A segment takes about the disk of its finished
-recording (its decoded JSON would take some twenty times more). Once it ends, package() turns the parts into
-the canonical recording: the same bytes as from the segment's batches at once. A feed that crashed leaves its
-folder behind, with its session's choices (upload, output) in owner.json; the next feed packages it as that
-session would have, repairing the end it never got (leftovers(), _parquet.repair_end).
+recording (its decoded JSON would take some twenty times more). package() turns the parts into the canonical
+recording: the same bytes as from the segment's batches at once. A whole-market day is far more than one
+recording can hold (the archive takes 64 MiB and checks it in memory), so a broker feed ships it as it goes, a
+piece of about SEGMENT_ROWS quote updates at a time (ship()), each a recording of its own that starts with a
+bootstrap of the book as the piece before left it. A feed that crashed leaves its folder behind, with its
+session's choices (upload, output) in owner.json; the next feed ships what is left as that session would have,
+repairing the end it never got (leftovers(), _parquet.repair_end).
 """
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ import shutil
 import tempfile
 import threading
 import time
+from typing import NamedTuple
 import warnings
 
 from briskapi import _parquet
@@ -32,6 +37,18 @@ from briskapi.schema import SKIPPED, canonical_batches, local_name
 
 PART_SECONDS = 30
 PART_BYTES = 64 * 2**20
+# A piece's quote updates: the demo's 735,000 make a 39 MiB package that the archive checks in 1.7 GB of memory,
+# against its 64 MiB and its function's 3 GB. A whole-market day has some 50 million.
+SEGMENT_ROWS = 500_000
+
+
+class _Cut(NamedTuple):
+    """Where the shipped pieces left the day: each issue's last quote (Columns), the clock of the last batch, and
+    each issue's last quote and last trade so far as {issue_id: batch}."""
+    latest: object
+    clock: int
+    quoted: dict
+    traded: dict
 DEMO_SOURCES = ('historical_mock', 'synthetic_test')   # the same for everyone: nothing to keep
 
 
@@ -60,7 +77,7 @@ def _fsync(path):
 class Spool:
     """One segment's spool. The feed calls add() with each batch and its line, in order, from one thread."""
 
-    def __init__(self, root=None, intent=None):
+    def __init__(self, root=None, intent=None, on_part=None):
         root = Path(root or spool_root())
         root.mkdir(parents=True, exist_ok=True)
         self.path = Path(tempfile.mkdtemp(prefix='segment-', dir=root))
@@ -79,6 +96,9 @@ class Spool:
         self._writer = ThreadPoolExecutor(1, thread_name_prefix='brisk-spool')
         self._error = None
         self._readers, self._removed = 0, False
+        self._on_part = on_part     # called (on the writer's thread) with the spool after each part is written
+        self._shipped, self._cut, self._cut_at, self._index = 0, None, 0, {}
+        self.last_parts, self._built = [], None   # the parts of the piece last tried, and its recording if made
 
     @classmethod
     def reopen(cls, folder, intent=None):
@@ -90,6 +110,11 @@ class Spool:
         spool._parts = [(part, 0, 0) for part in parts]
         spool._writer, spool._error, spool._readers, spool._removed = ThreadPoolExecutor(1), None, 0, False
         spool._opened = time.monotonic()
+        spool._on_part, spool._cut, spool._cut_at, spool._index, spool.last_parts, spool._built = None, None, 0, {}, [], None
+        try:
+            spool._shipped = min(int(json.loads((spool.path / 'shipped.json').read_text())['parts']), len(parts))
+        except (OSError, ValueError, KeyError, TypeError):
+            spool._shipped = 0
         return spool
 
     def __repr__(self):
@@ -148,6 +173,9 @@ class Spool:
                 self._parts.append((folder, first, first + len(lines)))
         except Exception as error:  # noqa: BLE001 - the feed raises it with its next batch
             self._error = error
+            return
+        if self._on_part:
+            self._on_part(self)
 
     def replay(self, count):
         """The segment's first `count` lines, as a Live replay sends them: closed parts re-encoded, then the lines
@@ -169,17 +197,116 @@ class Spool:
         return [folder for folder, _, _ in self._parts]
 
     def package(self, output, repair=False):
-        """The segment as a package in `output` (see briskapi.cli.package_parts); with `repair`, one cut short gets
-        the end its host never wrote."""
-        from briskapi import cli
+        """What is left of the segment, in one piece, as a package in `output` (see briskapi.cli.package_parts);
+        with `repair`, one cut short gets the end its host never wrote."""
         self.close_part(wait=True)
-        return cli.package_parts(self.path / _parquet.EQUITY, self.parts(), Path(output), repair=repair)
+        shipped = self._package(self.parts()[self._shipped:], Path(output), last=True, repair=repair)
+        return shipped and shipped[0]
+
+    def ship(self, output, final=False, repair=False):
+        """Package the next piece of the segment not shipped yet into `output`, as a recording of its own: once
+        its parts hold SEGMENT_ROWS quote updates and every issue's trades so far have a quote after them (so its
+        end leaves no issue's volume ahead of its book); with `final` (the segment over, its parts all closed)
+        also what is left after the last such piece, ending as the segment did (or, with `repair`, with the end
+        its host never wrote). Returns (manifest, repaired), or None when no piece is ready. The parts count as
+        shipped once tried, packaged or not (last_parts names them), so a piece is never shipped twice."""
+        if final:
+            self.close_part(wait=True)
+        parts = self.parts()[self._shipped:]
+        cut = self._cut_state()
+        quoted, traded, rows = dict(cut.quoted), dict(cut.traded), 0
+        for count, part in enumerate(parts, 1):
+            info = self._info(part)
+            if info['end']:
+                break   # the segment's end goes with the rest
+            rows += info['rows']
+            quoted.update(info['quoted'])
+            traded.update(info['traded'])
+            if rows >= SEGMENT_ROWS and count < len(parts) and all(quoted.get(i, -1) >= s for i, s in traded.items()):
+                return self._package(parts[:count], Path(output), last=False)
+        return self._package(parts, Path(output), last=True, repair=repair) if final and parts else None
+
+    def _package(self, parts, output, last, repair=False):
+        from briskapi import cli
+        self.last_parts, self._built = parts, None
+        if not parts:
+            return None
+        repaired = False
+
+        def build():
+            nonlocal repaired
+            built = self._columns(parts)
+            if not last or repair:
+                repaired = _parquet.repair_end(built) and last
+            elif self._shipped:
+                _parquet.recount_end(built)
+            self._built = built
+            return built
+        try:
+            manifest = cli.package_parts(self.path / _parquet.EQUITY, parts, output, build=build)
+            if self._built is not None:
+                self._advance(parts, self._built)
+        finally:
+            self._mark(len(parts))
+        return manifest, repaired
+
+    @property
+    def removed(self):
+        return self._removed
+
+    @property
+    def shipped(self):
+        """How many of the parts are shipped (or were tried)."""
+        return self._shipped
+
+    def _columns(self, parts):
+        """These parts as a recording: the day's own start, or one built from where the shipped pieces left it."""
+        bootstrap = _parquet.bootstrap_row(self.parts()[0])
+        columns = _parquet.load_parts(self.path / _parquet.EQUITY, parts, _parquet.midnight_ns(bootstrap['trading_date']))
+        return _parquet.after(columns, self._cut_state(), bootstrap) if self._shipped else columns
+
+    def _info(self, part):
+        if part not in self._index:
+            self._index[part] = _parquet.part_index(part)
+        return self._index[part]
+
+    def _cut_state(self):
+        """Where the shipped pieces left the day; for a reopened spool, or after a piece that failed, rebuilt from
+        their parts a part at a time."""
+        if self._cut is None or self._cut_at != self._shipped:
+            cut, parts = _Cut(None, 0, {}, {}), self.parts()[:self._shipped]
+            if parts:
+                midnight = _parquet.midnight_ns(_parquet.bootstrap_row(self.parts()[0])['trading_date'])
+            for part in parts:
+                columns, info = _parquet.load_parts(self.path / _parquet.EQUITY, [part], midnight), self._info(part)
+                cut = _Cut(_parquet.latest(columns, cut.latest), columns.batches[-1]['source_time_us'],
+                           {**cut.quoted, **info['quoted']}, {**cut.traded, **info['traded']})
+            self._cut, self._cut_at = cut, self._shipped
+        return self._cut
+
+    def _advance(self, parts, columns):
+        """After shipping these parts (`columns`, as packaged): where they leave the day."""
+        cut = self._cut_state()
+        quoted, traded = dict(cut.quoted), dict(cut.traded)
+        for part in parts:
+            quoted.update(self._info(part)['quoted'])
+            traded.update(self._info(part)['traded'])
+        self._cut, self._cut_at = _Cut(_parquet.latest(columns), columns.batches[-1]['source_time_us'], quoted, traded), \
+            self._shipped + len(parts)
+
+    def _mark(self, count):
+        self._shipped += count
+        staging = self.path / '.shipped.json'
+        staging.write_text(json.dumps({'parts': self._shipped}))
+        os.replace(staging, self.path / 'shipped.json')
 
     def keep(self, root):
-        """The segment so far, which did not end cleanly, as a recording (tables, no manifest) in a folder of `root`
-        named after it; None when nothing reached the disk."""
+        """The piece last tried, if it was made, or else (nothing shipped yet) the segment so far, as a recording
+        (tables, no manifest) in a folder of `root` named after it; None when there is nothing to keep."""
+        if self._built is not None:
+            return _keep_columns(self._built, root)
         self.close_part(wait=True)
-        return keep_parts(self.path / _parquet.EQUITY, self.parts(), root)
+        return None if self._shipped else keep_parts(self.path / _parquet.EQUITY, self.parts(), root)
 
     def remove(self):
         """Delete the spool (once any replay still reading it ends)."""
@@ -262,7 +389,10 @@ def keep_parts(equity, parts, root):
     segment, SOURCE_YYYYMMDD_FROM-TO; None when there are none."""
     if not parts:
         return None
-    columns = _parquet.load_parts(equity, parts)
+    return _keep_columns(_parquet.load_parts(equity, parts), root)
+
+
+def _keep_columns(columns, root):
     first, last = columns.batches[0], columns.batches[-1]
     name = local_name({'source': first['source'], 'trading_date': first['trading_date'],
                        'first_source_time_us': first['source_time_us'], 'last_source_time_us': last['source_time_us']})

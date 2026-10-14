@@ -71,7 +71,7 @@ Recording isn't a third API. The live calls record as they run, and `brisk live`
 
 | Command line | Python | Records | Kept on disk | Uploaded |
 | --- | --- | --- | --- | --- |
-| `brisk live --site sbi` (or `e-shiten`, `matsui`, `monex`, `smbcnikko`) | `briskapi.connect(site="sbi")` | Your broker's live feed, one recording per trading day, until you stop it | Each finished day, with `--output DIR` (`output=`) | Each finished day, unless you opt out |
+| `brisk live --site sbi` (or `e-shiten`, `matsui`, `monex`, `smbcnikko`) | `briskapi.connect(site="sbi")` | Your broker's live feed until you stop it, each trading day as recordings of a few minutes | Each recording, with `--output DIR` (`output=`) | Each recording as it is made, unless you opt out |
 | `brisk live --site demo` | `briskapi.connect(site="demo")` | The demo replay, printed as JSON lines | With `--output DIR` | If the replay completes |
 | `brisk record --output DIR` | `briskapi.record(DIR)` | The demo replay | Always, in `DIR` | If the replay completes |
 
@@ -89,13 +89,16 @@ While it runs, `brisk live` also serves its feed to `briskapi.Live()` on this co
 
 While a day runs, it is written to disk as it arrives: Parquet files in a spool folder
 (`~/.local/share/brisk/spool`), about as large as the finished recording, so a crash loses at
-most its last half-minute. When the day ends they become its recording.
+most its last half-minute. A broker's day becomes recordings as it runs, each of about 500,000 quote
+updates (a few minutes at the open, longer later) and starting from a snapshot of the book where the
+one before ended: a whole-market day, some 50 million updates, is far more than one recording can
+hold. The demo's replay is one recording.
 
-- **Without `--output`**, a finished day goes to your [archive](#your-private-archive) and
+- **Without `--output`**, each recording goes to your [archive](#your-private-archive) and
   its local copy is removed. With uploads off as well (`--no-upload`, or
   `--no-upload-market-data` for a broker's market recording), that day isn't kept anywhere,
   so add `--output DIR` to keep it.
-- **A lost connection** doesn't lose the day. `brisk live --site sbi` (or `--site e-shiten`)
+- **A lost connection** doesn't lose the day. `brisk live --site sbi` (or another broker's site)
   reconnects by itself, after 5 s, then 10 s, 30 s, a minute and every 2 minutes. What it
   recorded before the drop is a complete recording of its own (`..._085800-101500`), kept and
   uploaded like a day, and the rest of the day is recorded from a fresh snapshot
@@ -257,27 +260,29 @@ market.events()       # basket orders, limit up/down, volume surges
 market.schedule()     # trading date, status and session times
 market.watchlist()    # your saved codes
 
-feed = briskapi.connect(site="sbi", codes=["7203"])   # live; each finished day uploaded unless you opt out
+feed = briskapi.connect(site="sbi", codes=["7203"])   # live; uploaded a few minutes at a time unless you opt out
 toyota.quote()                              # same calls as any feed
 # upload_market_data=False uploads no market recordings, upload=False nothing; output="days" keeps each day
 ```
 
-A broker feed records continuously, one recording per trading day, and keeps running across
-days. When the site's session is done or it starts serving the next trading date (checked every
-10 minutes), or the server closes the stream after the market, the day ends: it is packaged and
-uploaded (its market recording and timing summary, unless you opt out) while the feed waits for
-the next session and records it from a fresh snapshot. Started when no session is running
+A broker feed records continuously and keeps running across days. It packages and uploads each
+day as it runs, a recording of about 500,000 quote updates at a time, each starting from a snapshot
+of the book where the one before ended (in the cloud API they read as one day). When the site's
+session is done or it starts serving the next trading date (checked every 10 minutes), or the server
+closes the stream after the market, the day ends: its last recording is packaged and uploaded, with
+the day's timing summary (unless you opt out), while the feed waits for the next session and records
+it from a fresh snapshot. Started when no session is running
 (after the close, on a holiday), the feed waits for the next trading day's: `connect()` returns
 once that day has begun (`feed.status` is `"waiting"` meanwhile). `output=DIR` (`briskapi.connect(output=...)`, `brisk live --output DIR`)
-also keeps each finished day in DIR, in a folder named
-`SOURCE_YYYYMMDD_FROM-TO` (the day's first and last source clock, JST HHMMSS), such as
-`sbi_live_20261013_085800-153512`. `feed.recordings` lists the finished days (`trading_date`,
-`name`, `path`, `uploaded`, `timing_uploaded`), and `on_day=callback` is called for each.
-Without `output`, a finished day is kept only in your archive, and with uploads off, nowhere.
-Stopping the feed (`feed.close()`, Ctrl-C) ends the day there, so it is kept and uploaded like any
-day; a lost connection reconnects by itself ([Recording](#recording)). Both brokers allow one BRiSK
-session per user: close BRiSK in your browser before you start the feed, or the two cut each other off
-within seconds.
+also keeps each recording in DIR, in a folder named
+`SOURCE_YYYYMMDD_FROM-TO` (its first and last source clock, JST HHMMSS), such as
+`sbi_live_20261013_085800-090412`. `feed.recordings` lists them (`trading_date`,
+`name`, `path`, `uploaded`, `timing_uploaded`, the timing summary's on a day's last), and
+`on_day=callback` is called for each. Without `output`, a recording is kept only in your archive, and
+with uploads off, nowhere. Stopping the feed (`feed.close()`, Ctrl-C) ends the day there, so what is
+left of it is kept and uploaded like any recording; a lost connection reconnects by itself ([Recording](#recording)). SBI and e-shiten allow one BRiSK
+session per user (expect the same of the others): close BRiSK in your browser before you start the feed,
+or the two cut each other off within seconds.
 
 Results use the conventions below. Errors are `briskapi.brisk.SessionExpiredError` (log in
 again), `briskapi.NotFoundError`, `briskapi.brisk.RateLimitError` and `briskapi.brisk.APIError`.
@@ -313,8 +318,8 @@ briskapi.login("e-shiten", cookies={...})   # or BRISK_ESHITEN_COOKIES; remember
 feed = briskapi.connect(site="e-shiten", codes=["7203"])   # live
 ```
 
-Everything above applies, daily recordings and uploads included (each finished day's market
-recording and timing summary); its cookies go only to
+Everything above applies, recordings and uploads included (the market recordings as they are made
+and each day's timing summary); its cookies go only to
 next.e-shiten.brisk.jp. e-shiten allows one
 BRiSK session at a time: opening it in a second tab or browser has stopped the first
 (message 10011), so the feed and BRiSK in your browser can end each other. Before you
@@ -339,8 +344,8 @@ Everything above applies, daily recordings and uploads included (sources `matsui
 `monex_live`, `smbcnikko_live`), and each site's cookies go only to its own host. These three have
 not been tried with an account yet: should a site's app differ from SBI's, the feed stops with an
 error that says what it did not recognise (`--trace-protocol` shows the connection) rather than
-record anything doubtful. Each allows one BRiSK session per user, so close BRiSK in your browser
-first. Before you record or upload, read what your broker's BRiSK terms say about storing and
+record anything doubtful. Expect one BRiSK session per user, as at SBI and e-shiten, and close
+BRiSK in your browser first. Before you record or upload, read what your broker's BRiSK terms say about storing and
 reusing its data.
 
 ## Signing in with a passkey (experimental)
@@ -441,7 +446,7 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | `Market().frames()` | A recording's batches: clocks, local timing, quote and trade counts |
 | `Market().summary()` | Source, date, coverage and clock range |
 | `Feed.quotes(codes)` / `Feed.on_quote(fn, codes)` | Live updates as they arrive |
-| `Feed.recordings` | A live feed's finished days: `trading_date`, `name`, `path`, `uploaded`, `timing_uploaded` |
+| `Feed.recordings` | A live feed's recordings so far: `trading_date`, `name`, `path`, `uploaded`, `timing_uploaded` |
 | `briskapi.recordings()` / `.pull()` / `.load()` | Your archive's listing, verified download, local file |
 | `briskapi.Archive().upload(dir)` / `.delete(prefix)` / `.deleted()` / `.restore(prefix)` / `.timing()` / `.owner` | Upload, delete, what you deleted in the last 30 days (with `deleted_at`, `restore_until`), bring one back, your timing reports, your owner ID |
 | `briskapi.record(output, cache=None, ...)` | A recording of the demo, uploaded per your choice |
@@ -473,7 +478,7 @@ brisk sites | enroll | login | forget       # sign in to your broker's BRiSK wit
 brisk live --site sbi --codes 7203          # BRiSK at SBI Securities; cookies from BRISK_SBI_COOKIES (JSON) or `brisk login`; --trace-protocol shows the handshake, wire details in BRISK_PROFILE
 brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; cookies from BRISK_ESHITEN_COOKIES (JSON) or `brisk login`
 brisk live --site matsui --codes 7203       # Matsui (or --site monex, --site smbcnikko); cookies from BRISK_MATSUI_COOKIES (JSON) or `brisk login`; not yet tried live
-brisk live --site sbi --output days         # runs day after day; keeps each finished day in days/ (e.g. sbi_live_20261013_085800-153512) and prints a {"day": {...}} line on stderr
+brisk live --site sbi --output days         # runs day after day; keeps each recording in days/ (e.g. sbi_live_20261013_085800-090412) and prints a {"day": {...}} line for it on stderr
 brisk live --site sbi                       # records, uploads and serves briskapi.Live() (--no-gateway: serves nothing), with a line on stderr every 10 s (a minute in a log): the day, how long it has recorded, its updates and their rate
 brisk record --output recordings/s1         # record the demo (uploaded unless you opt out)
 brisk list --date 20210927 --source historical_mock   # your recordings (--timing: your timing reports; --deleted: what you deleted in the last 30 days)
@@ -505,8 +510,8 @@ Each command is the command-line form of a Python call:
 | `brisk enroll`, `login`, `forget` | `briskapi.passkey.enroll()`, `.login()`, `.forget()` |
 | `brisk export`, `brisk identity` | Command line only |
 
-`brisk live --site sbi` (or another broker's site) runs until you stop it, one recording per trading
-day; started after the close or on a holiday, it says so and waits for the next trading day. Unless you opt out, it uploads each finished day's market recording and timing summary
+`brisk live --site sbi` (or another broker's site) runs until you stop it, recording each trading
+day a few minutes at a time; started after the close or on a holiday, it says so and waits for the next trading day. Unless you opt out, it uploads its market recordings as they are made, and each day's timing summary,
 without asking; `--no-upload-market-data` stops uploading the recordings and `--no-upload` both
 (add `--output DIR` to keep them on disk). `brisk list --source sbi_live` (or `eshiten_live`, `matsui_live`, `monex_live`, `smbcnikko_live`) lists
 your broker recordings. Every `brisk live` also serves its feed to `briskapi.Live()` on this computer
@@ -537,7 +542,7 @@ operator can access what it stores, as with any hosted service; see
 
 Uploads are on by default. The first time you record or start a live session from the
 command line, the tool shows what is uploaded and asks once (Enter accepts, `n` declines),
-and saves your answer. After that, every clean, complete session (or finished day of a live
+and saves your answer. After that, every clean, complete session (or recording of a live
 feed) uploads automatically,
 without asking again. Where nothing can ask, in the Python API or a command run without a
 terminal, sessions upload by default and the tool says so once per process (a warning in
@@ -568,7 +573,7 @@ Python), until you decide with `brisk consent --accept` or `--revoke`
   `brisk restore PREFIX` (also a timing report's key) restores it. After 30 days it can no
   longer be restored and is removed.
 - Partial replays (`--limit-frames`) are never uploaded. A broker feed you stop mid-day ends that
-  day there and uploads it, and the part of a day before a lost connection is uploaded once the
+  day there and uploads what is left of it, and the part of a day before a lost connection is uploaded once the
   feed reconnects. A day a crash or forced kill cuts short is repaired with its end and uploaded
   too (the next time a feed starts, after a crash).
 

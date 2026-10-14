@@ -71,7 +71,7 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 
 | コマンドライン | Python | 記録するもの | ディスクに残るもの | アップロード |
 | --- | --- | --- | --- | --- |
-| `brisk live --site sbi`（または `e-shiten`、`matsui`、`monex`、`smbcnikko`） | `briskapi.connect(site="sbi")` | 証券会社のライブフィード。止めるまで、取引日ごとに1つの記録 | `--output DIR`（`output=`）を指定すると、終わった日ごと | 終わった日ごと（オプトアウトした場合を除く） |
+| `brisk live --site sbi`（または `e-shiten`、`matsui`、`monex`、`smbcnikko`） | `briskapi.connect(site="sbi")` | 証券会社のライブフィード。止めるまで、各取引日を数分ずつの記録として | `--output DIR`（`output=`）を指定すると、記録ごと | できた記録から順に（オプトアウトした場合を除く） |
 | `brisk live --site demo` | `briskapi.connect(site="demo")` | デモの再生（JSON の行として出力） | `--output DIR` を指定した場合 | 再生が最後まで終わった場合 |
 | `brisk record --output DIR` | `briskapi.record(DIR)` | デモの再生 | 常に `DIR` に | 再生が最後まで終わった場合 |
 
@@ -89,9 +89,11 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 
 日の途中も、届いたそばからディスクに書き込まれます。スプールフォルダー（`~/.local/share/brisk/spool`）の
 Parquet ファイルで、大きさは完成した記録とほぼ同じなので、クラッシュしても失われるのは最後の30秒ほどだけです。
-日が終わると、これがその日の記録になります。
+証券会社の日は、動いている間に、気配の更新約50万件ずつ（寄付では数分、その後はもっと長く）の記録になり、
+それぞれ直前の記録が終わった時点の板のスナップショットから始まります。全銘柄の1日は約5,000万件で、
+1つの記録に収まる量をはるかに超えるためです。デモの再生は1つの記録です。
 
-- **`--output` を指定しない場合**、終わった日は[自分のアーカイブ](#自分専用のアーカイブ)に送られ、手元の
+- **`--output` を指定しない場合**、記録は[自分のアーカイブ](#自分専用のアーカイブ)に送られ、手元の
   コピーは削除されます。さらにアップロードもオフにすると（`--no-upload`、または証券会社の市場データの記録なら
   `--no-upload-market-data`）、その日はどこにも残らないので、残すには `--output DIR` を付けてください。
 - **接続が切れても**、その日は失われません。`brisk live --site sbi`（またはほかの証券会社のサイト）は、5秒後、続いて
@@ -254,26 +256,27 @@ market.events()       # バスケット注文、ストップ高・安、出来�
 market.schedule()     # 取引日、状態、取引時間
 market.watchlist()    # 保存済みの銘柄コード
 
-feed = briskapi.connect(site="sbi", codes=["7203"])   # ライブ。オプトアウトしない限り、終わった日ごとにアップロード
+feed = briskapi.connect(site="sbi", codes=["7203"])   # ライブ。オプトアウトしない限り、数分ずつアップロード
 toyota.quote()                              # 他のフィードと同じ呼び出し
 # upload_market_data=False で市場データの記録を、upload=False ですべてをアップロードしない（残すには output="days"）
 ```
 
-証券会社のフィードは連続して記録し、取引日ごとに1つの記録を作ります。日をまたいでも動き続けます。
-サイトのセッションが終了（done）したとき、またはサイトが次の取引日を配信し始めたとき（10分ごとに確認）、
-あるいはサーバーが市場の終了後にストリームを閉じたときにその日が終わり、パッケージ化されてアップロードされ
-（市場データの記録とタイミングの要約。オプトアウトした場合を除く）、フィードは次のセッションを待って、
-新しいスナップショットから記録を始めます。セッションが開いていないとき（取引終了後や休日）に始めると、
+証券会社のフィードは連続して記録し、日をまたいでも動き続けます。各日は動いている間に、気配の更新約50万件ずつの
+記録としてパッケージ化・アップロードされ、それぞれ直前の記録が終わった時点の板のスナップショットから始まります
+（クラウド API では1日として読めます）。サイトのセッションが終了（done）したとき、またはサイトが次の取引日を
+配信し始めたとき（10分ごとに確認）、あるいはサーバーが市場の終了後にストリームを閉じたときにその日が終わり、
+最後の記録がその日のタイミングの要約とともにパッケージ化・アップロードされ（オプトアウトした場合を除く）、
+フィードは次のセッションを待って、新しいスナップショットから記録を始めます。セッションが開いていないとき（取引終了後や休日）に始めると、
 フィードは次の取引日のセッションを待ちます。`connect()` はその日が始まってから戻ります
 （待っている間の `feed.status` は `"waiting"`）。`output=DIR`
 （`briskapi.connect(output=...)`、`brisk live --output DIR`）を指定すると、
-終わった日ごとに、`SOURCE_YYYYMMDD_FROM-TO`（その日の最初と最後のソース時刻、日本時間 HHMMSS）という名前の
-フォルダー（例: `sbi_live_20261013_085800-153512`）が DIR に残ります。`feed.recordings` は終わった日の一覧
-（`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded`）で、`on_day=callback` はその日ごとに呼ばれます。
-`output` を指定しないと、終わった日は自分のアーカイブにだけ残り、アップロードもオフならどこにも残りません。
-フィードを止めると（`feed.close()`、Ctrl-C）その日はそこで終わり、ほかの日と同じように保存・アップロード
-されます。接続が切れたときは自動で再接続します（[記録する](#記録する)）。どちらの証券会社も BRiSK は
-1ユーザー1セッションまでです。フィードを始める前にブラウザの BRiSK を閉じてください。開いたままだと、
+記録ごとに、`SOURCE_YYYYMMDD_FROM-TO`（その最初と最後のソース時刻、日本時間 HHMMSS）という名前の
+フォルダー（例: `sbi_live_20261013_085800-090412`）が DIR に残ります。`feed.recordings` はその一覧
+（`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded`。タイミングの要約は各日の最後の記録に）で、
+`on_day=callback` は記録ごとに呼ばれます。`output` を指定しないと、記録は自分のアーカイブにだけ残り、
+アップロードもオフならどこにも残りません。フィードを止めると（`feed.close()`、Ctrl-C）その日はそこで終わり、
+残りの分がほかの記録と同じように保存・アップロードされます。接続が切れたときは自動で再接続します
+（[記録する](#記録する)）。SBI と e支店の BRiSK は1ユーザー1セッションまでです（ほかの証券会社も同じと考えてください）。フィードを始める前にブラウザの BRiSK を閉じてください。開いたままだと、
 数秒のうちに互いを切断します。
 
 結果は下記の規約に従います。エラーは `briskapi.brisk.SessionExpiredError`（再ログインが
@@ -310,8 +313,8 @@ briskapi.login("e-shiten", cookies={...})   # または BRISK_ESHITEN_COOKIES。
 feed = briskapi.connect(site="e-shiten", codes=["7203"])   # ライブ
 ```
 
-上記の説明は日ごとの記録とアップロードも含めてそのまま当てはまります（終わった日ごとの市場データの
-記録とタイミングの要約をアップロードします）。Cookie は
+上記の説明は記録とアップロードも含めてそのまま当てはまります（できた市場データの記録から順に、
+そして各日のタイミングの要約をアップロードします）。Cookie は
 next.e-shiten.brisk.jp にのみ送られます。e支店の
 BRiSK は同時に1セッションまでで、別のタブやブラウザで開くと先に開いていた方が
 止まりました（メッセージ 10011）。そのため、フィードとブラウザの BRiSK は互いに
@@ -333,11 +336,11 @@ briskapi.login("matsui", cookies={...})   # remember=True でほかの証券会�
 feed = briskapi.connect(site="matsui", codes=["7203"])   # ライブ
 ```
 
-上記の説明は日ごとの記録とアップロードも含めてそのまま当てはまり（データ源は `matsui_live`、
+上記の説明は記録とアップロードも含めてそのまま当てはまり（データ源は `matsui_live`、
 `monex_live`、`smbcnikko_live`）、各サイトの Cookie はそのサイトのホストにのみ送られます。この3社は
 まだ口座で試していません。サイトのアプリが SBI のものと違う場合、フィードは疑わしいものを記録せず、
-何を認識できなかったかを示すエラーで止まります（`--trace-protocol` で接続を表示）。どれも1ユーザーにつき
-BRiSK は1セッションまでなので、先にブラウザの BRiSK を閉じてください。記録やアップロードの前に、
+何を認識できなかったかを示すエラーで止まります（`--trace-protocol` で接続を表示）。SBI や e支店と同じく
+1ユーザー1セッションまでと考え、先にブラウザの BRiSK を閉じてください。記録やアップロードの前に、
 お使いの証券会社の BRiSK の規定でデータの蓄積や二次利用についての定めを確認してください。
 
 ## パスキーでのサインイン（試験的）
@@ -440,7 +443,7 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | `Market().frames()` | 記録のバッチ：時刻、計測値、気配と約定の件数 |
 | `Market().summary()` | データ源、日付、銘柄数、時刻の範囲 |
 | `Feed.quotes(codes)` / `Feed.on_quote(fn, codes)` | 届いた順のライブ更新 |
-| `Feed.recordings` | ライブフィードの終わった日の一覧：`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded` |
+| `Feed.recordings` | ライブフィードのこれまでの記録の一覧：`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded` |
 | `briskapi.recordings()` / `.pull()` / `.load()` | 自分のアーカイブの一覧、検証付きダウンロード、ローカルファイル |
 | `briskapi.Archive().upload(dir)` / `.delete(prefix)` / `.deleted()` / `.restore(prefix)` / `.timing()` / `.owner` | アップロード、削除、過去30日間に削除したもの（`deleted_at`、`restore_until` 付き）、元に戻す、自分のタイミングレポート、自分の owner ID |
 | `briskapi.record(output, cache=None, ...)` | デモの記録（設定に従ってアップロード） |
@@ -472,7 +475,7 @@ brisk sites | enroll | login | forget       # Chrome 経由のパスキーで証
 brisk live --site sbi --codes 7203          # SBI証券の BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_PROFILE）
 brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）または `brisk login` が保存したもの
 brisk live --site matsui --codes 7203       # 松井証券（または --site monex、--site smbcnikko）。Cookie は BRISK_MATSUI_COOKIES（JSON）または `brisk login` が保存したもの。まだ口座で未検証
-brisk live --site sbi --output days         # 日をまたいで動き続け、終わった日ごとに days/ に残し（例: sbi_live_20261013_085800-153512）、stderr に {"day": {...}} を1行出力
+brisk live --site sbi --output days         # 日をまたいで動き続け、記録ごとに days/ に残し（例: sbi_live_20261013_085800-090412）、stderr に {"day": {...}} を1行出力
 brisk live --site sbi                       # 記録・アップロードし、briskapi.Live() に配信（--no-gateway で配信しない）。10秒ごと（ログでは1分ごと）に stderr に1行: その日、記録した時間、更新数とその速さ
 brisk record --output recordings/s1         # デモを記録（オプトアウトしない限りアップロード）
 brisk list --date 20210927 --source historical_mock   # 自分の記録（--timing で自分のタイミングレポート、--deleted で過去30日間に削除したもの）
@@ -504,9 +507,9 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 | `brisk enroll`、`login`、`forget` | `briskapi.passkey.enroll()`、`.login()`、`.forget()` |
 | `brisk export`、`brisk identity` | コマンドラインのみ |
 
-`brisk live --site sbi`（またはほかの証券会社のサイト）は、止めるまで動き続け、取引日ごとに1つの記録を作ります。
+`brisk live --site sbi`（またはほかの証券会社のサイト）は、止めるまで動き続け、各取引日を数分ずつ記録します。
 取引終了後や休日に始めると、そう表示して次の取引日を待ちます。
-オプトアウトしない限り、終わった日ごとの市場データの記録とタイミングの要約を確認なしで
+オプトアウトしない限り、市場データの記録をできたものから順に、各日のタイミングの要約とともに確認なしで
 アップロードします。`--no-upload-market-data` で記録を、`--no-upload` で両方をアップロードしなくなります
 （ディスクに残すには `--output DIR`）。`brisk list --source sbi_live`（または `eshiten_live`、`matsui_live`、`monex_live`、`smbcnikko_live`）で自分の証券会社の記録を
 一覧できます。どの `brisk live` も、`--no-gateway` を指定しない限り、このコンピューターの
@@ -538,7 +541,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 
 アップロードは既定でオンです。コマンドラインで初めて記録またはライブセッションを始めると、
 アップロードされる内容が表示され、一度だけ確認されます（Enter で同意、`n` で拒否）。答えは
-保存され、それ以降は最後まで正常に終わったセッション（ライブフィードでは終わった日）が、改めて
+保存され、それ以降は最後まで正常に終わったセッション（ライブフィードでは各記録）が、改めて
 確認することなく自動的にアップロードされます。確認できない場面（Python API や端末のないコマンド実行）では、
 `brisk consent --accept` または `--revoke`（`briskapi.consent(accept=True)` または
 `revoke=True`）で決めるまで、セッションは既定でアップロードされ、プロセスごとに一度その旨を
@@ -566,7 +569,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
   （`deleted_at` と `restore_until` 付き）を一覧でき、`brisk restore PREFIX`（タイミングレポートの
   キーも可）で復元します。30日を過ぎると復元できなくなり、削除されます。
 - 途中までの再生（`--limit-frames`）はアップロードされません。日の途中で止めた証券会社のフィードは、その日を
-  そこで終えてアップロードし、接続が切れる前の分はフィードが再接続した時点でアップロードされます。クラッシュや
+  そこで終えて残りの分をアップロードし、接続が切れる前の分はフィードが再接続した時点でアップロードされます。クラッシュや
   強制終了で途切れた日も、終わりの印を付けて修復し、アップロードします（クラッシュの場合は次にフィードを起動した
   とき）。
 
