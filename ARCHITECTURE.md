@@ -498,7 +498,8 @@ notional columns (quantity × price) on the way. A call costs the same for 1 row
 
 Both builds' books are the same both ways: the demo's whole replay (its reference digests), every
 book through the demo's opening auction, and the 2026 build with the demo's snapshot against the
-demo decoder through `_getItaRows`. A book now costs about 3 µs and a quote 11 µs (70 µs when the
+demo decoder through `_getItaRows`. The kernel also finds where each side's orders begin, so the levels are read
+from the best price outward. A quote now costs about 8 µs (70 µs when the
 ladder was walked 32 rows at a time).
 
 Trades come from the decoder's QR records, which it keeps on the host side: for each

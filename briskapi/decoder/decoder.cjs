@@ -15,7 +15,7 @@ const HISTORY = 50000;   // trades per history batch (those a snapshot restores)
 const BOARD_CHECK_EVERY = 4096;   // ladder reads between checks against _getItaRows (see BoardReader)
 const BOARD_RETRY_EVERY = 20000;  // books read before a BoardReader is looked for again, while no board had orders
 // board.wat, assembled (wat2wasm): the board totals summed in the decoder's memory.
-const BOARD_KERNEL = 'AGFzbQEAAAABCAFgBH9/f38AAg8BA2VudgZtZW1vcnkCAAEDAgEABwcBA3N1bQAACtMBAdABAgV/BHsCQANAIAQgAk8NASABIARqIQVBOCAFQThwayEGIAYgAiAEa0sEQCACIARrIQYLIAAgBUE4bkECdGooAgAgBUE4cEHIAGxqIQcgByAGQcgAbGohCANAIAkgB/0AAwj98AEhCSAKIAf9AAMo/fABIQogCyAH/V0CGP3JAf3OASELIAwgB/1dAjj9yQH9zgEhDCAHQcgAaiEHIAcgCEkNAAsgBCAGaiEEDAALCyADIAn9CwMAIAMgCv0LAxAgAyAL/QsDICADIAz9CwMwCw==';
+const BOARD_KERNEL = 'AGFzbQEAAAABCAFgBH9/f38AAg8BA2VudgZtZW1vcnkCAAEDAgEABwcBA3N1bQAACrYDAbMDBAZ/AXwEewR/QX8hD0F/IRBBfyERQX8hEgJAA0AgBCACTw0BIAEgBGohBUE4IAVBOHBrIQYgBiACIARrSwRAIAIgBGshBgsgACAFQThuQQJ0aigCACAFQThwQcgAbGohByAHIAZByABsaiEIIAQhCQNAIAsgB/0AAwj98AEhCyAMIAf9AAMo/fABIQwgDSAH/V0CGP3JAf3OASENIA4gB/1dAjj9yQH9zgEhDiAHKwMIIQogCSAPIApEAAAAAAAAAABkIApEAAAAAAAAAABjchshDyAHKwMQIQogCSAQIApEAAAAAAAAAABkIApEAAAAAAAAAABjchshECAHKwMoIQogCSARIBFBAEggCkQAAAAAAAAAAGQgCkQAAAAAAAAAAGNycRshESAHKwMwIQogCSASIBJBAEggCkQAAAAAAAAAAGQgCkQAAAAAAAAAAGNycRshEiAJQQFqIQkgB0HIAGohByAHIAhJDQALIAQgBmohBAwACwsgAyAL/QsDACADIAz9CwMQIAMgDf0LAyAgAyAO/QsDMCADIA82AkAgAyAQNgJEIAMgETYCSCADIBI2AkwL';
 // The order groups of a _getItaRows row (204 bytes): quantity (u64) and order count (u64) word offsets.
 const GROUPS = {
   bid: { name: 'bid', buy: true, closing: false, quantity: 5, orders: 9 },
@@ -990,7 +990,7 @@ class BoardReader {
   }
 
   constructor(decoder, calls, memory, sum) {
-    Object.assign(this, { decoder, calls, memory, sum, reads: 0, prices: new Map(), sums: decoder.w._malloc(64) });
+    Object.assign(this, { decoder, calls, memory, sum, reads: 0, prices: new Map(), sums: decoder.w._malloc(80) });
   }
 
   views() {
@@ -1158,18 +1158,20 @@ class BoardReader {
     const totals = { bid_total_quantity: q(sums), bid_total_orders: orders(0), bid_closing_total_quantity: q(sums + 8),
       bid_closing_total_orders: orders(1), ask_total_quantity: q(sums + 16), ask_total_orders: orders(2),
       ask_closing_total_quantity: q(sums + 24), ask_closing_total_orders: orders(3) };
-    // A side's best LEVELS prices with orders: the bids from the top of the ladder down, the asks from the bottom up.
-    const levels = (quantity, count, buy) => {
+    // A side's best LEVELS prices with orders: the bids from the highest with orders down, the asks from the
+    // lowest up (the kernel found where they begin; every level beyond is empty).
+    const levels = (quantity, count, buy, from) => {
       const out = [];
-      for (let k = 0; k < size && out.length < LEVELS; k++) {
-        const slot = buy ? size - 1 - k : k, e = this.level(map, start, slot);
+      for (let slot = from; slot >= 0 && slot < size && out.length < LEVELS; slot += buy ? -1 : 1) {
+        const e = this.level(map, start, slot);
         if (f[(e + quantity) >> 3]) out.push([this.price(m, base + slot), q(e + quantity), u[(e + count) >> 2]]);
       }
       return out;
     };
-    const bid_levels = levels(8, 24, true), ask_levels = levels(40, 56, false);
-    const bid_closing_levels = totals.bid_closing_total_quantity ? levels(16, 28, true) : [];
-    const ask_closing_levels = totals.ask_closing_total_quantity ? levels(48, 60, false) : [];
+    const from = k => this.i[(sums + 64 + 4 * k) >> 2];
+    const bid_levels = levels(8, 24, true, from(0)), ask_levels = levels(40, 56, false, from(2));
+    const bid_closing_levels = totals.bid_closing_total_quantity ? levels(16, 28, true, from(1)) : [];
+    const ask_closing_levels = totals.ask_closing_total_quantity ? levels(48, 60, false, from(3)) : [];
     const inside = price => price >= m.limit_down10 && price <= m.limit_up10;
     const at = (side, price, quantity, count, buy) => {
       const level = side.find(([x]) => x === price);
