@@ -36,6 +36,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
+from briskapi import _https
 from briskapi._recording import JST, BriskError, NotFoundError, Table
 
 
@@ -112,7 +113,7 @@ class Session:
         self.cookies = dict(cookies)
         self.rate_limit, self.timeout = rate_limit, timeout
         self.token = None
-        self._opener = opener or urllib.request.build_opener(_NoRedirect)
+        self._opener = opener or urllib.request.build_opener(urllib.request.HTTPSHandler(context=_https.context()), _NoRedirect)
         self._last = 0.0
 
     @property

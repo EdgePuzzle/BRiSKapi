@@ -19,7 +19,7 @@ import urllib.request
 import uuid
 import warnings
 
-from briskapi import _parquet, identity
+from briskapi import _https, _parquet, identity
 from briskapi._recording import BriskError, Recording
 from briskapi.schema import (RECORDING_PREFIX, REFERENCES, SCHEMA, MAX_COMPRESSED, TIMING_KEY, canonical_batches, encode,
                              local_name, owner, recording_name, validate_manifest, validate_timing, require)
@@ -214,7 +214,7 @@ def request_json(url, data=None, secret=None):
         secure(url)
         # Unredirected: urllib would copy an ordinary header to wherever a redirect points.
         request.add_unredirected_header('Authorization', f'Bearer {secret}')
-    with urllib.request.urlopen(request, timeout=60) as response:
+    with urllib.request.urlopen(request, timeout=60, context=_https.context()) as response:
         return json.load(response)
 
 def api(api_url, action, **fields):
@@ -254,7 +254,7 @@ def upload(directory, api_url, timeout=660, verify=True, out=None, market=None):
     parts.extend([blob, f'\r\n--{boundary}--\r\n'.encode()])
     request = urllib.request.Request(ticket['upload']['url'], data=b''.join(parts),
              headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}, method='POST')
-    with urllib.request.urlopen(request, timeout=120) as response:
+    with urllib.request.urlopen(request, timeout=120, context=_https.context()) as response:
         response.read()
     status_url = api_url.rstrip('/') + '/?ticket=' + ticket['ticket']
     print(json.dumps({'ticket': ticket['ticket'], 'status_url': status_url}), file=out, flush=True)
@@ -317,7 +317,7 @@ def pull(api_url, prefix, output):
     with tempfile.TemporaryDirectory(dir=output.parent) as tmp:
         directory, total = Path(tmp), 0
         for name in _parquet.FILES:
-            with urllib.request.urlopen(urls[name], timeout=120) as body:
+            with urllib.request.urlopen(urls[name], timeout=120, context=_https.context()) as body:
                 data = body.read(MAX_COMPRESSED + 1 - total)
             total += len(data)
             require(total <= m['bytes'], 'Size/hash mismatch')
@@ -376,7 +376,7 @@ def prune(api_url, directory):
 def _stored_table(api_url, prefix, name=_parquet.BATCHES):
     url = api(api_url, 'download', prefix=prefix)['files'][name]
     require(isinstance(url, str) and url.startswith('https://'), 'Invalid download URL')
-    with urllib.request.urlopen(url, timeout=120) as body:
+    with urllib.request.urlopen(url, timeout=120, context=_https.context()) as body:
         return body.read(MAX_COMPRESSED + 1)
 
 def export(source, nautilus=None, jsonl=None):

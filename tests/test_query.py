@@ -411,7 +411,7 @@ def test_the_python_client(archive, monkeypatch, tmp_path):
 
     monkeypatch.setattr(_historical.urllib.request, 'build_opener', lambda *handlers: Opener())
     monkeypatch.setattr(_historical.urllib.request, 'urlopen',
-                        lambda url, timeout: _Response(s3.objects[url.removeprefix('https://s3.test/')], {}))
+                        lambda url, timeout, **_: _Response(s3.objects[url.removeprefix('https://s3.test/')], {}))
     with pytest.raises(ValueError, match='Refusing to send your identity'):
         briskapi.Historical(gateway='http://query.test/')
     client = briskapi.Historical(gateway='https://query.test/')

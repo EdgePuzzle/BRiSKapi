@@ -26,7 +26,7 @@ import warnings
 
 import pyarrow.parquet as pq
 
-from briskapi import cli, identity
+from briskapi import _https, cli, identity
 from briskapi._recording import BriskError
 
 
@@ -165,11 +165,12 @@ class Historical:
         auth = base64.b64encode(f'{self.key}:'.encode()).decode()
         request = urllib.request.Request(url, data=data, headers={'Authorization': f'Basic {auth}'})
         try:
-            with urllib.request.build_opener(_NoRedirect).open(request, timeout=300) as response:
+            with urllib.request.build_opener(urllib.request.HTTPSHandler(context=_https.context()), _NoRedirect).open(
+                    request, timeout=300) as response:
                 return response.read(), response.headers.get('content-type', '')
         except urllib.error.HTTPError as error:
             if error.code in (301, 302, 303, 307) and error.headers.get('location', '').startswith('https://'):
-                with urllib.request.urlopen(error.headers['location'], timeout=300) as response:
+                with urllib.request.urlopen(error.headers['location'], timeout=300, context=_https.context()) as response:
                     return response.read(), response.headers.get('content-type', '')
             try:
                 detail = json.loads(error.read()).get('detail', '')

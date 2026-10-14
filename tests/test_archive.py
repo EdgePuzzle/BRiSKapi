@@ -199,7 +199,7 @@ def online(monkeypatch):
             raise ValueError(body['error'])
         return body
     monkeypatch.setattr(cli, 'request_json', request_json)
-    monkeypatch.setattr(cli.urllib.request, 'urlopen', lambda url, timeout: io.BytesIO(s3.objects[url.removeprefix('https://s3.test/')]))
+    monkeypatch.setattr(cli.urllib.request, 'urlopen', lambda url, timeout, **_: io.BytesIO(s3.objects[url.removeprefix('https://s3.test/')]))
     return s3, db
 
 def stored(s3, db, directory, m):
@@ -1020,12 +1020,33 @@ def test_upload_sends_the_whole_replay_until_the_archive_holds_its_market_data(p
     with pytest.raises(urllib.error.HTTPError):
         cli.upload(directory, API, verify=False)
 
+def test_https_verifies_against_the_systems_certificates_where_python_has_none(monkeypatch, tmp_path):
+    # As Python from python.org on macOS before its "Install Certificates" step: no CA certificate loaded.
+    from briskapi import _https
+    loaded = []
+    class Context:
+        def __init__(self, cas): self.cas = cas
+        def cert_store_stats(self): return {'x509_ca': self.cas}
+        def load_verify_locations(self, bundle): loaded.append(bundle)
+    bundle = tmp_path / 'cert.pem'
+    bundle.write_text('')
+    monkeypatch.setattr(_https, 'SYSTEM_BUNDLES', (str(tmp_path / 'missing.pem'), str(bundle)))
+    for cas, expected in ((0, [str(bundle)]), (128, [])):
+        _https.context.cache_clear()
+        loaded.clear()
+        monkeypatch.setattr(_https.ssl, 'create_default_context', lambda cas=cas: Context(cas))
+        assert _https.context().cas == cas and loaded == expected
+    _https.context.cache_clear()
+
+
 def test_request_json(monkeypatch):
-    seen = []
-    monkeypatch.setattr(cli.urllib.request, 'urlopen', lambda request, **kw: seen.append(request) or HTTP(b'{"ok":true}'))
+    seen, contexts = [], []
+    monkeypatch.setattr(cli.urllib.request, 'urlopen',
+                        lambda request, **kw: seen.append(request) or contexts.append(kw.get('context')) or HTTP(b'{"ok":true}'))
     assert cli.request_json('https://example.test', {'a': 1}) == {'ok': True}
     assert cli.request_json('https://example.test', {'a': 1}, SECRET) == {'ok': True}
     assert seen[0].get_header('Authorization') is None and seen[1].get_header('Authorization') == f'Bearer {SECRET}'
+    assert contexts[0] is contexts[1] is cli._https.context(), 'verified with the shared TLS context'
     # Never copied to wherever a redirect points, and never sent over plain HTTP but to this computer.
     assert 'Authorization' not in seen[1].headers and seen[1].unredirected_hdrs['Authorization'] == f'Bearer {SECRET}'
     for url in ('http://example.test', 'ftp://example.test', 'file:///tmp/x'):
