@@ -20,8 +20,7 @@ MAX_BROKER_COMPRESSED = 4 * 1024**3
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_LINE = 16 * 1024 * 1024
 SCHEMA = 'brisk-nautilus-parquet-v2'
-SOURCES = {'historical_mock', 'synthetic_test', 'sbi_live', 'eshiten_live', 'matsui_live', 'monex_live',
-           'smbcnikko_live'}
+SOURCES = {'historical_mock', 'synthetic_test', 'brisk_live'}
 QUOTE_KEYS = set('issue_id code frame source_time_us max_frame last_price10 open_price10 bid_price10 ask_price10 indicative_price10 indicative_volume indicative_imbalance_side closing_indicative_price10 closing_indicative_volume closing_indicative_imbalance_side quote_flag quote_side special_quote_time_us indicative_open_price10 reference_price10 volume turnover10 issue_status market_buy_quantity market_sell_quantity closing_market_buy_quantity closing_market_sell_quantity bid_quantity bid_orders ask_quantity ask_orders bid_levels ask_levels bid_closing_levels ask_closing_levels bid_total_quantity bid_total_orders bid_closing_total_quantity bid_closing_total_orders ask_total_quantity ask_total_orders ask_closing_total_quantity ask_closing_total_orders'.split())
 # A side of the book (or of its closing-condition orders): up to LEVELS [price10, quantity, orders], best price first.
 BOOK_KEYS = {'bid_levels', 'ask_levels', 'bid_closing_levels', 'ask_closing_levels'}
@@ -44,14 +43,34 @@ SKIPPED = 'skipped_issues'
 MAX_HISTORY = 50_000
 SUMMARY_KEYS = {'source', 'trading_date', 'first_source_time_us', 'last_source_time_us', 'codes', 'batches', 'quote_updates', 'expanded_bytes'}
 DEMO_ORIGIN = 'https://next-demo.brisk.jp/'
-# Broker-hosted BRiSK (SBI, Tachibana e-shiten, Matsui, Monex, SMBC Nikko): the same app and decoder, so the
-# same rules; each keeps only its fixed transport provenance.
-BROKER_TRANSPORT = {'sbi_live': {'kind': 'sbi_websocket', 'origin': 'https://sbi.brisk.jp/'},
-                    'eshiten_live': {'kind': 'eshiten_websocket', 'origin': 'https://next.e-shiten.brisk.jp/'},
-                    'matsui_live': {'kind': 'matsui_websocket', 'origin': 'https://matsui.brisk.jp/'},
-                    'monex_live': {'kind': 'monex_websocket', 'origin': 'https://monex.brisk.jp/'},
-                    'smbcnikko_live': {'kind': 'smbcnikko_websocket', 'origin': 'https://smbcnikko.brisk.jp/'}}
-SBI_TRANSPORT = BROKER_TRANSPORT['sbi_live']
+# Broker-hosted BRiSK (SBI, Tachibana e-shiten, Matsui, Monex, SMBC Nikko) is one app with the same market data,
+# so its recordings are one source, BROKER_SOURCE; each keeps only its site's fixed transport provenance, which
+# says which broker's it came through (BROKER_TRANSPORTS, by briskapi.brisk site).
+BROKER_SOURCE = 'brisk_live'
+BROKER_TRANSPORTS = {'sbi': {'kind': 'sbi_websocket', 'origin': 'https://sbi.brisk.jp/'},
+                     'e-shiten': {'kind': 'eshiten_websocket', 'origin': 'https://next.e-shiten.brisk.jp/'},
+                     'matsui': {'kind': 'matsui_websocket', 'origin': 'https://matsui.brisk.jp/'},
+                     'monex': {'kind': 'monex_websocket', 'origin': 'https://monex.brisk.jp/'},
+                     'smbcnikko': {'kind': 'smbcnikko_websocket', 'origin': 'https://smbcnikko.brisk.jp/'}}
+# Before 1.4.0 each broker's recordings were a source of their own. Those kept on a computer still read as a broker's
+# (each with its own site's transport); the archive takes none of them.
+LEGACY_BROKER_SOURCES = {'sbi_live': 'sbi', 'eshiten_live': 'e-shiten', 'matsui_live': 'matsui', 'monex_live': 'monex',
+                         'smbcnikko_live': 'smbcnikko'}
+UPGRADE = 'This briskapi is too old for the archive: upgrade it (python -m pip install -U briskapi)'
+
+def broker(source):
+    """Whether a recording's source is a broker's live BRiSK (or, kept on a computer, one from before 1.4.0)."""
+    return source == BROKER_SOURCE or source in LEGACY_BROKER_SOURCES
+
+def transports(source):
+    """The transport provenance a broker's recording of this source may have: any broker's, or a legacy source's own."""
+    if source in LEGACY_BROKER_SOURCES:
+        return [BROKER_TRANSPORTS[LEGACY_BROKER_SOURCES[source]]]
+    return list(BROKER_TRANSPORTS.values()) if source == BROKER_SOURCE else []
+
+def site_of(transport):
+    """The broker site whose transport provenance this is, or None."""
+    return next((site for site, fixed in BROKER_TRANSPORTS.items() if transport == fixed), None)
 REFERENCE_DIR = Path(__file__).resolve().parent / 'references'
 # Local measurements are client reported. Plausible ranges and microsecond
 # precision keep them useful as timing data and useless as a payload carrier.
@@ -107,13 +126,13 @@ def canonical_batches(source):
         require(len(line) <= MAX_LINE, 'Recording exceeds decode limit')
         b = json.loads(line, parse_constant=_nonfinite)
         require(isinstance(b, dict), 'Invalid batch')
-        fixed = BROKER_TRANSPORT.get(b.get('source')) if b.get('type') == 'bootstrap' else None
-        if fixed:
-            transport = b.get('input_transport')
-            if isinstance(transport, dict) and all(transport.get(k) == v for k, v in fixed.items()):
-                # Keep only the fixed transport provenance, never session/profile or
+        transport = b.get('input_transport') if b.get('type') == 'bootstrap' else None
+        for fixed in transports(b.get('source')) if isinstance(transport, dict) else ():
+            if all(transport.get(k) == v for k, v in fixed.items()):
+                # Keep only the site's fixed transport provenance, never session/profile or
                 # decoder paths and connection diagnostics from the local host.
                 b['input_transport'] = dict(fixed)
+                break
         for key in ('master', 'quotes', 'trades'):
             if isinstance(b.get(key), list):
                 b[key].sort(key=_issue)  # stable: trades keep the decoder's order within an issue
@@ -150,8 +169,8 @@ class Fingerprint:
         return self.issues[issue].hexdigest()[:32]
 
 def _transport(value, source):
-    if source in BROKER_TRANSPORT:
-        require(value == BROKER_TRANSPORT[source], 'Invalid broker transport fields')
+    if broker(source):
+        require(value in transports(source), 'Invalid broker transport fields')
         return
     require(value == {'kind': 'local_cache'} or (isinstance(value, dict) and set(value) == {'kind', 'origin', 'asset_fetch_ms'}
             and value['kind'] == 'https_recorded_assets' and value['origin'] == DEMO_ORIGIN), 'Invalid transport fields')
@@ -230,7 +249,7 @@ def _scan(entries):
             require(previous_stamp <= stamp <= received + MAX_SESSION_MS, 'Local receipt clock regression/span')
             previous_stamp = stamp
             lateness = b['replay_lateness_ms']
-            if source in BROKER_TRANSPORT:
+            if broker(source):
                 require(lateness is None, 'Broker streams are not demo replays')
             if lateness is not None:
                 measurement(lateness, MAX_SESSION_MS)
@@ -290,7 +309,7 @@ def _scan(entries):
             require(len(quotes) + len(skipped) == len(identities), 'Incomplete bootstrap')
         if kind == 'end':
             frames = integer(b['frames'])
-            require((frames >= seq - 1 if source in BROKER_TRANSPORT else frames == seq)
+            require((frames >= seq - 1 if broker(source) else frames == seq)
                     and integer(b['quote_updates']) == updates, 'End summary mismatch')
             measurement(b['replay_wall_ms'], MAX_SESSION_MS)
             ended = True
@@ -345,7 +364,7 @@ def validate_batches(batches, references=None):
     """Validate canonical fields/continuity, plus reference content for demo/synthetic data.
 
     Broker live content is uploader-declared and has no reference
-    replay. Its transport is exactly its BROKER_TRANSPORT, and replay_lateness_ms must
+    replay. Its transport is exactly one of BROKER_TRANSPORTS, and replay_lateness_ms must
     be null. End frames include pre-bootstrap catch-up frames as well as the emitted
     quote batches. A batch lists in skipped_issues the issues whose quote could not be
     read; a bootstrap's quotes and skipped issues together cover its master.
@@ -353,7 +372,7 @@ def validate_batches(batches, references=None):
     return _verify(*_scan((b, None) for b in batches), references)
 
 def _verify(summary, fingerprint, market, references):
-    if summary['source'] in BROKER_TRANSPORT:
+    if broker(summary['source']):
         return summary
     reference = (REFERENCES if references is None else references).get(summary['source'])
     require(reference is not None, 'No reference replay for this source')
@@ -384,10 +403,11 @@ def recording_name(m) -> str:
     s = m['summary']
     return f"{s['trading_date']}/{hhmmss(s['first_source_time_us'])}-{hhmmss(s['last_source_time_us'])}-{m['sha256']}"
 
-def local_name(summary) -> str:
-    """A folder name for a recording kept on this computer: SOURCE_YYYYMMDD_FROM-TO."""
-    return (f"{summary['source']}_{summary['trading_date']}_{hhmmss(summary['first_source_time_us'])}-"
-            f"{hhmmss(summary['last_source_time_us'])}")
+def local_name(summary, transport=None) -> str:
+    """A folder name for a recording kept on this computer: SOURCE_YYYYMMDD_FROM-TO, a broker's SITE_YYYYMMDD_FROM-TO
+    (its site, from its bootstrap's `transport`), so two brokers' recordings of a session never meet."""
+    head = site_of(transport) if broker(summary['source']) and site_of(transport) else summary['source']
+    return f"{head}_{summary['trading_date']}_{hhmmss(summary['first_source_time_us'])}-{hhmmss(summary['last_source_time_us'])}"
 
 def owner(secret):
     """The owner ID of an identity secret."""
@@ -397,14 +417,15 @@ def owner(secret):
 def max_package(source):
     """The largest package the archive takes of a source: a broker's recording is a trading session of the whole
     market, checked a row group at a time; a demo or synthetic one is checked whole, in memory."""
-    return MAX_BROKER_COMPRESSED if source in BROKER_TRANSPORT else MAX_COMPRESSED
+    return MAX_BROKER_COMPRESSED if broker(source) else MAX_COMPRESSED
 
 def validate_manifest(m):
     require(isinstance(m, dict) and set(m) == {'schema', 'sha256', 'bytes', 'summary'}, 'Invalid manifest fields')
     require(m['schema'] == SCHEMA and isinstance(m['sha256'], str) and re.fullmatch('[0-9a-f]{64}', m['sha256']), 'Invalid schema/hash')
     summary = m['summary']
-    require(isinstance(summary, dict) and set(summary) == SUMMARY_KEYS and isinstance(summary['source'], str)
-            and summary['source'] in SOURCES, 'Invalid summary')
+    require(isinstance(summary, dict) and summary.get('source') not in LEGACY_BROKER_SOURCES, UPGRADE)
+    require(set(summary) == SUMMARY_KEYS and isinstance(summary['source'], str) and summary['source'] in SOURCES,
+            'Invalid summary')
     require(0 < integer(m['bytes'], max_package(summary['source'])), 'Empty upload')
     require(isinstance(summary['trading_date'], str) and re.fullmatch(r'\d{8}', summary['trading_date']), 'Invalid summary date')
     dt.datetime.strptime(summary['trading_date'], '%Y%m%d')
@@ -425,9 +446,8 @@ def validate_manifest(m):
     return m
 
 # Timing reports: what a broker session uploads besides its market recording.
-TIMING_SCHEMA = 'brisk-timing-v2'
-TIMING_SOURCES = set(BROKER_TRANSPORT)
-TIMING_KEYS = {'schema', 'source', 'trading_date', 'first_minute', 'last_minute', 'frames', 'stalls',
+TIMING_SCHEMA = 'brisk-timing-v3'
+TIMING_KEYS = {'schema', 'source', 'site', 'trading_date', 'first_minute', 'last_minute', 'frames', 'stalls',
                'client_version', 'decode_ms', 'source_age_ms', 'interarrival_ms'}
 QUANTILES = ('p50', 'p90', 'p99', 'max')
 # Bounds per distribution (ms). Source age can be negative when local and feed clocks disagree.
@@ -440,8 +460,9 @@ def validate_timing(report, today=None):
 
     `today` (a date) additionally requires a trading date within the last 30 days.
     """
-    require(isinstance(report, dict) and set(report) == TIMING_KEYS, 'Invalid timing report fields')
-    require(report['schema'] == TIMING_SCHEMA and report['source'] in TIMING_SOURCES, 'Invalid timing schema/source')
+    require(isinstance(report, dict) and report.get('schema') == TIMING_SCHEMA, UPGRADE)
+    require(set(report) == TIMING_KEYS, 'Invalid timing report fields')
+    require(report['source'] == BROKER_SOURCE and report['site'] in BROKER_TRANSPORTS, 'Invalid timing schema/source')
     date = report['trading_date']
     require(isinstance(date, str) and re.fullmatch(r'\d{8}', date), 'Invalid timing date')
     day = dt.datetime.strptime(date, '%Y%m%d').date()

@@ -181,8 +181,8 @@ def sbi_session(frames=150):
          'issue_id': 0, 'code': '7203', 'frame': 1, 'max_frame': 1, 'source_time_us': OPEN_US,
          'indicative_price10': 101500, 'market_buy_quantity': 3, 'market_sell_quantity': 1}
     master = {**dict.fromkeys(schema.MASTER_KEYS, 0), 'issue_id': 0, 'code': '7203', 'name': 'Toyota', 'lot_size': 100}
-    batches = [dict(type='bootstrap', seq=0, source='sbi_live', trading_date='20260311', source_time_us=OPEN_US,
-                    input_transport={**schema.SBI_TRANSPORT, 'decoder': '/private/decoder.js', 'setup_ms': 1.123456},
+    batches = [dict(type='bootstrap', seq=0, source='brisk_live', trading_date='20260311', source_time_us=OPEN_US,
+                    input_transport={**schema.BROKER_TRANSPORTS['sbi'], 'decoder': '/private/decoder.js', 'setup_ms': 1.123456},
                     source_timestamp_origin='brisk_decoder_unverified', exchange_delay_ms=None,
                     market_issue_count=1, master=[master], quotes=[q], trades=[])]
     for i in range(1, frames + 1):
@@ -210,7 +210,7 @@ def fake_host(tmp_path, monkeypatch):
 def test_live_feed_via_node(fake_host, capfd):
     briskapi.login(cookies={'session_bfaf77a2': 'v'})
     feed = briskapi.connect(site='sbi', codes=['7203'], history=True, upload=False)
-    assert briskapi.current() is feed and feed.source == 'sbi_live'
+    assert briskapi.current() is feed and feed.source == 'brisk_live'
     feed.wait()
     assert briskapi.Ticker('7203').quote()['last_price'] == 10160.0 and feed.uploaded is None
     assert len(briskapi.Ticker('7203').history()) == 151 and feed.timing_uploaded is None
@@ -222,7 +222,7 @@ def test_connect_signs_in_from_the_sites_variable_when_login_has_not(fake_host, 
     briskapi.logout()
     monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
     feed = briskapi.connect(site='sbi', upload=False).wait()
-    assert feed.source == 'sbi_live' and brisk._default().site == 'sbi'
+    assert feed.source == 'brisk_live' and brisk._default().site == 'sbi'
 
 
 def test_connect_takes_a_site_and_only_its_options(tmp_path):
@@ -272,7 +272,7 @@ def test_cli_live_sbi(fake_host, monkeypatch, capsys):
     lines = [json.loads(line) for line in out.out.splitlines()]
     # The one-time question names what a broker session uploads: a timing summary and the market recording.
     assert lines[-1]['last_price'] == 10160.0 and 'timing summary' in out.err and 'decoded market recording' in out.err
-    assert cli.load_consent()['enabled'] and sent[0]['source'] == 'sbi_live' and len(market) == 1
+    assert cli.load_consent()['enabled'] and sent[0]['source'] == 'brisk_live' and len(market) == 1
     assert not {'quotes', 'master', 'code', 'price'} & set(json.dumps(sent[0]).replace('"', ' ').split())
 
 
@@ -378,7 +378,7 @@ def test_sbi_market_upload_follows_consent_and_opt_outs(fake_host, monkeypatch):
     # Once agreed, a clean session uploads its market recording too, without asking.
     feed = briskapi.connect(site='sbi').wait()
     assert feed.uploaded == {'status': 'stored'} and len(sent) == 1 and len(timing) == 1
-    assert sent[0]['summary']['source'] == 'sbi_live' and set(sent[0]) == {'schema', 'sha256', 'bytes', 'summary'}
+    assert sent[0]['summary']['source'] == 'brisk_live' and set(sent[0]) == {'schema', 'sha256', 'bytes', 'summary'}
     assert not any(_spool.spool_root().glob('segment-*')), 'the day leaves no spool behind'
     assert briskapi.connect(site='sbi', upload_market_data=True).wait().uploaded == {'status': 'stored'} and len(sent) == 2
     # The opt-outs: the market recording alone, the whole session, or the whole process.
@@ -457,7 +457,7 @@ setInterval(() => {{}}, 1000);
     assert feed.status == 'closed' and feed.uploaded == {'status': 'stored'}
     assert [s['batches'] for s in sent] == [42] and sent[0]['quote_updates'] == 41   # the bootstrap's, then 40
     name, = [day['name'] for day in feed.recordings]
-    assert name == 'sbi_live_20260311_090000-090004' and (tmp_path / 'days' / name / 'manifest.json').exists()
+    assert name == 'sbi_20260311_090000-090004' and (tmp_path / 'days' / name / 'manifest.json').exists()
     assert not any(_spool.kept_dir().glob('*')) and not any(_spool.spool_root().glob('segment-*'))
 
 
@@ -481,7 +481,7 @@ def test_a_day_whose_host_cannot_end_it_is_repaired_with_its_end_and_uploaded(tm
         feed.close(timeout=0.5)
     assert feed.status == 'closed' and feed.uploaded == {'status': 'stored'}
     assert [s['batches'] for s in sent] == [2], 'the bootstrap and its repaired end'
-    assert feed.recordings[-1]['repaired'] and feed.recordings[-1]['name'].startswith('sbi_live_20260311_')
+    assert feed.recordings[-1]['repaired'] and feed.recordings[-1]['name'].startswith('sbi_20260311_')
     assert not any(_spool.kept_dir().glob('*')) and not any(_spool.spool_root().glob('segment-*'))
 
 
@@ -504,10 +504,10 @@ def test_the_next_feed_repairs_and_uploads_a_crashed_sessions_day_as_that_sessio
     monkeypatch.setattr(cli, 'upload_timing', lambda report, url: {'status': 'stored'})
     briskapi.login(cookies={'session_bfaf77a2': 'v'})
     briskapi.consent(accept=True)
-    with pytest.warns(UserWarning, match='stopped unexpectedly left sbi_live_20260311_090000-090002 behind: repaired'):
+    with pytest.warns(UserWarning, match='stopped unexpectedly left sbi_20260311_090000-090002 behind: repaired'):
         briskapi.connect(site='sbi', codes=['7203']).wait()
     assert sorted(sent) == [31, 152], 'the crashed session\'s day, repaired, and this one\'s'
-    assert [p.name for p in (tmp_path / 'days').iterdir()] == ['sbi_live_20260311_090000-090002']
+    assert [p.name for p in (tmp_path / 'days').iterdir()] == ['sbi_20260311_090000-090002']
     assert not any(_spool.spool_root().glob('segment-*'))
 
 
@@ -548,7 +548,7 @@ def test_a_reconnect_keeps_and_uploads_the_segment_before_it_as_its_own_recordin
     briskapi.login(cookies={'session_bfaf77a2': 'v'})
     briskapi.consent(accept=True)
     feed = briskapi.connect(site='sbi', codes=['7203'], output=tmp_path / 'days').wait()
-    assert [day['name'] for day in feed.recordings] == ['sbi_live_20260311_090000-090016', 'sbi_live_20260311_100000-100002']
+    assert [day['name'] for day in feed.recordings] == ['sbi_20260311_090000-090016', 'sbi_20260311_100000-100002']
     assert len(sent) == 2 and all(day['uploaded'] == {'status': 'stored'} for day in feed.recordings)
     assert not any(_spool.spool_root().glob('segment-*'))
 
@@ -569,7 +569,7 @@ def test_a_feed_keeps_and_uploads_each_trading_day_as_it_ends(tmp_path, monkeypa
     # One recording per day, named for its first and last source clock, kept and uploaded.
     assert sent == timing == ['20260311', '20260312'] and days == feed.recordings
     names = [day['name'] for day in feed.recordings]
-    assert names == ['sbi_live_20260311_090000-090016', 'sbi_live_20260312_090000-090013']
+    assert names == ['sbi_20260311_090000-090016', 'sbi_20260312_090000-090013']
     assert sorted(p.name for p in (tmp_path / 'days').iterdir()) == names
     assert briskapi.Recording(tmp_path / 'days' / names[0]).manifest['summary']['trading_date'] == '20260311'
     assert all(day['uploaded'] == day['timing_uploaded'] == {'status': 'stored'} for day in feed.recordings)
@@ -645,7 +645,7 @@ def test_a_feed_with_no_session_to_join_waits_for_the_next_trading_days(tmp_path
     assert feed.waiting == {'date': '2026-03-10', 'session_status': 'done'} and feed.seq == -1
     assert feed.ready(timeout=0.2) is feed and feed.status == 'running'
     feed.wait()
-    assert [day['name'] for day in feed.recordings] == ['sbi_live_20260311_090000-090016', 'sbi_live_20260312_090000-090002']
+    assert [day['name'] for day in feed.recordings] == ['sbi_20260311_090000-090016', 'sbi_20260312_090000-090002']
     assert feed.trading_date == '20260312' and feed.waiting is None
     # A host that stops while waiting fails the start as any other would.
     script.write_text(f"console.log(JSON.stringify({json.dumps({'type': 'waiting', 'date': '2026-03-10'})}));\n"
@@ -708,8 +708,8 @@ def eshiten_host(tmp_path, monkeypatch):
     """A stand-in for brisk.cjs on e-shiten that reports the site it was asked for and checks that its
     cookies came in e-shiten's own variable."""
     batches = sbi_session()
-    batches[0] = {**batches[0], 'source': 'eshiten_live', 'input_transport': {
-        **schema.BROKER_TRANSPORT['eshiten_live'], 'ws_host': 'api.brisk.jp', 'decoder': '/private/decoder.js'}}
+    batches[0] = {**batches[0], 'input_transport': {
+        **schema.BROKER_TRANSPORTS['e-shiten'], 'ws_host': 'api.brisk.jp', 'decoder': '/private/decoder.js'}}
     script = tmp_path / 'eshiten_fake.cjs'
     script.write_text('if (JSON.parse(process.env.BRISK_ESHITEN_COOKIES).s !== "v") process.exit(9);\n'
                       'console.error(process.env.BRISK_SITE);\n'
@@ -731,10 +731,11 @@ def test_e_shiten_uploads_like_sbi_and_honors_opt_out(eshiten_host, monkeypatch,
     briskapi.login(cookies={'s': 'v'}, site='e-shiten')
     with pytest.warns(UserWarning, match='by default'):
         feed = briskapi.connect(site='e-shiten', codes=['7203']).wait()
-    assert feed.source == 'eshiten_live' and briskapi.Ticker('7203').quote()['last_price'] == 10160.0
+    assert feed.source == 'brisk_live' and briskapi.Ticker('7203').quote()['last_price'] == 10160.0
     assert feed.timing_uploaded == {'status': 'stored'} and feed.uploaded == {'status': 'stored'}
-    assert eshiten_host['timing'][0]['source'] == 'eshiten_live'
-    assert eshiten_host['market'][0]['summary']['source'] == 'eshiten_live'
+    timing, market = eshiten_host['timing'][0], eshiten_host['market'][0]
+    assert (timing['source'], timing['site'], market['summary']['source']) == ('brisk_live', 'e-shiten', 'brisk_live')
+    assert feed.recordings[-1]['name'].startswith('e-shiten_20260311_'), 'kept apart from another broker\'s'
     assert 'e-shiten' in capfd.readouterr().err
     assert briskapi.connect(site='e-shiten', upload_market_data=False).wait().uploaded is None
     assert briskapi.connect(site='e-shiten', upload=False).wait().timing_uploaded is None
@@ -793,7 +794,25 @@ def test_a_broker_feed_on_a_python_with_the_gil_warns_that_it_can_fall_behind(fa
     monkeypatch.setattr(brisk.sys, '_is_gil_enabled', lambda: True)   # the feed then reads its lines one at a time
     with pytest.warns(UserWarning, match=r'has the GIL.*free-threaded Python 3\.14'):
         feed = briskapi.connect(site='sbi', upload=False)
-    assert feed.wait().source == 'sbi_live'
+    assert feed.wait().source == 'brisk_live'
+
+
+def test_two_brokers_recording_the_same_session_into_one_folder_keep_both_named_by_site(fake_host, tmp_path, monkeypatch):
+    # The same market data through two brokers (as a tester compares them): one source, two recordings, each named
+    # for its broker, neither in the other's way.
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    sbi = briskapi.connect(site='sbi', upload=False, output=tmp_path / 'days').wait()
+    batches = sbi_session()
+    batches[0] = {**batches[0], 'input_transport': {**schema.BROKER_TRANSPORTS['e-shiten'], 'decoder': '/private/decoder.js'}}
+    script = tmp_path / 'eshiten_fake.cjs'
+    script.write_text(f'for (const b of {json.dumps(batches)}) console.log(JSON.stringify(b));\n')
+    monkeypatch.setattr(brisk, 'DECODER', script)
+    briskapi.login(cookies={'s': 'v'}, site='e-shiten')
+    eshiten = briskapi.connect(site='e-shiten', upload=False, output=tmp_path / 'days').wait()
+    assert sorted(p.name for p in (tmp_path / 'days').iterdir()) == ['e-shiten_20260311_090000-090016', 'sbi_20260311_090000-090016']
+    assert sbi.source == eshiten.source == 'brisk_live'
+    for name in ('e-shiten_20260311_090000-090016', 'sbi_20260311_090000-090016'):
+        assert briskapi.Recording(tmp_path / 'days' / name).manifest['summary']['source'] == 'brisk_live'
 
 
 def test_every_broker_is_the_same_in_the_host_the_client_and_the_archive_schema():
@@ -804,7 +823,9 @@ def test_every_broker_is_the_same_in_the_host_the_client_and_the_archive_schema(
     assert list(host) == list(brisk.SITES) == list(briskapi.SITES[1:])
     for site, ours in brisk.SITES.items():
         theirs = host[site]
-        assert (theirs['origin'], theirs['name'], theirs['cookies'], theirs['source']) == (ours.origin, ours.name, ours.cookies_env, ours.source)
-        assert schema.BROKER_TRANSPORT[ours.source] == {'kind': theirs['transport'], 'origin': ours.origin + '/'}
-        assert ours.source in schema.SOURCES
-    assert set(schema.BROKER_TRANSPORT) == {site.source for site in brisk.SITES.values()}
+        assert (theirs['origin'], theirs['name'], theirs['cookies']) == (ours.origin, ours.name, ours.cookies_env)
+        assert schema.BROKER_TRANSPORTS[site] == {'kind': theirs['transport'], 'origin': ours.origin + '/'}
+    assert set(schema.BROKER_TRANSPORTS) == set(brisk.SITES) and schema.BROKER_SOURCE in schema.SOURCES
+    source = subprocess.run(['node', '-e', f"console.log(require({json.dumps(str(brisk.DECODER))}).SOURCE)"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    assert source == schema.BROKER_SOURCE

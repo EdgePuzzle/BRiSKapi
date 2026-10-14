@@ -48,17 +48,17 @@ class _Site(NamedTuple):
     origin: str
     name: str
     cookies_env: str
-    source: str  # the archive's label for its sessions
 
 
-# Brokers whose BRiSK is this app; decoder/brisk.cjs keeps the same table, briskapi.schema their sources and
-# transports. SBI's and e-shiten's have been used live; Matsui's, Monex's and SMBC Nikko's are the same
+# Brokers whose BRiSK is this app, with the same market data: their recordings are one source,
+# schema.BROKER_SOURCE, each with its site's transport provenance (schema.BROKER_TRANSPORTS); decoder/brisk.cjs
+# keeps the same table. SBI's and e-shiten's have been used live; Matsui's, Monex's and SMBC Nikko's are the same
 # vendor's app on their own hosts, not yet tried with an account.
-SITES = {'sbi': _Site('https://sbi.brisk.jp', 'SBI BRiSK', 'BRISK_SBI_COOKIES', 'sbi_live'),
-         'e-shiten': _Site('https://next.e-shiten.brisk.jp', 'e-shiten BRiSK Next', 'BRISK_ESHITEN_COOKIES', 'eshiten_live'),
-         'matsui': _Site('https://matsui.brisk.jp', 'Matsui BRiSK', 'BRISK_MATSUI_COOKIES', 'matsui_live'),
-         'monex': _Site('https://monex.brisk.jp', 'Monex BRiSK', 'BRISK_MONEX_COOKIES', 'monex_live'),
-         'smbcnikko': _Site('https://smbcnikko.brisk.jp', 'SMBC Nikko BRiSK', 'BRISK_SMBCNIKKO_COOKIES', 'smbcnikko_live')}
+SITES = {'sbi': _Site('https://sbi.brisk.jp', 'SBI BRiSK', 'BRISK_SBI_COOKIES'),
+         'e-shiten': _Site('https://next.e-shiten.brisk.jp', 'e-shiten BRiSK Next', 'BRISK_ESHITEN_COOKIES'),
+         'matsui': _Site('https://matsui.brisk.jp', 'Matsui BRiSK', 'BRISK_MATSUI_COOKIES'),
+         'monex': _Site('https://monex.brisk.jp', 'Monex BRiSK', 'BRISK_MONEX_COOKIES'),
+         'smbcnikko': _Site('https://smbcnikko.brisk.jp', 'SMBC Nikko BRiSK', 'BRISK_SMBCNIKKO_COOKIES')}
 ORIGIN = SITES['sbi'].origin
 DECODER = Path(__file__).resolve().parent / 'decoder' / 'brisk.cjs'
 INTERVALS = ('5m', '1d', '1w', '1mo')
@@ -328,7 +328,7 @@ def _connect(site, codes=None, history=False, node='node', timeout=120, upload=N
     next one starts from a fresh snapshot once the site's session is running. Started with no session
     running (after the close, on a holiday), it waits for the next trading day's. Each day is packaged on a
     worker thread in two recordings, the morning session's once the lunch break begins and the afternoon's
-    at the day's end, each kept in `output` (a folder named SOURCE_YYYYMMDD_FROM-TO, FROM and TO
+    at the day's end, each kept in `output` (a folder named SITE_YYYYMMDD_FROM-TO, its site and
     its first and last source clock, JST HHMMSS) if given and uploaded as chosen; `on_day(result)` is then
     called and `feed.recordings` lists it.
     gateway=True also serves the feed to briskapi.Live on this computer, as dataset XTKS.BRISK.
@@ -351,7 +351,7 @@ def _connect(site, codes=None, history=False, node='node', timeout=120, upload=N
     env = {**os.environ, SITES[session.site].cookies_env: json.dumps(session.cookies), 'BRISK_SITE': session.site}
     if profile:
         env['BRISK_PROFILE'] = json.dumps(profile)
-    feed = Feed(command=command, env=env, history=history, upload=upload, timing=SITES[session.site].source,
+    feed = Feed(command=command, env=env, history=history, upload=upload, timing=session.site,
                 upload_market_data=upload_market_data, output=output, on_day=on_day, gateway=gateway)
     try:
         return feed.ready(timeout)

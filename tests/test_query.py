@@ -50,7 +50,7 @@ def cumulative(issue, second):
     return volume, turnover
 
 
-def session(first, last, date=DATE, source='sbi_live'):
+def session(first, last, date=DATE, source='brisk_live'):
     """A broker session from `first` to `last` (seconds after 09:00), one quote batch per second."""
     midnight_ms = int(dt.datetime.strptime(date, '%Y%m%d').replace(tzinfo=JST).timestamp() * 1000)
     master = [{**dict.fromkeys(schema.MASTER_KEYS, 0), 'issue_id': i, 'code': code, 'name': f'Issue {code}', 'lot_size': 100,
@@ -70,7 +70,7 @@ def session(first, last, date=DATE, source='sbi_live'):
                 'market_sell_quantity': 200 if opening else 0, 'reference_price10': price}
 
     batches = [dict(type='bootstrap', seq=0, source=source, trading_date=date, source_time_us=OPEN_US + first * 1_000_000,
-                    input_transport={**schema.BROKER_TRANSPORT[source], 'decoder': '/private/decoder.js'},
+                    input_transport={**schema.BROKER_TRANSPORTS['sbi'], 'decoder': '/private/decoder.js'},
                     source_timestamp_origin='brisk_decoder_unverified', exchange_delay_ms=None, market_issue_count=2,
                     master=master, quotes=[quote(0, first), quote(1, first)], trades=[])]
     for seq, second in enumerate(range(first + 1, last + 1), 1):

@@ -166,7 +166,7 @@ it into place, so a crash loses at most the part still open. A day's
 parts take about the disk of its recording; its decoded JSON, which the feed used to keep in a
 temporary file, takes some twenty times more. At the day's end the feed hands the spool to a
 worker thread (a `ThreadPoolExecutor` of one, so days finish in order) and reads on. The worker packages
-the day, keeps it in `output` as `SOURCE_YYYYMMDD_FROM-TO` (`schema.local_name`; FROM and
+the day, keeps it in `output` as `SOURCE_YYYYMMDD_FROM-TO`, a broker's as `SITE_YYYYMMDD_FROM-TO` (`schema.local_name`; FROM and
 TO are the day's first and last source clock, JST HHMMSS; a folder already there is left
 alone, with a warning), uploads it to the owner's private archive and uploads its
 timing summary, as chosen, then appends its result (`trading_date`, `name`, `path`,
@@ -336,7 +336,7 @@ to the broker; a session needs the gateway's key and nothing else.
 ## Timing reports
 
 A timing report is uploaded even when a broker session keeps its market
-recording local. A report (`brisk-timing-v2`) holds p50/p90/p99/max of decode time, feed-clock age
+recording local. A report (`brisk-timing-v3`; its `source` is `brisk_live` and its `site` the broker's) holds p50/p90/p99/max of decode time, feed-clock age
 at receipt and frame spacing, a stall count (gaps over one second), the frame count,
 trading date, first/last JST minute and client version. It covers one day: a session
 that records several uploads one report per day, each when its day ends, and a day cut
@@ -785,10 +785,10 @@ it in a second tab stopped the first (message 10011).
 
 `site="e-shiten"` selects it (`BRISK_SITE=e-shiten` for the host; saved cookies in
 `e-shiten-cookies.json`, `BRISK_ESHITEN_COOKIES`). Its batches say
-`source=eshiten_live` and `kind=eshiten_websocket`. Its sessions are uploaded as
+`source=brisk_live` (every broker's) and `kind=eshiten_websocket`. Its sessions are uploaded as
 SBI's are: a timing summary and, after each day's clean end, the market recording, under the saved
 choice and with the same opt-outs; packaging keeps only `next.e-shiten.brisk.jp` as its
-transport provenance (`BROKER_TRANSPORT` in `schema.py`). `brisk login` can sign in to it with a passkey (site `e-shiten`; see
+transport provenance (`BROKER_TRANSPORTS` in `schema.py`). `brisk login` can sign in to it with a passkey (site `e-shiten`; see
 [Tachibana e-shiten's sign-in](#tachibana-e-shitens-sign-in)).
 
 ### Matsui, Monex and SMBC Nikko
@@ -1072,7 +1072,7 @@ nothing could make trustworthy:
   batch it arrived in) and a hash of the batch clock timeline; it contains no
   market data. Any subset of securities is accepted, but only complete replays.
   `tools/brisk_mock/build_reference.py` regenerates it after a re-audited asset pin.
-  This comparison applies only to demo/synthetic sources, not to the broker ones (`sbi_live`, ...).
+  This comparison applies only to demo/synthetic sources, not to the brokers' (`brisk_live`).
 - **Canonical tables.** Each table must have exactly its schema and metadata, a
   pyarrow writer, zstd, full row groups and no bytes between its column chunks.
   Every row group must equal the encoding of the validated content, including the
@@ -1089,7 +1089,7 @@ nothing could make trustworthy:
   so it can exceed the number of emitted quote batches. Broker packaging removes
   connection/decoder diagnostics and keeps only the site's fixed transport metadata,
   `{"kind":"sbi_websocket","origin":"https://sbi.brisk.jp/"}` for SBI
-  (`eshiten_websocket` and `https://next.e-shiten.brisk.jp/` for e-shiten, and so on: `BROKER_TRANSPORT`).
+  (`eshiten_websocket` and `https://next.e-shiten.brisk.jp/` for e-shiten, and so on: `BROKER_TRANSPORTS`, any of which a `brisk_live` recording may have).
   The service rejects any additional transport fields.
 - **Verified tables, no uploaded zip.** The service stores the uploaded tables
   once verified, each as its own object. The zip that carried them is never kept, so
@@ -1220,8 +1220,13 @@ only the lifecycle does.
 
 ### Sources
 
-The decoded schema accepts `historical_mock`, `synthetic_test` and the brokers' `sbi_live`,
-`eshiten_live`, `matsui_live`, `monex_live` and `smbcnikko_live`. The small, self-authored
+The decoded schema accepts `historical_mock`, `synthetic_test` and `brisk_live`: every broker's BRiSK
+is one app with the same market data, so their recordings are one source, each with its site's
+transport provenance (`BROKER_TRANSPORTS`), which says which broker's it came through; folders on a
+computer are named for the site. Before 1.4.0 each broker had a source of its own (`sbi_live`,
+`eshiten_live`, ...): recordings kept on a computer under those names still read as a broker's
+(`LEGACY_BROKER_SOURCES`), but the archive refuses them, and 1.3's timing reports, with an
+upgrade message; none was ever stored. The small, self-authored
 `synthetic_test` fixture verifies uploads; filter by source when selecting market data. Uploaded
 decoded broker recordings retain their `source` and undergo the canonical-table and structural checks above.
 Their market accuracy is uploader-declared; they are not silently treated as

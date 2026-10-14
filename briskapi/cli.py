@@ -599,7 +599,7 @@ def _main(argv):
                    help='Serve the feed to briskapi.Live() on this computer only (127.0.0.1, with a key in an owner-only '
                         'file; default: yes)')
     p.add_argument('--output', type=Path, metavar='DIR',
-                   help='Keep each recording here as SOURCE_YYYYMMDD_FROM-TO (its first and last clock, JST HHMMSS); a broker\'s '
+                   help='Keep each recording here as SOURCE_YYYYMMDD_FROM-TO, a broker\'s SITE_YYYYMMDD_FROM-TO (its first and last clock, JST HHMMSS); a broker\'s '
                         'day comes a few minutes at a time')
     p.add_argument('--site', choices=('demo', *brisk_sites()), required=True,
                    help="demo: the public BRiSK Next demo, a 2021 recording replayed here; sbi: SBI Securities' live BRiSK, "

@@ -167,7 +167,7 @@
    "codes": "デコードする銘柄（既定: 市場全体）。",
    "history": "すべての更新と約定を保持します（`Ticker.history()` と `.trades()` のため）。",
    "upload": "`False` なら何もアップロードしません。`None` なら設定に従います（既定ではオン）。",
-   "output": "記録ごとに（証券会社の日は複数の記録になります）、`SOURCE_YYYYMMDD_FROM-TO` という名前でここにも残します。",
+   "output": "記録ごとに（証券会社の日は複数の記録になります）、`SOURCE_YYYYMMDD_FROM-TO`（証券会社のものは `SITE_YYYYMMDD_FROM-TO`）という名前でここにも残します。",
    "on_day": "記録ごとに、その結果（残したか、アップロードしたか）を渡して呼ばれます。",
    "gateway": "このコンピューターの `briskapi.Live()` にもフィードを配信します（`brisk live` は既定で配信します）。",
    "timeout": "初期状態を待つ秒数（既定は 60、証券会社では 120。参加できるセッションがない証券会社のフィードは、次の取引日のセッションを待ちます）。",
@@ -211,7 +211,7 @@
   "returns": "`{prefix, source, trading_date, securities, batches, quote_updates, bytes, sha256}` の `Table`。",
   "params": {
    "date": "この取引日のみ（`YYYYMMDD`）。",
-   "source": "証券会社のもの（`sbi_live`、`eshiten_live`、`matsui_live`、`monex_live`、`smbcnikko_live`）、または `historical_mock`（デモ）。"
+   "source": "`brisk_live`（どの証券会社のものも）、または `historical_mock`（デモ）。"
   }
  },
  "python/consent": {
@@ -430,7 +430,7 @@
    "history": "すべての更新と約定を保持します。",
    "upload": "`False` なら何もアップロードしません。",
    "upload_market_data": "`False` なら、タイミングの要約はアップロードしますが、市場データの記録はアップロードしません。",
-   "output": "記録ごとに、`SOURCE_YYYYMMDD_FROM-TO` という名前でここに残します。",
+   "output": "記録ごとに、`SITE_YYYYMMDD_FROM-TO`（証券会社のサイト）という名前でここに残します。",
    "on_day": "記録ごとに、その結果を渡して呼ばれます。",
    "gateway": "このコンピューターの `briskapi.Live()` にもフィードを配信します（`brisk live` は既定で配信します）。",
    "trace_protocol": "接続手順を出力します（トークンは伏せ字）。",

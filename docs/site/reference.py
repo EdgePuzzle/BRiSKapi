@@ -241,7 +241,7 @@ PYTHON = [
             P('history', 'bool', 'Keep every update and trade, for `Ticker.history()` and `.trades()`.'),
             P('upload', 'bool | None', '`False` uploads nothing; `None` follows your choice (on by default).'),
             P('output', 'str | Path | None', 'Also keep each recording here (a broker\'s day comes as several), as '
-              '`SOURCE_YYYYMMDD_FROM-TO`.'),
+              '`SOURCE_YYYYMMDD_FROM-TO` (a broker\'s `SITE_YYYYMMDD_FROM-TO`).'),
             P('on_day', 'Callable | None', 'Called with each recording\'s result (kept, uploaded).'),
             P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).'),
             P('timeout', 'float | None', 'Seconds to wait for the initial state (default 60, or 120 for a broker; a broker '
@@ -292,12 +292,11 @@ PYTHON = [
            'Your recordings in your private archive.',
            'briskapi.recordings(\n    date: str | None = None,\n    source: str | None = None,\n) -> Table',
            [P('date', 'str | None', 'Only this trading date (`YYYYMMDD`).'),
-            P('source', 'str | None', 'A broker\'s (`sbi_live`, `eshiten_live`, `matsui_live`, `monex_live`, '
-              '`smbcnikko_live`) or `historical_mock` (the demo).')],
+            P('source', 'str | None', '`brisk_live` (every broker\'s) or `historical_mock` (the demo).')],
            'A `Table` of `{prefix, source, trading_date, securities, batches, quote_updates, bytes, sha256}`.',
-           {'Python': 'import briskapi\n\nprint(briskapi.recordings(source="sbi_live").to_pandas())', 'CLI': 'brisk list --source sbi_live'},
+           {'Python': 'import briskapi\n\nprint(briskapi.recordings(source="brisk_live").to_pandas())', 'CLI': 'brisk list --source brisk_live'},
            {'Python': '                                      prefix    source trading_date  securities  batches  quote_updates     bytes  …\n'
-            '0  archive/3f…/20261013/085800-153512-7c14…  sbi_live     20261013        4445   201834        8913442  51230119  …'},
+            '0  archive/3f…/20261013/085800-113000-7c14…  brisk_live   20261013        4445   201834        8913442  51230119  …'},
            illustrative=True),
     Method('python/consent', 'briskapi.consent', 'consent',
            'Show, accept or revoke automatic uploads to your private archive. Uploads are on by default (`default: True` '
@@ -534,7 +533,7 @@ BROKER = [
             P('codes', 'list[str] | None', 'Securities to decode.'), P('history', 'bool', 'Keep every update and trade.'),
             P('upload', 'bool | None', '`False` uploads nothing.'),
             P('upload_market_data', 'bool | None', '`False` uploads the timing summary but not the market recording.'),
-            P('output', 'str | Path | None', 'Keep each recording here as `SOURCE_YYYYMMDD_FROM-TO`.'),
+            P('output', 'str | Path | None', 'Keep each recording here as `SITE_YYYYMMDD_FROM-TO` (its broker\'s site).'),
             P('on_day', 'Callable | None', 'Called with each recording\'s result.'),
             P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).'),
             P('trace_protocol', 'bool', 'Print the connection steps, tokens redacted.'),

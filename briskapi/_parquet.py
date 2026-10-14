@@ -39,9 +39,10 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from briskapi.schema import (BATCH_KEYS, BROKER_TRANSPORT, LEVELS, MASTER_KEYS, MAX_COMPRESSED, MAX_DECODE_NS, MAX_HISTORY,
+from briskapi.schema import (BATCH_KEYS, LEVELS, MASTER_KEYS, MAX_COMPRESSED, MAX_DECODE_NS, MAX_HISTORY,
                              MAX_SESSION_MS, QUOTE_KEYS, SCHEMA, SKIPPED, TRADE_KEYS, UNIX_MS, canonical, canonical_batches,
-                             code, encode, integer, measurement, require, validate_batches, validate_manifest)
+                             code, encode, integer, measurement, require, transports, validate_batches, validate_manifest)
+from briskapi.schema import broker as is_broker
 
 VENUE = 'XTKS'
 EQUITY, DEPTHS, TRADES, BATCHES = ('data/equity.parquet', 'data/order_book_depths.parquet', 'data/trades.parquet',
@@ -686,7 +687,7 @@ def check(directory, broker=None):
     """
     directory = Path(directory)
     if broker is None:
-        broker = _source(directory) in BROKER_TRANSPORT
+        broker = is_broker(_source(directory))
     max_rows, max_decoded = (BROKER_MAX_ROWS, BROKER_MAX_DECODED) if broker else (MAX_ROWS, MAX_DECODED)
     for name in FILES:
         path = directory / name
@@ -1254,7 +1255,7 @@ def unpack(data: bytes, directory, names=FILES):
 def summarize(directory, references=None):
     """Check and validate a recording directory; returns the archive summary. A broker's is checked a row group
     at a time (verify_broker), anything else whole."""
-    if _source(directory) in BROKER_TRANSPORT:
+    if is_broker(_source(directory)):
         return verify_broker(directory)
     check(directory)
     return validate_batches(Columns.load(directory).iter_batches(), references)
@@ -1270,7 +1271,7 @@ def _source(directory):
 def verify_package(directory, manifest, references=None):
     """The archive's checks of an upload's tables (all four, in `directory`) against its manifest: a broker's a
     row group at a time (verify_broker), a demo or synthetic one whole (verify_directory)."""
-    if validate_manifest(manifest)['summary']['source'] in BROKER_TRANSPORT:
+    if is_broker(validate_manifest(manifest)['summary']['source']):
         return verify_broker(directory, manifest)
     return verify_directory(directory, manifest, references)
 
@@ -1335,11 +1336,11 @@ def _check_batches(batches, master):
     require(batches and len(batches) <= BROKER_MAX_ROWS[BATCHES], 'Recording has no bootstrap')
     identities = {m['issue_id'] for m in master}
     first, last, received, previous_stamp, previous_kind = batches[0], 0, None, None, None
-    require(first['type'] == 'bootstrap' and first['source'] in BROKER_TRANSPORT, 'Unsupported bootstrap/source')
+    require(first['type'] == 'bootstrap' and is_broker(first['source']), 'Unsupported bootstrap/source')
     require(isinstance(first['trading_date'], str) and re.fullmatch(r'\d{8}', first['trading_date']), 'Invalid date')
     dt.datetime.strptime(first['trading_date'], '%Y%m%d')
     require(integer(first['market_issue_count']) >= len(master), 'Invalid market count')
-    require(first['input_transport'] == BROKER_TRANSPORT[first['source']], 'Invalid broker transport fields')
+    require(first['input_transport'] in transports(first['source']), 'Invalid broker transport fields')
     require(first['source_timestamp_origin'] == 'brisk_decoder_unverified', 'Invalid clock provenance')
     require(first['exchange_delay_ms'] is None, 'Unverified exchange delay')
     for seq, b in enumerate(batches):

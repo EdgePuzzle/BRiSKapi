@@ -291,11 +291,12 @@ class Spool:
         staging = Path(tempfile.mkdtemp(dir=self.path))
         summary = _parquet.write_piece(self.path / _parquet.EQUITY, parts, staging, piece['midnight'], piece['cut'],
                                        piece['bootstrap'], piece['end'] or 'repair')[0]
-        target = Path(root) / local_name(summary)
+        name = local_name(summary, piece['bootstrap'].get('input_transport'))
+        target = Path(root) / name
         for n in range(2, 100):
             if not target.exists():
                 break
-            target = Path(root) / f'{local_name(summary)}-{n}'
+            target = Path(root) / f'{name}-{n}'
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(staging, target)
         return target
@@ -387,7 +388,8 @@ def keep_parts(equity, parts, root):
 def _keep_columns(columns, root):
     first, last = columns.batches[0], columns.batches[-1]
     name = local_name({'source': first['source'], 'trading_date': first['trading_date'],
-                       'first_source_time_us': first['source_time_us'], 'last_source_time_us': last['source_time_us']})
+                       'first_source_time_us': first['source_time_us'], 'last_source_time_us': last['source_time_us']},
+                      first.get('input_transport'))
     target = Path(root) / name
     for n in range(2, 100):
         if not target.exists():

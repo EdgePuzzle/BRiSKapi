@@ -93,7 +93,7 @@ test('the BRiSK host bootstraps from boot, master and snapshot, then streams fra
   assert.equal(socketFrom.last.init.protocols, 'flex', 'the stream asks for the vendor client\'s subprotocol');
   assert.ok(requests.filter(r => r.path.startsWith('/api/app')).every(r => r.headers.authorization === 'Bearer token'));
   const [bootstrap, ...rest] = batches;
-  assert.equal(bootstrap.source, 'sbi_live');
+  assert.equal(bootstrap.source, 'brisk_live');
   assert.equal(bootstrap.trading_date, '20210927');
   assert.deepEqual(bootstrap.master.map(m => m.code), ['7203']);
   assert.equal(bootstrap.quotes[0].indicative_price10, 101500);
@@ -316,7 +316,7 @@ test('e-shiten: its own address, a relative bundle, a templated decoder and the 
   assert.deepEqual(socketFrom.last.init.headers, { origin: 'https://next.e-shiten.brisk.jp' }, 'no cookies to another host');
   assert.equal(socketFrom.last.init.protocols, 'flex');
   const [bootstrap] = batches;
-  assert.equal(bootstrap.source, 'eshiten_live');
+  assert.equal(bootstrap.source, 'brisk_live');
   assert.equal(bootstrap.input_transport.kind, 'eshiten_websocket');
   assert.equal(bootstrap.input_transport.origin, 'https://next.e-shiten.brisk.jp/');
   assert.equal(bootstrap.input_transport.ws_host, 'api.brisk.jp');
@@ -326,8 +326,7 @@ test('e-shiten: its own address, a relative bundle, a templated decoder and the 
 
 test('Matsui, Monex and SMBC Nikko: each its own address and label, the same app as SBI\'s', { skip: !cache }, async () => {
   const { files, chunks } = demo();
-  for (const [site, host, source] of [['matsui', 'matsui.brisk.jp', 'matsui_live'], ['monex', 'monex.brisk.jp', 'monex_live'],
-    ['smbcnikko', 'smbcnikko.brisk.jp', 'smbcnikko_live']]) {
+  for (const [site, host] of [['matsui', 'matsui.brisk.jp'], ['monex', 'monex.brisk.jp'], ['smbcnikko', 'smbcnikko.brisk.jp']]) {
     const { fetchImpl } = server(files);
     const origins = new Set(), batches = [];
     await live({ cookies: { s: 'v' }, codes: ['7203'], emit: async b => batches.push(b), site,
@@ -337,7 +336,7 @@ test('Matsui, Monex and SMBC Nikko: each its own address and label, the same app
     assert.equal(String(socketFrom.last.url), `wss://${host}/realtime/0?session=abc`);
     assert.deepEqual(socketFrom.last.init.headers, { origin: `https://${host}`, cookie: 's=v' }, 'its cookies, to its own host');
     const [bootstrap] = batches;
-    assert.equal(bootstrap.source, source);
+    assert.equal(bootstrap.source, 'brisk_live', 'one source, whichever broker\'s');
     assert.deepEqual([bootstrap.input_transport.kind, bootstrap.input_transport.origin], [`${site}_websocket`, `https://${host}/`]);
     assert.equal(batches.at(-1).type, 'end');
   }

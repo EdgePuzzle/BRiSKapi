@@ -29,9 +29,9 @@ from briskapi import records
 from briskapi._parquet import BATCHES, DEPTHS, EQUITY, FILES, MARKET, TRADES, midnight_ns
 from briskapi.records import (BARS, DATASETS, DAY_NS, EARLIEST, FIELDS, JST_NS, LATEST, SCHEMAS, TIME,  # noqa: F401 - the
                               fields, instrument_id, symbols_of, timestamp)                         # service's names
-from briskapi.schema import RECORDING_PREFIX, REFERENCES, require
+from briskapi.schema import BROKER_SOURCE, RECORDING_PREFIX, REFERENCES, require
 
-LIVE = ('sbi_live', 'eshiten_live', 'matsui_live', 'monex_live', 'smbcnikko_live')
+LIVE = (BROKER_SOURCE,)   # every broker's BRiSK, one source (schema.BROKER_TRANSPORTS: the sites)
 DEMO_SOURCE = 'historical_mock'
 ENCODINGS = {'parquet': ('application/vnd.apache.parquet', 'parquet'), 'csv': ('text/csv', 'csv'),
              'json': ('application/x-ndjson', 'json')}

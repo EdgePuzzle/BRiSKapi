@@ -271,7 +271,7 @@ def test_a_replays_market_data_is_stored_once(packaged, tmp_path, online, monkey
     ticket = ticket_for(s3, db, m2, part=part)
     service.ingest(upload(s3, m2, short, ticket, data=timing), s3, db)
     assert service.json_get(s3, f'incoming/{ticket}/status.json')['status'] == 'rejected'
-    broker = {**m2, 'summary': {**m2['summary'], 'source': 'sbi_live'}}
+    broker = {**m2, 'summary': {**m2['summary'], 'source': 'brisk_live'}}
     assert call(s3, db, {'action': 'upload', 'manifest': broker, 'part': part}) == \
         (400, {'error': 'Only a demo or synthetic replay can send its timing alone'})
 
@@ -854,22 +854,22 @@ def test_pull_rejects_manifest_before_fetching_payload(packaged, tmp_path, chang
     assert not (tmp_path / 'download').exists()
 
 
-def sbi_batches(source='sbi_live'):
+def sbi_batches(site='sbi'):
     records = batches()
-    records[0].update(source=source, trading_date='20260311',
-                      input_transport={**schema.BROKER_TRANSPORT[source], 'decoder': '/private/decoder.js', 'session': 'secret'})
+    records[0].update(source='brisk_live', trading_date='20260311',
+                      input_transport={**schema.BROKER_TRANSPORTS[site], 'decoder': '/private/decoder.js', 'session': 'secret'})
     records[1]['replay_lateness_ms'] = None
     records[-1]['frames'] = 5  # Includes frames used to catch up before bootstrap.
     return records
 
 
-@pytest.mark.parametrize('source', ['sbi_live', 'eshiten_live'])
-def test_broker_market_recording_upload_and_pull(tmp_path, source, online):
+@pytest.mark.parametrize('site', ['sbi', 'e-shiten'])
+def test_broker_market_recording_upload_and_pull(tmp_path, site, online):
     events = tmp_path / 'sbi.jsonl'
-    events.write_bytes(stream(sbi_batches(source)).read())
+    events.write_bytes(stream(sbi_batches(site)).read())
     directory = tmp_path / 'package'
     m = cli.package(events, directory)
-    assert m['summary']['source'] == source
+    assert m['summary']['source'] == 'brisk_live'
     s3, db = online
     status = stored(s3, db, directory, m)
     assert status['status'] == 'stored'
@@ -877,14 +877,25 @@ def test_broker_market_recording_upload_and_pull(tmp_path, source, online):
     assert sorted(kept(s3, status['prefix'])) == sorted([*_parquet.FILES, 'files.json', 'manifest.json'])  # no shared copy
     data = jsonl(tmp_path / 'download') + b''.join(kept(s3, status['prefix']).values())
     assert b'secret' not in data and b'/private/' not in data
-    assert json.loads(data.splitlines()[0])['input_transport'] == schema.BROKER_TRANSPORT[source]
-    assert list(cli.manifests(API))[0][1]['summary']['source'] == source
-    # A recording labelled with one site but the other's transport is refused.
-    other = sbi_batches(source)
-    other[0]['input_transport'] = dict(schema.BROKER_TRANSPORT['eshiten_live' if source == 'sbi_live' else 'sbi_live'])
+    assert json.loads(data.splitlines()[0])['input_transport'] == schema.BROKER_TRANSPORTS[site]
+    assert list(cli.manifests(API))[0][1]['summary']['source'] == 'brisk_live'
+    # Any broker's transport, its site's provenance, but none that is not a broker's.
+    other = sbi_batches(site)
+    other[0]['input_transport'] = {'kind': 'sbi_websocket', 'origin': 'https://stream.example/'}
     events.write_bytes(stream(other).read())
     with pytest.raises(ValueError, match='broker transport'):
         cli.package(events, tmp_path / 'mixed')
+
+
+@pytest.mark.parametrize('source', sorted(schema.LEGACY_BROKER_SOURCES))
+def test_a_broker_recording_from_before_one_source_is_refused_with_how_to_upgrade(packaged, online, source):
+    directory, m = packaged
+    s3, db = online
+    code, body = call(s3, db, {'action': 'upload', 'manifest': {**m, 'summary': {**m['summary'], 'source': source}}, 'part': None})
+    assert code == 400 and 'upgrade' in body['error'] and 'pip install -U briskapi' in body['error']
+    old = {'schema': 'brisk-timing-v2', 'source': source}   # 1.3's: refused before any other check
+    code, body = call(s3, db, {'action': 'timing', 'report': old})
+    assert code == 400 and 'upgrade' in body['error']
 
 
 @pytest.mark.parametrize('change', [
@@ -923,7 +934,7 @@ def test_broker_market_recording_upload_and_pull(tmp_path, source, online):
 ])
 def test_sbi_market_recording_rejects_unknown_fields_and_bad_continuity(change):
     records = sbi_batches()
-    records[0]['input_transport'] = dict(schema.SBI_TRANSPORT)
+    records[0]['input_transport'] = dict(schema.BROKER_TRANSPORTS['sbi'])
     change(records)
     with pytest.raises(ValueError):
         schema.validate_stream(stream(records))
@@ -933,7 +944,7 @@ def test_restored_trades_follow_the_bootstrap():
     # Trades a snapshot restored come in history batches right after the bootstrap, at its clock; the
     # bootstrap's volumes already count them, so they don't enter the volume/turnover check.
     records = sbi_batches()
-    records[0]['input_transport'] = dict(schema.SBI_TRANSPORT)
+    records[0]['input_transport'] = dict(schema.BROKER_TRANSPORTS['sbi'])
     old = dict(issue_id=0, code='0000', frame=1, time_us=50, price10=1200, quantity=300, side=2)
     history = [dict(type='history', seq=1, source_time_us=100, trades=[old, dict(old, time_us=60)]),
                dict(type='history', seq=2, source_time_us=100, trades=[dict(old, time_us=70)])]
@@ -962,7 +973,7 @@ def test_books_and_skipped_issues_validate():
     # An issue the decoder could not read at the start is listed in place of its quote, and quoted
     # once it updates; a book side holds up to ten levels, best price first.
     records = sbi_batches()
-    records[0]['input_transport'] = dict(schema.SBI_TRANSPORT)
+    records[0]['input_transport'] = dict(schema.BROKER_TRANSPORTS['sbi'])
     records[0]['skipped_issues'] = [records[0]['quotes'].pop()['issue_id']]
     records[1]['quotes'][0].update(bid_levels=[[1230, 300, 2], [1220, 100, 1]], ask_levels=[[1240 + k, 100, 1] for k in range(10)])
     assert schema.validate_stream(stream(records))['quote_updates'] == 1

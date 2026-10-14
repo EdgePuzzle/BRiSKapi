@@ -76,7 +76,7 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 | `brisk record --output DIR` | `briskapi.record(DIR)` | デモの再生 | 常に `DIR` に | 再生が最後まで終わった場合 |
 
 記録したものは、残りの2つの API で読みます。
-- **手元で:** `briskapi.load("days/sbi_live_20261013_085800-153512")` のあと `Ticker` と `Market`
+- **手元で:** `briskapi.load("days/sbi_20261013_085800-113000")` のあと `Ticker` と `Market`
   （記録したとおり）。NautilusTrader や JSONL には `brisk export`、または Parquet のテーブルを直接
   読みます（[データ形式](docs/data-format.ja.md)）。アップロードした記録は `brisk pull`
   （`briskapi.pull()`）でディスクに戻せます。
@@ -270,8 +270,10 @@ toyota.quote()                              # 他のフィードと同じ呼び�
 フィードは次の取引日のセッションを待ちます。`connect()` はその日が始まってから戻ります
 （待っている間の `feed.status` は `"waiting"`）。`output=DIR`
 （`briskapi.connect(output=...)`、`brisk live --output DIR`）を指定すると、
-記録ごとに、`SOURCE_YYYYMMDD_FROM-TO`（その最初と最後のソース時刻、日本時間 HHMMSS）という名前の
-フォルダー（例: `sbi_live_20261013_085800-090412`）が DIR に残ります。`feed.recordings` はその一覧
+記録ごとに、`SITE_YYYYMMDD_FROM-TO`（証券会社のサイトと、その最初と最後のソース時刻、日本時間 HHMMSS）という
+名前のフォルダー（例: `sbi_20261013_085800-113000`）が DIR に残ります。どの証券会社の記録も BRiSK の同じ市場データ
+なのでデータ源は同じ `brisk_live` で、フォルダー名がどの証券会社から記録したかを示すので、同じセッションを2社で
+記録して比べても互いにぶつかりません。`feed.recordings` はその一覧
 （`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded`。タイミングの要約は各日の最後の記録に。`repaired`、そして `error` は失敗したのがパッケージ化かアップロードか）で、
 `on_day=callback` は記録ごとに呼ばれます。`output` を指定しないと、記録は自分のアーカイブにだけ残り、
 アップロードもオフならどこにも残りません。フィードを止めると（`feed.close()`、Ctrl-C）その日はそこで終わり、
@@ -336,8 +338,8 @@ briskapi.login("matsui", cookies={...})   # remember=True でほかの証券会�
 feed = briskapi.connect(site="matsui", codes=["7203"])   # ライブ
 ```
 
-上記の説明は記録とアップロードも含めてそのまま当てはまり（データ源は `matsui_live`、
-`monex_live`、`smbcnikko_live`）、各サイトの Cookie はそのサイトのホストにのみ送られます。この3社は
+上記の説明は記録とアップロードも含めてそのまま当てはまり（データ源はどの証券会社とも同じ `brisk_live` で、
+フォルダー名は `matsui_…`、`monex_…`、`smbcnikko_…`）、各サイトの Cookie はそのサイトのホストにのみ送られます。この3社は
 まだ口座で試していません。サイトのアプリが SBI のものと違う場合、フィードは疑わしいものを記録せず、
 何を認識できなかったかを示すエラーで止まります（`--trace-protocol` で接続を表示）。SBI や e支店と同じく
 1ユーザー1セッションまでと考え、先にブラウザの BRiSK を閉じてください。記録やアップロードの前に、
@@ -475,7 +477,7 @@ brisk sites | enroll | login | forget       # Chrome 経由のパスキーで証
 brisk live --site sbi --codes 7203          # SBI証券の BRiSK。Cookie は BRISK_SBI_COOKIES（JSON）または `brisk login` が保存したもの。--trace-protocol で接続手順を表示（通信の詳細は BRISK_PROFILE）
 brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）または `brisk login` が保存したもの
 brisk live --site matsui --codes 7203       # 松井証券（または --site monex、--site smbcnikko）。Cookie は BRISK_MATSUI_COOKIES（JSON）または `brisk login` が保存したもの。まだ口座で未検証
-brisk live --site sbi --output days         # 日をまたいで動き続け、記録ごとに days/ に残し（例: sbi_live_20261013_085800-090412）、stderr に {"day": {...}} を1行出力
+brisk live --site sbi --output days         # 日をまたいで動き続け、記録ごとに days/ に残し（例: sbi_20261013_085800-113000）、stderr に {"day": {...}} を1行出力
 brisk live --site sbi                       # 記録・アップロードし、briskapi.Live() に配信（--no-gateway で配信しない）。10秒ごと（ログでは1分ごと）に stderr に1行: その日、記録した時間、更新数とその速さ
 brisk record --output recordings/s1         # デモを記録（オプトアウトしない限りアップロード）
 brisk list --date 20210927 --source historical_mock   # 自分の記録（--timing で自分のタイミングレポート、--deleted で過去30日間に削除したもの）
@@ -511,7 +513,7 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 取引終了後や休日に始めると、そう表示して次の取引日を待ちます。
 オプトアウトしない限り、市場データの記録をできたものから順に、各日のタイミングの要約とともに確認なしで
 アップロードします。`--no-upload-market-data` で記録を、`--no-upload` で両方をアップロードしなくなります
-（ディスクに残すには `--output DIR`）。`brisk list --source sbi_live`（または `eshiten_live`、`matsui_live`、`monex_live`、`smbcnikko_live`）で自分の証券会社の記録を
+（ディスクに残すには `--output DIR`）。`brisk list --source brisk_live`（どの証券会社のものも）で自分の証券会社の記録を
 一覧できます。どの `brisk live` も、`--no-gateway` を指定しない限り、このコンピューターの
 `briskapi.Live()` にフィードを配信します（[ライブのレコード](#ライブのレコードdatabento-風)）。
 

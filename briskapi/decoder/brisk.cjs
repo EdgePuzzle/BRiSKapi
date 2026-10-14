@@ -4,7 +4,7 @@
 // Matsui's, Monex's and SMBC Nikko's (<site>.brisk.jp, BRISK_SITE=matsui|monex|smbcnikko).
 // The session's own WASM decoder under Node, fed from the authenticated WebSocket.
 // No browser or Chrome DevTools. Emits the same JSON batches as decoder.cjs
-// (source=sbi_live, eshiten_live, ...; SITES below). Cookies come from the site's variable
+// (source=brisk_live, each with its site's transport; SITES below). Cookies come from the site's variable
 // (BRISK_SBI_COOKIES, BRISK_ESHITEN_COOKIES, ...; a JSON object), never from the command line.
 //
 // It follows the vendor client's connect sequence (public Next demo bundle) and
@@ -21,20 +21,19 @@ const { Link, resolveProfile, heartbeatMonitor, staleDataCheck, redact } = requi
 const { QuotePool, workerCount, POOL_MIN_ISSUES } = require('./workers.cjs');
 
 // Brokers whose BRiSK is this app (briskapi/brisk.py keeps the same table). On 2026-10-08 SBI's and e-shiten's
-// served the same boot (flex_version 18000), master, snapshot and decoder, so only the address differs.
-// Matsui's, Monex's and SMBC Nikko's are the same vendor's app on hosts of their own, not yet tried live: their
-// bundles are found from the signed-in page as SBI's and e-shiten's are, and anything unexpected is an error.
+// served the same boot (flex_version 18000), master, snapshot and decoder, so only the address differs, and every
+// broker's recordings are one source (SOURCE), each with its site's transport provenance. Matsui's, Monex's and
+// SMBC Nikko's are the same vendor's app on hosts of their own, not yet tried live: their bundles are found from the
+// signed-in page as SBI's and e-shiten's are, and anything unexpected is an error.
+const SOURCE = 'brisk_live';
 const SITES = {
-  sbi: { origin: 'https://sbi.brisk.jp', name: 'SBI BRiSK', source: 'sbi_live', transport: 'sbi_websocket',
-    cookies: 'BRISK_SBI_COOKIES' },
-  'e-shiten': { origin: 'https://next.e-shiten.brisk.jp', name: 'e-shiten BRiSK Next', source: 'eshiten_live',
-    transport: 'eshiten_websocket', cookies: 'BRISK_ESHITEN_COOKIES' },
-  matsui: { origin: 'https://matsui.brisk.jp', name: 'Matsui BRiSK', source: 'matsui_live', transport: 'matsui_websocket',
-    cookies: 'BRISK_MATSUI_COOKIES' },
-  monex: { origin: 'https://monex.brisk.jp', name: 'Monex BRiSK', source: 'monex_live', transport: 'monex_websocket',
-    cookies: 'BRISK_MONEX_COOKIES' },
-  smbcnikko: { origin: 'https://smbcnikko.brisk.jp', name: 'SMBC Nikko BRiSK', source: 'smbcnikko_live',
-    transport: 'smbcnikko_websocket', cookies: 'BRISK_SMBCNIKKO_COOKIES' },
+  sbi: { origin: 'https://sbi.brisk.jp', name: 'SBI BRiSK', transport: 'sbi_websocket', cookies: 'BRISK_SBI_COOKIES' },
+  'e-shiten': { origin: 'https://next.e-shiten.brisk.jp', name: 'e-shiten BRiSK Next', transport: 'eshiten_websocket',
+    cookies: 'BRISK_ESHITEN_COOKIES' },
+  matsui: { origin: 'https://matsui.brisk.jp', name: 'Matsui BRiSK', transport: 'matsui_websocket', cookies: 'BRISK_MATSUI_COOKIES' },
+  monex: { origin: 'https://monex.brisk.jp', name: 'Monex BRiSK', transport: 'monex_websocket', cookies: 'BRISK_MONEX_COOKIES' },
+  smbcnikko: { origin: 'https://smbcnikko.brisk.jp', name: 'SMBC Nikko BRiSK', transport: 'smbcnikko_websocket',
+    cookies: 'BRISK_SMBCNIKKO_COOKIES' },
 };
 const PROTOCOL_VERSION = 18000;
 const MAX_BYTES = 64 * 1024 * 1024;
@@ -367,7 +366,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     }
     if (skipped.length) trace?.(`unreadable (skipped until they update): ${skipped.map(id => decoder.master[id].code).join(',')}`);
     started = true;
-    const batch = { type: 'bootstrap', seq: seq++, source: where.source, trading_date: String(app.date).replaceAll('-', ''),
+    const batch = { type: 'bootstrap', seq: seq++, source: SOURCE, trading_date: String(app.date).replaceAll('-', ''),
       input_transport: { ...input_transport, dialect: link.mode, engineio: link.version, caught_up_issues: caughtUp },
       source_timestamp_origin: 'brisk_decoder_unverified', exchange_delay_ms: null,
       source_time_us: now, market_issue_count: decoder.master.length, master, quotes, trades: decoder.trades(ids),
@@ -644,7 +643,7 @@ async function main(argv, env = process.env) {
     } });
 }
 
-module.exports = { Session, SITES, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, readLanes, fetchCatchUp, CATCH_UP_FORMATS, DEFAULT_CATCH_UP,
+module.exports = { Session, SITES, SOURCE, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, readLanes, fetchCatchUp, CATCH_UP_FORMATS, DEFAULT_CATCH_UP,
   Interrupted, fatal, RETRY_MS,
   HEARTBEAT_MS,
   PROTOCOL_VERSION, REQUIRED };

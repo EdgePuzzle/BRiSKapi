@@ -16,7 +16,7 @@ from test_brisk import sbi_session
 
 
 def report(**changes):
-    stats = TimingStats('sbi_live')
+    stats = TimingStats('sbi')
     for batch in sbi_session():
         stats.add(batch)
     return {**stats.report(), **changes}
@@ -31,10 +31,10 @@ def test_accumulated_report_is_valid_and_market_free():
     r = report()
     assert schema.validate_timing(r) is r and r['client_version'].count('.') == 2
     assert set(r) == schema.TIMING_KEYS
-    short = TimingStats('sbi_live')
+    short = TimingStats('sbi')
     for batch in sbi_session(frames=50):
         short.add(batch)
-    assert short.report() is None and TimingStats('sbi_live').report() is None
+    assert short.report() is None and TimingStats('sbi').report() is None
 
 
 @pytest.mark.parametrize('change', [
@@ -70,7 +70,7 @@ def test_service_keeps_canonical_report_for_its_owner(monkeypatch, online):
     # Same report again: same object, no error.
     assert json.loads(service.api(event(body={'action': 'timing', 'report': r}), s3, db)['body']) == stored
     # e-shiten sessions report the same way (to a separate archive, so the listing below stays one report).
-    e = report(source='eshiten_live')
+    e = report(site='e-shiten')
     assert json.loads(service.api(event(body={'action': 'timing', 'report': e}), S3(), db)['body'])['status'] == 'stored'
     assert {c['Key']['id']['S'].split(':')[0][:7] for c in db.calls} >= {'timing-', 'global-'}
     entries = list(cli.timing_reports('https://api.test'))

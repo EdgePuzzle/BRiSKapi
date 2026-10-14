@@ -112,7 +112,7 @@ class Feed:
                  on_day=None, gateway=False):
         # A broker session uploads its timing summary and its market recording; upload_market_data=False keeps
         # the market recording local.
-        if upload_market_data is not None and (command is None or timing not in schema.BROKER_TRANSPORT):
+        if upload_market_data is not None and (command is None or timing not in schema.BROKER_TRANSPORTS):
             raise BriskError('upload_market_data applies to a broker live session (a site other than the demo)')
         if upload is False and upload_market_data:
             raise BriskError('upload=False keeps the whole session local; drop upload_market_data=True')
@@ -124,7 +124,7 @@ class Feed:
             uploads = _consent(wanted, None)[1] if timing else False
             self._package = uploads and upload_market_data is not False
             self._timing = timing if uploads else None  # the source whose timing summaries are uploaded
-        # Each day (bootstrap ... end) is packaged, kept in `output` as SOURCE_YYYYMMDD_FROM-TO and uploaded, on a
+        # Each day (bootstrap ... end) is packaged, kept in `output` as SITE_YYYYMMDD_FROM-TO and uploaded, on a
         # worker thread while the feed goes on; a broker's in pieces as it runs (_spool.Spool.ship).
         self._output = Path(output) if output else None
         if self._output and limit_frames is not None:
@@ -605,7 +605,9 @@ class Feed:
                 return None
             m, result['repaired'] = shipped
             if m:
-                result['name'], result['trading_date'] = schema.local_name(m['summary']), m['summary']['trading_date']
+                transport = _parquet.bootstrap_row(package).get('input_transport')
+                result['name'] = schema.local_name(m['summary'], transport)
+                result['trading_date'] = m['summary']['trading_date']
             if output:
                 target = output / result['name']
                 if target.exists():

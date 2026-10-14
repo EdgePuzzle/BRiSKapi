@@ -14,7 +14,7 @@ from briskapi import _parquet, _spool
 OPEN_US = 9 * 3600 * 10**6
 
 
-def session(frames=40, source='sbi_live'):
+def session(frames=40, source='brisk_live'):
     """A broker session of two issues: books, trades in every third batch, a history batch, a skipped issue."""
     executed = {0: [0, 0], 1: [0, 0]}   # the trades so far account for each quote's volume and turnover
 
@@ -25,8 +25,8 @@ def session(frames=40, source='sbi_live'):
                 'bid_levels': [[9990 + i, 100 * (i + 1), 1], [9980, 200, 2]], 'ask_levels': [[10010 + i, 300, 3]]}
     master = [{**dict.fromkeys(schema.MASTER_KEYS, 0), 'issue_id': issue, 'code': code, 'name': name, 'lot_size': 100}
               for issue, code, name in ((0, '7203', 'Toyota'), (1, '6758', 'Sony'))]
-    transport = dict(schema.BROKER_TRANSPORT[source], decoder='/private/decoder.js', ws_host='stream.example',
-                     setup_ms=1.5) if source in schema.BROKER_TRANSPORT else {'kind': 'local_cache'}
+    transport = dict(schema.BROKER_TRANSPORTS['sbi'], decoder='/private/decoder.js', ws_host='stream.example',
+                     setup_ms=1.5) if schema.broker(source) else {'kind': 'local_cache'}
     batches = [dict(type='bootstrap', seq=0, source=source, trading_date='20260311', source_time_us=OPEN_US,
                     input_transport=transport, source_timestamp_origin='brisk_decoder_unverified', exchange_delay_ms=None,
                     market_issue_count=2, master=list(reversed(master)),
@@ -91,7 +91,7 @@ def test_parts_hold_no_connection_diagnostics(tmp_path):
         text = (folder / _parquet.BATCHES).read_bytes() + (spool.path / _parquet.EQUITY).read_bytes()
         assert b'stream.example' not in text and b'/private/decoder.js' not in text
     first = _parquet.pq.read_table(spool.parts()[0] / _parquet.BATCHES).column('input_transport')[0].as_py()
-    assert json.loads(first) == schema.BROKER_TRANSPORT['sbi_live']
+    assert json.loads(first) == schema.BROKER_TRANSPORTS['sbi']
 
 
 @pytest.mark.parametrize('count', [0, 1, 7, 30, 43])
@@ -127,7 +127,7 @@ def dead_pid():
 
 def test_leftovers_are_crashed_broker_spools_with_their_sessions_choices_and_a_demos_dropped(tmp_path):
     root, intent = tmp_path / 'spool', {'upload': True, 'output': str(tmp_path / 'days')}
-    for source in ('sbi_live', 'historical_mock'):
+    for source in ('brisk_live', 'historical_mock'):
         _spool.PART_BYTES, spool = 1500, _spool.Spool(root=root, intent=intent)
         for b, line in zip(session(source=source)[:25], lines(session(source=source)[:25])):
             spool.add(b, line)
@@ -142,7 +142,7 @@ def test_leftovers_are_crashed_broker_spools_with_their_sessions_choices_and_a_d
     assert found.intent == intent and len(found.parts()) > 3 and repr(found).startswith('Spool(')
     assert sorted(p.name for p in root.iterdir()) == sorted([found.path.name, live.path.name]), 'the demo\'s is gone'
     m = found.package(tmp_path / 'package', repair=True)
-    assert m['summary']['batches'] == 26 and m['summary']['source'] == 'sbi_live'
+    assert m['summary']['batches'] == 26 and m['summary']['source'] == 'brisk_live'
     recording = briskapi.Recording(tmp_path / 'package')
     assert len(briskapi.Market(recording).trades()) == 1 + 4 * 8   # the history's, and batches 3, 6, ... 24
 

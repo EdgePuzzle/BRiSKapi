@@ -5,7 +5,7 @@ import datetime as dt
 from importlib.metadata import PackageNotFoundError, version
 
 from briskapi._recording import JST
-from briskapi.schema import MIN_TIMING_FRAMES, QUANTILES, TIMING_BOUNDS, TIMING_SCHEMA, validate_timing
+from briskapi.schema import BROKER_SOURCE, MIN_TIMING_FRAMES, QUANTILES, TIMING_BOUNDS, TIMING_SCHEMA, validate_timing
 
 MAX_SAMPLES = 1_000_000
 STALL_MS = 1000
@@ -30,8 +30,8 @@ class TimingStats:
     Only these local measurements are kept; prices, quantities and codes are not.
     """
 
-    def __init__(self, source):
-        self.source = source
+    def __init__(self, site):
+        self.site = site   # the broker site (schema.BROKER_TRANSPORTS) whose session this is
         self.trading_date = None
         self.frames = self.stalls = 0
         self.first = self.last = None
@@ -63,7 +63,7 @@ class TimingStats:
         if self.trading_date is None or self.frames < MIN_TIMING_FRAMES:
             return None
         minute = lambda ms: dt.datetime.fromtimestamp(ms / 1000, JST).strftime('%H:%M')
-        report = dict(schema=TIMING_SCHEMA, source=self.source, trading_date=self.trading_date,
+        report = dict(schema=TIMING_SCHEMA, source=BROKER_SOURCE, site=self.site, trading_date=self.trading_date,
                       first_minute=minute(self.first), last_minute=minute(self.last), frames=self.frames,
                       stalls=self.stalls, client_version=_client_version(),
                       decode_ms=_distribution(self.decode, *TIMING_BOUNDS['decode_ms']),
