@@ -13,7 +13,7 @@ import tempfile
 import urllib.error
 import urllib.request
 
-from briskapi import _parquet, identity
+from briskapi import _https, _parquet, identity
 from briskapi._historical import Historical
 from briskapi._recording import Recording
 from briskapi.schema import encode, synthetic_recording
@@ -62,12 +62,12 @@ def main():
             raise AssertionError('Service stored non-reference content')
         # Nothing in the bucket is readable or listable without credentials, except the samples.
         base = f"https://{config['bucket']}.s3.{config['region']}.amazonaws.com"
-        with urllib.request.urlopen(f'{base}/?list-type=2&prefix=samples/', timeout=30) as response:
+        with urllib.request.urlopen(f'{base}/?list-type=2&prefix=samples/', timeout=30, context=_https.context()) as response:
             assert response.status == 200
         for url in (f'{base}/{prefix}/manifest.json', f'{base}/{prefix}/recording.zip', f'{base}/?list-type=2&prefix=archive/',
                     f'{base}/?list-type=2&prefix=incoming/'):
             try:
-                urllib.request.urlopen(url, timeout=30)
+                urllib.request.urlopen(url, timeout=30, context=_https.context())
             except urllib.error.HTTPError as e:
                 assert e.code == 403, url
             else:
@@ -87,7 +87,7 @@ def main():
             assert client.metadata.list_datasets() == ['XTKS.BRISK', 'XTKS.BRISKDEMO']
             assert client.metadata.list_publishers()[0]['venue'] == 'XTKS'
             try:
-                urllib.request.urlopen(config['query_url'].rstrip('/') + '/v0/metadata.list_datasets', timeout=30)
+                urllib.request.urlopen(config['query_url'].rstrip('/') + '/v0/metadata.list_datasets', timeout=30, context=_https.context())
             except urllib.error.HTTPError as e:
                 assert e.code == 400
             else:
