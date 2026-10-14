@@ -27,7 +27,9 @@ jobs:
         run: python -m pytest tools/brisk_mock/test_reference.py
         env:
           BRISK_MOCK_CACHE: /tmp/brisk-mock-cache
-      - run: node --test --experimental-test-coverage tools/brisk_mock/*.test.cjs
+      # One test file at a time: several replay the whole demo market through decoder worker pools, and three at
+      # once (the default on a 4-core runner) have had the runner shut down mid-step.
+      - run: node --test --test-concurrency=1 --experimental-test-coverage tools/brisk_mock/*.test.cjs
         env:
           BRISK_MOCK_CACHE: /tmp/brisk-mock-cache
       - name: Smoke-test the wheel outside the repository
