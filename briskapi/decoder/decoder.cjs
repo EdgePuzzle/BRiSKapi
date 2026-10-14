@@ -82,25 +82,38 @@ function* frames(data) {
 // the issue's frame number. The vendor's rollback/last-price callbacks need the whole history; new
 // trades also wait in `pending` until Decoder.trades() takes them. A trade withdrawn (popped) after it
 // was taken is counted, and ends the session there.
+// An issue keeps the prices of all its records, for their count and the last one's price (also after one is
+// withdrawn), but the records themselves only while one could still be withdrawn from `pending`, and a few more:
+// a snapshot taken during the session restores the day's trades so far, millions, in every decoder.
 class QuoteHistory {
-  constructor() { this.qrs = new Map(); this.pending = []; this.withdrawn = 0; }
-  initialize(p) { this.qrs.set(p, []); }
+  constructor() { this.qrs = new Map(); this.pending = []; this.withdrawn = 0; this.taken = 0; }
+  initialize(p) { this.qrs.set(p, { prices: [], records: [] }); }
   deinitialize(p) { this.qrs.delete(p); this.pending = this.pending.filter(trade => trade.p !== p); }
-  clone(dst, src) { this.qrs.set(dst, this.qrs.get(src).slice()); }
+  clone(dst, src) { const q = this.qrs.get(src); this.qrs.set(dst, { prices: q.prices.slice(), records: q.records.slice() }); }
   emplace(p, type, timestamp, price10, qty, lot, frame) {
-    const trade = { p, type, timestamp, price10, qty, lot, frame };
-    this.qrs.get(p).push(trade);
+    const trade = { p, type, timestamp, price10, qty, lot, frame, round: this.taken }, q = this.qrs.get(p);
+    q.prices.push(price10);
+    q.records.push(trade);
+    // Records are taken in order, so once the 48th is, the 47 before it are too: none can be in `pending`.
+    if (q.records.length > 64 && q.records[47].round < this.taken) q.records = q.records.slice(48);
     this.pending.push(trade);
   }
   popBack(p) {
-    const trade = this.qrs.get(p).pop();
-    const at = this.pending.lastIndexOf(trade);
+    const q = this.qrs.get(p);
+    if (!q.prices.length) return;
+    q.prices.pop();
+    const trade = q.records.pop();   // none: one taken long ago
+    const at = trade ? this.pending.lastIndexOf(trade) : -1;
     if (at >= 0) this.pending.splice(at, 1);
-    else if (trade) this.withdrawn++;
+    else this.withdrawn++;
   }
-  take() { const trades = this.pending; this.pending = []; return trades; }
-  size(p) { return this.qrs.get(p).length; }
-  lastPrice10(p) { return this.qrs.get(p).at(-1)?.price10 || 0; }
+  take() { const trades = this.pending; this.pending = []; this.taken++; return trades; }
+  // After taking a snapshot's records, keep each issue's last few only.
+  compact() {
+    for (const q of this.qrs.values()) if (q.records.length > 16) q.records = q.records.slice(-16);
+  }
+  size(p) { return this.qrs.get(p).prices.length; }
+  lastPrice10(p) { return this.qrs.get(p).prices.at(-1) || 0; }
 }
 
 function loadAssets(cache) {
@@ -429,6 +442,7 @@ class Decoder {
     // One at a time: a snapshot taken during the session restores the day's trades so far, millions of them, more
     // than a call can take as arguments.
     for (const trade of this.qrm.take()) this.restored.push(trade);
+    this.qrm.compact();
   }
 
   // Bars of OHLC history ahead of the quote fields in a stock view. SBI's build

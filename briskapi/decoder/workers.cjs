@@ -189,6 +189,7 @@ async function work() {
   parentPort.on('message', message => { queue.push(message); drain(); });
   const files = Object.fromEntries(Object.entries(assets).map(([name, data]) => [name, view(data)]));
   decoder = await Decoder.create(files, { ...options, callbacks: {} });
+  decoder.restored = [];   // the host's decoder reports what the snapshot restored
   parentPort.postMessage({ ready: true });
   drain();
 }

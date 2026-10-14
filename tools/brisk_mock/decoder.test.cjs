@@ -578,3 +578,30 @@ test('a snapshot that restores the whole day\'s trades so far (millions, after t
   decoder.unserialize(Buffer.alloc(0));
   assert.equal(decoder.restored.length, before + restored.length);
 });
+
+test('trade records: an issue\'s count and last price, withdrawals as before, and only a few records kept', () => {
+  const qrm = new QuoteHistory();
+  qrm.initialize(1); qrm.initialize(2);
+  for (let k = 1; k <= 200; k++) qrm.emplace(1, 1, k, 1000 + k, 1, 100, k);
+  assert.equal(qrm.size(1), 200);
+  assert.equal(qrm.lastPrice10(1), 1200);
+  qrm.popBack(1);   // still pending: withdrawn from it
+  assert.deepEqual([qrm.size(1), qrm.lastPrice10(1), qrm.pending.length, qrm.withdrawn], [199, 1199, 199, 0]);
+  assert.equal(qrm.take().length, 199);
+  for (let k = 1; k <= 100; k++) qrm.emplace(1, 1, k, 2000 + k, 1, 100, k);
+  const records = qrm.qrs.get(1).records;
+  assert.ok(records.filter(r => r.round < qrm.taken).length <= 64 && records.length <= 164, 'taken records are let go');
+  // Withdrawing past the records kept: they were taken, so each is a withdrawal of a recorded trade.
+  for (let k = 0; k < 150; k++) qrm.popBack(1);
+  assert.deepEqual([qrm.size(1), qrm.lastPrice10(1)], [149, 1149]);
+  assert.equal(qrm.pending.length, 0);
+  assert.equal(qrm.withdrawn, 50);
+  qrm.popBack(2);   // nothing to withdraw
+  assert.deepEqual([qrm.size(2), qrm.lastPrice10(2), qrm.withdrawn], [0, 0, 50]);
+  qrm.clone(3, 1);
+  assert.deepEqual([qrm.size(3), qrm.lastPrice10(3)], [149, 1149]);
+  qrm.emplace(2, 2, 1, 500, 1, 100, 1);
+  qrm.compact();
+  qrm.deinitialize(2);
+  assert.equal(qrm.pending.length, 0);
+});
