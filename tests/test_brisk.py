@@ -610,6 +610,21 @@ def test_a_broker_day_ships_a_piece_at_a_time_each_a_recording_the_archive_accep
     assert not any(_spool.spool_root().glob('segment-*'))
 
 
+def test_a_day_kept_but_not_uploaded_that_fails_to_package_says_so_not_that_an_upload_failed(fake_host, tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, 'package_parts', lambda *a, **k: 1 / 0)
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    with pytest.warns(UserWarning, match='^Packaging failed: division by zero'):
+        feed = briskapi.connect(site='sbi', upload=False, output=tmp_path / 'days').wait()
+    day = feed.recordings[-1]
+    assert day['uploaded'] is None and day['error'] == 'Packaging failed: division by zero'
+
+
+def test_between_days_the_status_line_is_quiet(fake_host):
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    feed = briskapi.connect(site='sbi', upload=False).wait()
+    assert feed._progress() is None, 'the day has ended: nothing records until the next one begins'
+
+
 def test_a_feed_with_no_session_to_join_waits_for_the_next_trading_days(tmp_path, monkeypatch):
     # The host says, outside the days' records, that the site has no session now (after the close, on a holiday);
     # that is kept nowhere, and the feed waits past its start timeout for the next day's session.

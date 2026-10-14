@@ -502,8 +502,9 @@ def test_feed_uploads_complete_sessions(gated_decoder, tmp_path, monkeypatch):
     assert brisk.connect(site='demo', cache=tmp_path).wait().uploaded is None and len(packaged) == 1
     brisk.consent(accept=True)
     monkeypatch.setattr(cli, 'package_parts', lambda *a, **k: 1 / 0)
-    with pytest.warns(UserWarning, match='upload failed'):
-        assert brisk.connect(site='demo', cache=tmp_path).wait().uploaded['status'] == 'failed'
+    with pytest.warns(UserWarning, match='Packaging failed'):
+        feed = brisk.connect(site='demo', cache=tmp_path).wait()
+    assert feed.uploaded['status'] == 'failed' and feed.recordings[-1]['error'].startswith('Packaging failed')
 
 
 def test_cli_live(gated_decoder, tmp_path, monkeypatch, capsys):

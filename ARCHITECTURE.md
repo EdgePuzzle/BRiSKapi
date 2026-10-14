@@ -170,7 +170,7 @@ the day, keeps it in `output` as `SOURCE_YYYYMMDD_FROM-TO` (`schema.local_name`;
 TO are the day's first and last source clock, JST HHMMSS; a folder already there is left
 alone, with a warning), uploads it to the owner's private archive and uploads its
 timing summary, as chosen, then appends its result (`trading_date`, `name`, `path`,
-`uploaded`, `timing_uploaded`) to `feed.recordings`, calls `on_day(result)` and deletes
+`uploaded`, `timing_uploaded`, `repaired`, `error`) to `feed.recordings`, calls `on_day(result)` and deletes
 the spool. Packaging reads the parts back (`load_parts`: each part's tables decoded, joined
 and put in the canonical order) and writes the same bytes as the day's batches at once would;
 `tests/test_spool.py` checks it. Its manifest's summary comes from those columns
@@ -196,7 +196,7 @@ day. `shipped.json` counts the parts shipped, so a crashed session's spool is fi
 the morning left the book is rebuilt from its parts a part at a time. A demo's replay is one recording,
 as its reference requires.
 
-A packaging or upload failure is a warning and a result that
+A packaging or upload failure is a warning (`Packaging failed: ...` or `Automatic upload failed: ...`; with uploads off, `uploaded` stays null) and a result that
 says so, never a failed feed, and the day is then kept in `~/.local/share/brisk/recordings`
 (its package, for `brisk upload` to retry, or its tables); neither is an `on_day` callback that
 raises. `brisk live --output

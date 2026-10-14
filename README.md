@@ -276,7 +276,7 @@ once that day has begun (`feed.status` is `"waiting"` meanwhile). `output=DIR` (
 also keeps each recording in DIR, in a folder named
 `SOURCE_YYYYMMDD_FROM-TO` (its first and last source clock, JST HHMMSS), such as
 `sbi_live_20261013_085800-090412`. `feed.recordings` lists them (`trading_date`,
-`name`, `path`, `uploaded`, `timing_uploaded`, the timing summary's on a day's last), and
+`name`, `path`, `uploaded`, `timing_uploaded`, the timing summary's on a day's last, `repaired`, and `error`: what failed, packaging or upload), and
 `on_day=callback` is called for each. Without `output`, a recording is kept only in your archive, and
 with uploads off, nowhere. Stopping the feed (`feed.close()`, Ctrl-C) ends the day there, so what is
 left of it is kept and uploaded like any recording; a lost connection reconnects by itself ([Recording](#recording)). SBI and e-shiten allow one BRiSK
@@ -445,7 +445,7 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | `Market().frames()` | A recording's batches: clocks, local timing, quote and trade counts |
 | `Market().summary()` | Source, date, coverage and clock range |
 | `Feed.quotes(codes)` / `Feed.on_quote(fn, codes)` | Live updates as they arrive |
-| `Feed.recordings` | A live feed's recordings so far: `trading_date`, `name`, `path`, `uploaded`, `timing_uploaded` |
+| `Feed.recordings` | A live feed's recordings so far: `trading_date`, `name`, `path`, `uploaded`, `timing_uploaded`, `repaired`, `error` |
 | `briskapi.recordings()` / `.pull()` / `.load()` | Your archive's listing, verified download, local file |
 | `briskapi.Archive().upload(dir)` / `.delete(prefix)` / `.deleted()` / `.restore(prefix)` / `.timing()` / `.owner` | Upload, delete, what you deleted in the last 30 days (with `deleted_at`, `restore_until`), bring one back, your timing reports, your owner ID |
 | `briskapi.record(output, cache=None, ...)` | A recording of the demo, uploaded per your choice |

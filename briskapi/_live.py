@@ -143,6 +143,7 @@ class Feed:
         self.status, self.error, self.seq, self.uploaded = 'starting', None, -1, None
         # A broker host with no session to join says so (date, session_status) and waits for the next trading day's.
         self.waiting: dict | None = None
+        self._day_over = False   # the running day has ended: nothing records until the next one's bootstrap
         self._day_updates, self._day_began = 0, None   # this day's quote updates since its bootstrap, and when it began
         # Each segment's batches go to disk as they arrive (briskapi._spool): to package it, to keep what a stop
         # or a crash cuts short, and for a gateway's replays.
@@ -462,9 +463,10 @@ class Feed:
             if batch['type'] == 'bootstrap':
                 self._bootstrap = {k: v for k, v in batch.items() if k != 'quotes'}
                 self.status, self.waiting = 'running', None
-                self._day_updates, self._day_began = 0, time.monotonic()
+                self._day_updates, self._day_began, self._day_over = 0, time.monotonic(), False
             else:
                 self._day_updates += len(quotes)
+                self._day_over = batch['type'] == 'end'
             self._quotes.update((q['issue_id'], q) for q in quotes)
             if self._history is not None:
                 for q in quotes:
@@ -490,9 +492,9 @@ class Feed:
 
     def _progress(self):
         """The running day: its trading date, seconds since its bootstrap, its quote updates and its latest source
-        clock (None before a day has begun)."""
+        clock (None before a day has begun, and between days)."""
         with self._changed:
-            if self._bootstrap is None:
+            if self._bootstrap is None or self._day_over:
                 return None
             return {'trading_date': self._bootstrap['trading_date'], 'seconds': time.monotonic() - self._day_began,
                     'updates': self._day_updates, 'source_time_us': self._last_source_time_us}
@@ -590,12 +592,12 @@ class Feed:
 
     def _result(self):
         return {'trading_date': self._bootstrap and self._bootstrap['trading_date'], 'name': None, 'path': None,
-                'uploaded': None, 'timing_uploaded': None, 'repaired': False}
+                'uploaded': None, 'timing_uploaded': None, 'repaired': False, 'error': None}
 
     def _ship(self, spool, *, final, upload, output, repair=False):
         """Package the spool's next piece (Spool.ship), keep it in `output` and upload it, as chosen. Returns its
         result, or None when no piece is ready."""
-        result, package = self._result(), spool.path / 'package'
+        result, package, step = self._result(), spool.path / 'package', 'Packaging'
         shutil.rmtree(package, ignore_errors=True)
         try:
             shipped = spool.ship(package, final=final, repair=repair)
@@ -613,12 +615,16 @@ class Feed:
                     shutil.copytree(package, target)
                     result['path'] = str(target)
             if upload:
+                step = 'Automatic upload'
                 result['uploaded'] = cli.upload(package, cli.settings()['api_url'], verify=False, out=sys.stderr)
         except Exception as error:  # noqa: BLE001 - market data was delivered; report, do not fail
-            result['uploaded'] = {'status': 'failed', 'error': str(error)}
+            # What failed, the packaging or the upload: a recording not uploaded (uploads off) never says it was.
+            result['error'] = f'{step} failed: {error}'
+            if upload:
+                result['uploaded'] = {'status': 'failed', 'error': str(error)}
             kept = None if result['path'] else self._rescue(spool, package, result['name'])
             result['path'] = result['path'] or (kept and str(kept))
-            warnings.warn(f'Automatic upload failed: {error}' +
+            warnings.warn(f'{step} failed: {error}' +
                           (f'; the recording is kept in {kept}' + (f' (`brisk upload {kept}` retries)' if
                                                                    (kept / 'manifest.json').exists() else '')
                            if kept else ''))

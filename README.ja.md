@@ -272,7 +272,7 @@ toyota.quote()                              # 他のフィードと同じ呼び�
 （`briskapi.connect(output=...)`、`brisk live --output DIR`）を指定すると、
 記録ごとに、`SOURCE_YYYYMMDD_FROM-TO`（その最初と最後のソース時刻、日本時間 HHMMSS）という名前の
 フォルダー（例: `sbi_live_20261013_085800-090412`）が DIR に残ります。`feed.recordings` はその一覧
-（`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded`。タイミングの要約は各日の最後の記録に）で、
+（`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded`。タイミングの要約は各日の最後の記録に。`repaired`、そして `error` は失敗したのがパッケージ化かアップロードか）で、
 `on_day=callback` は記録ごとに呼ばれます。`output` を指定しないと、記録は自分のアーカイブにだけ残り、
 アップロードもオフならどこにも残りません。フィードを止めると（`feed.close()`、Ctrl-C）その日はそこで終わり、
 残りの分がほかの記録と同じように保存・アップロードされます。接続が切れたときは自動で再接続します
@@ -443,7 +443,7 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | `Market().frames()` | 記録のバッチ：時刻、計測値、気配と約定の件数 |
 | `Market().summary()` | データ源、日付、銘柄数、時刻の範囲 |
 | `Feed.quotes(codes)` / `Feed.on_quote(fn, codes)` | 届いた順のライブ更新 |
-| `Feed.recordings` | ライブフィードのこれまでの記録の一覧：`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded` |
+| `Feed.recordings` | ライブフィードのこれまでの記録の一覧：`trading_date`、`name`、`path`、`uploaded`、`timing_uploaded`、`repaired`、`error` |
 | `briskapi.recordings()` / `.pull()` / `.load()` | 自分のアーカイブの一覧、検証付きダウンロード、ローカルファイル |
 | `briskapi.Archive().upload(dir)` / `.delete(prefix)` / `.deleted()` / `.restore(prefix)` / `.timing()` / `.owner` | アップロード、削除、過去30日間に削除したもの（`deleted_at`、`restore_until` 付き）、元に戻す、自分のタイミングレポート、自分の owner ID |
 | `briskapi.record(output, cache=None, ...)` | デモの記録（設定に従ってアップロード） |
