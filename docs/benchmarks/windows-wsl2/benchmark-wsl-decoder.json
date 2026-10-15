@@ -1,0 +1,22 @@
+{
+  "source": "historical_mock",
+  "trading_date": "20210927",
+  "market_issue_count": 4131,
+  "preopen_snapshot_time_us": 32399999955,
+  "issues_with_indicative_price": 3891,
+  "summary": {
+    "type": "end",
+    "seq": 18001,
+    "source_time_us": 32579999896,
+    "frames": 18001,
+    "quote_updates": 731251,
+    "replay_wall_ms": 16070.636902000002
+  },
+  "decode_and_extract_us": {
+    "p50": 694.118,
+    "p95": 1949.249,
+    "p99": 3728.585,
+    "max": 30567.254
+  },
+  "note": "Local unpaced WASM decode and auction field extraction only; excludes JSON transport, Rust publication, network and exchange latency."
+}

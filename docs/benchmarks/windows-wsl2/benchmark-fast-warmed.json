@@ -1,0 +1,70 @@
+[
+  {
+    "workers_total": 8,
+    "mode": "1.0x real time",
+    "frames": 600,
+    "quote_updates": 65250,
+    "source_span_s": 5.96,
+    "startup_s": 3.228,
+    "feed_s": 5.974,
+    "quote_updates_per_s": 10922,
+    "real_time_headroom": 1.0,
+    "receive_to_python_state_ms": {
+      "p50": 6.0,
+      "p95": 54.73,
+      "p99": 122.39,
+      "max": 772.48
+    },
+    "recording_finalization_s": 2.277,
+    "peak_node_rss_mib": 2593,
+    "gateway": true,
+    "recording": true,
+    "upload": false,
+    "fast_symbols": [
+      "7203",
+      "6758"
+    ],
+    "fast_records": 192,
+    "consumer_ready_s": 0.072,
+    "receive_to_live_callback_ms": {
+      "p50": 10.48,
+      "p95": 47.28,
+      "p99": 67.73,
+      "max": 133.21
+    }
+  },
+  {
+    "workers_total": 8,
+    "mode": "12.0x real time",
+    "frames": 600,
+    "quote_updates": 65250,
+    "source_span_s": 5.96,
+    "startup_s": 2.809,
+    "feed_s": 1.403,
+    "quote_updates_per_s": 46496,
+    "real_time_headroom": 4.25,
+    "receive_to_python_state_ms": {
+      "p50": 470.12,
+      "p95": 894.11,
+      "p99": 918.94,
+      "max": 919.54
+    },
+    "recording_finalization_s": 3.905,
+    "peak_node_rss_mib": 2615,
+    "gateway": true,
+    "recording": true,
+    "upload": false,
+    "fast_symbols": [
+      "7203",
+      "6758"
+    ],
+    "fast_records": 192,
+    "consumer_ready_s": 0.068,
+    "receive_to_live_callback_ms": {
+      "p50": 1387.15,
+      "p95": 1612.8,
+      "p99": 1627.14,
+      "max": 1635.59
+    }
+  }
+]

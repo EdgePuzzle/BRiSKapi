@@ -1,0 +1,46 @@
+[
+  {
+    "workers_total": 4,
+    "mode": "unpaced",
+    "frames": 18001,
+    "quote_updates": 731251,
+    "source_span_s": 179.97,
+    "startup_s": 2.492,
+    "feed_s": 16.798,
+    "quote_updates_per_s": 43531,
+    "real_time_headroom": 10.71,
+    "receive_to_python_state_ms": {
+      "p50": 2392.34,
+      "p95": 4039.22,
+      "p99": 4253.46,
+      "max": 4288.23
+    },
+    "recording_finalization_s": 23.999,
+    "peak_node_rss_mib": 1866,
+    "gateway": true,
+    "recording": true,
+    "upload": false
+  },
+  {
+    "workers_total": 8,
+    "mode": "unpaced",
+    "frames": 18001,
+    "quote_updates": 731251,
+    "source_span_s": 179.97,
+    "startup_s": 2.853,
+    "feed_s": 16.199,
+    "quote_updates_per_s": 45143,
+    "real_time_headroom": 11.11,
+    "receive_to_python_state_ms": {
+      "p50": 169.19,
+      "p95": 1436.93,
+      "p99": 1528.72,
+      "max": 1548.01
+    },
+    "recording_finalization_s": 23.611,
+    "peak_node_rss_mib": 2859,
+    "gateway": true,
+    "recording": true,
+    "upload": false
+  }
+]

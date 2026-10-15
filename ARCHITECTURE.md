@@ -727,6 +727,10 @@ it all (the host and its workers, the feed recording to disk and serving the gat
 open sends some 130,000. Slower cores take fewer: there the opening can fall a few seconds
 behind, which the status line of `brisk live` shows in its data time.
 
+The [native Windows/WSL2 comparison](docs/benchmarks/windows-wsl2.md) records a later i5-12600K experiment
+with a reusable full-pipeline harness, processor-count controls and aggregate results. The earlier M5 Pro
+figure above has not been rerun with that harness; those numbers are not a controlled hardware comparison.
+
 ### Trading days
 
 A recording covers one trading day, and `record()` in `brisk.cjs` runs one `live()`
