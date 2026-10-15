@@ -38,13 +38,28 @@ def untold(monkeypatch):
     monkeypatch.setattr(cli, '_told', False)
 
 
-def pytest_sessionstart(session):
-    """The tests run brisk-parquet. Without it a feed turns the missing program into a "Packaging failed" warning and dozens of
-    tests fail on what that leaves out, so say what is wrong once, with the way to mend it."""
+def _program_missing():
+    """Why brisk-parquet cannot be run, or None."""
     try:
         _native.binary()
     except RuntimeError as error:
-        pytest.exit(f'{error}\n\nFrom a source checkout, build it first (CONTRIBUTING.md):\n'
-                    '    cargo build --release --locked --manifest-path rust/brisk_parquet/Cargo.toml\n'
-                    'or set BRISK_PARQUET to a program built elsewhere (an installed wheel holds one in briskapi/_bin).',
-                    returncode=3)
+        return str(error)
+
+
+BUILD = ('From a source checkout, build it first (CONTRIBUTING.md):\n'
+         '    cargo build --release --locked --manifest-path rust/brisk_parquet/Cargo.toml\n'
+         'or set BRISK_PARQUET to a program built elsewhere (an installed wheel holds one in briskapi/_bin).')
+
+
+def pytest_report_header(config):
+    """Most tests run brisk-parquet, and without it a feed turns the missing program into a "Packaging failed" warning, so the
+    tests that need it fail on what that leaves out. Say what is wrong at the top, and again under the failures. Nothing is
+    stopped: a run of tests that do not need it (the Windows passkey job's) is fine without."""
+    if _program_missing():
+        return 'WARNING: brisk-parquet is not built, so the tests that run it will fail. ' + BUILD.replace('\n', ' ')
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    if terminalreporter.stats.get('failed') and _program_missing():
+        terminalreporter.write_sep('=', 'brisk-parquet is not built')
+        terminalreporter.write_line(BUILD)
