@@ -29,6 +29,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import time
 from urllib.parse import parse_qs
@@ -407,6 +408,20 @@ ACTIONS = {
     'delete': ({'action', 'prefix'}, delete),
 }
 
+class _Laps:
+    """Timing lines for the function's logs: what each step of an ingest took and the most memory it has held
+    (labels and numbers only, never anything of a recording)."""
+
+    def __init__(self):
+        self.then = time.monotonic()
+
+    def __call__(self, label):
+        import resource
+        now = time.monotonic()
+        print(f'ingest {label}: {now - self.then:.1f}s, peak {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024} MB',
+              file=sys.stderr)
+        self.then = now
+
 def ingest(record, s3, db):
     from urllib.parse import unquote_plus
     require(record['s3']['bucket']['name'] == BUCKET, 'Unexpected bucket')
@@ -434,6 +449,7 @@ def ingest(record, s3, db):
     if json_get(s3, f'incoming/{ticket}/status.json').get('status') in FINAL:
         discard(s3, key, version)  # Redelivered event for a finished ticket.
         return
+    laps = _Laps()
     try:
         m = json_get(s3, f'incoming/{ticket}/manifest.json')
         validate_manifest(m)
@@ -452,8 +468,10 @@ def ingest(record, s3, db):
                     total += len(chunk)
                     require(total <= sent['bytes'], 'Size/hash mismatch')
                     sink.write(chunk)
+            laps('download')
             require(total == sent['bytes'] and file_digest(zipped) == sent['sha256'], 'Size/hash mismatch')
-            prefix, stored = store(zipped, m, part, who, s3)
+            laps('hash')
+            prefix, stored = store(zipped, m, part, who, s3, laps)
         json_put(s3, f'incoming/{ticket}/status.json', {'status': 'stored', 'prefix': prefix, 'sha256': stored['sha256']})
     except INVALID as e:
         # No raw payload or potentially sensitive contents in the ticket's status or logs.
@@ -488,7 +506,7 @@ def _put(s3, key, path):
         if e.response['Error']['Code'] not in {'PreconditionFailed', 'ConditionalRequestConflict'}:
             raise
 
-def store(zipped, m, part, who, s3):
+def store(zipped, m, part, who, s3, laps=lambda label: None):
     """Verify an upload (`zipped`: the whole recording, or a replay's timing table to join the stored market data)
     and store it; returns (prefix, stored manifest). The stored manifest hashes the zip of the four tables as
     stored. A broker's recording is checked a row group at a time (verify_package), a replay whole."""
@@ -502,7 +520,9 @@ def store(zipped, m, part, who, s3):
         else:
             unpack_file(zipped, directory, max_package(m['summary']['source']))
         zipped.unlink()   # its tables are out: the disk holds a recording once
-        verify_package(directory, m)
+        laps('unpack')
+        verify_package(directory, m, progress=laps)
+        laps('verify (all)')
         if shared:
             if not part:
                 # The first verified replay becomes the archive's copy (each table is the same for everyone),
@@ -517,15 +537,18 @@ def store(zipped, m, part, who, s3):
             own = FILES
         sha256, size = pack_to(directory, zipped)
         zipped.unlink()
+        laps('repack')
         stored = validate_manifest({**m, 'sha256': sha256, 'bytes': size})
         prefix = f'archive/{who}/{recording_name(stored)}'
         for name in own:
             _put(s3, f'{prefix}/{name}', directory / name)
+        laps('store tables')
     json_put(s3, f'{prefix}/files.json', {name: f'{prefix if name in own else shared}/{name}' for name in FILES},
              immutable=True)
     # Manifest is the commit marker. Readers list only committed datasets.
     json_put(s3, f'{prefix}/manifest.json', stored, immutable=True)
     owner_bars(s3, who, stored['summary'])
+    laps('bars')
     return prefix, stored
 
 def handler(event, context):

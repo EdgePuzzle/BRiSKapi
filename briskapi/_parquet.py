@@ -1425,11 +1425,11 @@ def _source(directory):
         return None
 
 
-def verify_package(directory, manifest, references=None):
+def verify_package(directory, manifest, references=None, progress=None):
     """The archive's checks of an upload's tables (all four, in `directory`) against its manifest: a broker's a
     row group at a time (verify_broker), a demo or synthetic one whole (verify_directory)."""
     if is_broker(validate_manifest(manifest)['summary']['source']):
-        return verify_broker(directory, manifest)
+        return verify_broker(directory, manifest, progress)
     return verify_directory(directory, manifest, references)
 
 
@@ -1580,13 +1580,15 @@ def _monotonic(issues, values, carry):
     return ok
 
 
-def verify_broker(directory, manifest=None):
+def verify_broker(directory, manifest=None, progress=None):
     """Verify a broker's recording (all four tables, in `directory`) a row group at a time, never whole in memory:
     exactly the expected tables, each row group the canonical encoding of its content (so nothing but the
     recording's fields can be in it), the batches' rules (schema._scan's: sequence, kinds, clocks, transport,
     local timing), and of every quote and trade its identity, order, batch, clock and value ranges, and its
     books' order. Not checked, the market's own consistency (a broker's content is uploader-declared: trades
-    against volumes, each issue's frames over time). Returns the summary, which must be the manifest's."""
+    against volumes, each issue's frames over time). Returns the summary, which must be the manifest's.
+    `progress(label)` is told as each table is done, for the archive's timing lines."""
+    progress = progress or (lambda label: None)
     directory = Path(directory)
     if manifest is not None:
         validate_manifest(manifest)
@@ -1599,6 +1601,7 @@ def verify_broker(directory, manifest=None):
         expected = Columns(None, None, None, master, batches, *_no_trades())._batches(midnight)
         require(table.equals(as_format(expected, BATCHES, fmt)), f'Non-canonical {BATCHES}')
     kinds, clocks, skipped, first, final = rules.finish()
+    progress('verify: batches')
     shell = Columns(None, None, None, master, [], *_no_trades())
     require(pq.read_table(directory / EQUITY).equals(as_format(shell._equity(midnight), EQUITY, fmt)), f'Non-canonical {EQUITY}')
     ids = np.array([m['issue_id'] for m in master], np.int64)
@@ -1647,6 +1650,7 @@ def verify_broker(directory, manifest=None):
                 require(order[within].all(), 'Book prices out of order')
         quotes += _per_batch(seq, n)
         quote_bytes += int(quote_lengths(rows).sum())
+    progress('verify: depths')
     plain = lambda table: table.set_column(2, 'aggressor_side', table.column(2).cast(pa.string()))  # noqa: E731
     source, carry, last_key = pq.ParquetFile(directory / TRADES), {}, (-1, -1)
     for g in range(source.num_row_groups):
@@ -1666,6 +1670,7 @@ def verify_broker(directory, manifest=None):
         require((t['price10'] > 0).all() and (t['quantity'] > 0).all() and (t['frame'] < 2**32).all(), 'Invalid trade')
         trades += _per_batch(t['seq'], n)
         trade_bytes += int(trade_lengths(t, t_code).sum())
+    progress('verify: trades')
     require(quotes[0] + len(first.get(SKIPPED, ())) == len(master), 'Incomplete bootstrap')
     history = kinds == KINDS['history']
     require(((trades[history] > 0) & (trades[history] <= MAX_HISTORY)).all(), 'Invalid trades')
