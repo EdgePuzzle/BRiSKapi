@@ -46,10 +46,15 @@ cargo fmt --manifest-path rust/brisk_quote_ingest/Cargo.toml --check
 cargo clippy --locked --manifest-path rust/brisk_quote_ingest/Cargo.toml --all-targets -- -D warnings
 ```
 
+On Windows, create the environment with `py -3.14t -m venv .venv` and use
+`.\.venv\Scripts\python.exe` in place of `.venv/bin/python`. Set the fixture path
+in PowerShell with `$env:BRISK_MOCK_CACHE = (Resolve-Path cache/brisk-mock).Path`.
+Download it first with `.\.venv\Scripts\python.exe tools/brisk_mock/download_mock.py --cache cache/brisk-mock`.
+
 Ordinary tests are local and never touch the cloud. `BRISK_MOCK_CACHE` opts into
-fixture replay. CI runs all of the above on pull requests and pushes to `main` (with the demo's
-pinned files cached, so BRiSK's demo site is asked only when a pin changes), and the passkey tests on
-Windows too when the sign-in, or what it uses, changes (`.github/workflows/passkey.yml`). Node's test
+fixture replay. CI runs all of the above on Linux and Windows on pull requests and pushes to `main` (with the demo's
+pinned files cached, so BRiSK's demo site is asked only when a pin changes). Both platforms
+also install and replay the wheel outside the checkout (`tools/smoke_wheel.py`). Node's test
 coverage is left off there: it held some 6 GB more per test file. Aim for at least 85% coverage of new
 behavior.
 

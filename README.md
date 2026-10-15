@@ -64,6 +64,15 @@ include them. Optional prebuilt Rust tools (`brisk_quote_ingest`,
 [GitHub release](https://github.com/honvl/BRiSKapi/releases). To work from source,
 clone the repository and run `pip install -e '.[pandas]'`.
 
+On Windows, run from PowerShell with Windows' own Python and Node:
+
+```powershell
+py install 3.14t
+py -3.14t -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e '.[pandas]'
+.\.venv\Scripts\brisk.exe live --site demo --codes 7203 --speed 0 --limit-frames 3 --no-upload --quotes
+```
+
 ## Recording
 
 Recording isn't a third API. The live calls record as they run, and `brisk live` and

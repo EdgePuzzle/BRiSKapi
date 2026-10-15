@@ -521,7 +521,8 @@ def test_every_schema_returns_exactly_its_documented_fields(archive):
     s3, db, put = archive
     put(session(0, 150))
     root = Path(__file__).resolve().parents[1] / 'docs'
-    docs, translated = (root / 'data-format.md').read_text(), (root / 'data-format.ja.md').read_text()   # both name every field
+    docs, translated = ((root / name).read_text(encoding='utf-8')
+                        for name in ('data-format.md', 'data-format.ja.md'))   # both name every field
     for name in engine.SCHEMAS:
         expected = pa.schema([(f, kind) for f, kind, _ in engine.FIELDS[name]])
         for start in ('2026-10-13', '2026-10-20'):          # a day with data, and one without

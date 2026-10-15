@@ -64,6 +64,15 @@ BRiSK のデコーダーとデモデータは実行時にダウンロードさ�
 ソースから使う場合は、リポジトリをクローンして `pip install -e '.[pandas]'` を
 実行してください。
 
+Windows では PowerShell から、Windows 側の Python と Node を使います。
+
+```powershell
+py install 3.14t
+py -3.14t -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e '.[pandas]'
+.\.venv\Scripts\brisk.exe live --site demo --codes 7203 --speed 0 --limit-frames 3 --no-upload --quotes
+```
+
 ## 記録する
 
 記録は3つ目の API ではありません。ライブの呼び出しが動きながら記録し、`brisk live` と
