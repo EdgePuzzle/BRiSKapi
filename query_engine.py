@@ -294,13 +294,14 @@ def _project(bucket, rec, req, publisher):
 
 # Bars
 
-def build_bars(trades: list[pa.Table]) -> dict[str, pa.Table]:
+def build_bars(trades: list[pa.Table], dedupe=None) -> dict[str, pa.Table]:
     """OHLCV bars per security from trades (code, trade_id, frame, ts_event, price, size), deduplicated by
-    (code, trade_id) across captures; intervals aligned to JST."""
+    (code, trade_id) across captures (`dedupe`: whether there are several, by default as many tables as captures);
+    intervals aligned to JST."""
     if not trades:
         return {schema: _empty_bars() for schema in BARS}
     table = pa.concat_tables([t.select(['symbol', 'trade_id', 'sequence', 'ts_event', 'price', 'size']) for t in trades])
-    if len(trades) > 1:
+    if len(trades) > 1 if dedupe is None else dedupe:
         table = _dedupe(table, ['symbol', 'trade_id'])
     place = pc.cast(pc.list_element(pc.split_pattern(table.column('trade_id'), '-'), 1), pa.int64())
     table = table.append_column('place', place).sort_by([('symbol', 'ascending'), ('ts_event', 'ascending'),
@@ -324,12 +325,56 @@ def _empty_bars():
                       ('low', pa.float64()), ('close', pa.float64()), ('volume', pa.uint64())]).empty_table()
 
 
-def _trades_for_bars(bucket, rec):
-    table = pq.read_table(io.BytesIO(bucket.read(rec.files[TRADES])),
-                          columns=['identifier', 'trade_id', 'frame', 'ts_event', 'price', 'size'])
+def _bar_trades(table):
+    """Trades as build_bars takes them."""
     return pa.table({'symbol': records.codes(table), 'trade_id': table.column('trade_id'), 'sequence': table.column('frame'),
                      'ts_event': table.column('ts_event'), 'price': records.price(table.column('price')),
                      'size': pc.cast(table.column('size'), pa.uint64())})
+
+
+# Trades gathered at once for bars: at some 150 bytes a trade (before it is sorted), a trading day's fifteen million would
+# not fit in the function's memory.
+BAR_ROWS = 1_500_000
+_BAR_COLUMNS = ['identifier', 'trade_id', 'frame', 'ts_event', 'price', 'size', 'issue_id']
+
+
+def day_bars(bucket, recs):
+    """build_bars of these recordings' trades, a range of issues at a time: each recording's trades are sorted by issue, and a
+    row group's footer says which it holds, so a range gathers about BAR_ROWS trades from all of them, and a security's
+    trades from every recording are together for deduplication."""
+    files = [pq.ParquetFile(io.BytesIO(bucket.read(r.files[TRADES]))) for r in recs]
+    spans = []   # (lowest issue, highest, rows, file, row group)
+    for i, source in enumerate(files):
+        meta, at = source.metadata, _leaf(source.metadata, 'issue_id')
+        for g in range(meta.num_row_groups):
+            stats = meta.row_group(g).column(at).statistics if at is not None else None
+            low, high = (stats.min, stats.max) if stats is not None and stats.has_min_max else (0, 2**64 - 1)
+            spans.append((low, high, meta.row_group(g).num_rows, i, g))
+    bounds, rows = [0], 0
+    for low, count in sorted((s[0], s[2]) for s in spans):
+        if rows >= BAR_ROWS and low > bounds[-1]:
+            bounds.append(low)
+            rows = 0
+        rows += count
+    out = {schema: [] for schema in BARS}
+    for low, high in zip(bounds, [*bounds[1:], None]):
+        tables = []
+        for i, source in enumerate(files):
+            groups = [g for first, last, _, f, g in spans if f == i and last >= low and (high is None or first < high)]
+            if not groups:
+                continue
+            table = source.read_row_groups(groups, columns=_BAR_COLUMNS)
+            issue = table.column('issue_id')
+            keep = pc.greater_equal(issue, pa.scalar(low, pa.uint64()))
+            if high is not None:
+                keep = pc.and_(keep, pc.less(issue, pa.scalar(high, pa.uint64())))
+            table = table.filter(keep)
+            if table.num_rows:
+                tables.append(_bar_trades(table))
+        for schema, bars in build_bars(tables, dedupe=len(recs) > 1).items():
+            out[schema].append(bars)
+    return {schema: pa.concat_tables(parts).sort_by([('symbol', 'ascending'), ('ts_event', 'ascending')]) if parts
+            else _empty_bars() for schema, parts in out.items()}
 
 
 def bars_root(owner, date):
@@ -354,7 +399,7 @@ def _rebuild(bucket, owner, date, recs):
         for key in bucket.keys(f'{root}/'):
             bucket.delete(key)
         return 0
-    for schema, bars in build_bars([_trades_for_bars(bucket, r) for r in recs]).items():
+    for schema, bars in day_bars(bucket, recs).items():
         out = io.BytesIO()
         # Sorted by symbol in 65,536-row groups: a query for a few securities reads only theirs.
         pq.write_table(covered(bars, BARS[schema], recs), out, compression='zstd', row_group_size=65_536)
@@ -441,12 +486,12 @@ def _bars(bucket, owner, req, recs, publisher):
     for date in sorted({r.date for r in recs}):
         day = [r for r in recs if r.date == date]
         if req.dataset == 'XTKS.BRISKDEMO':
-            bars = build_bars([_trades_for_bars(bucket, r) for r in day])[req.schema]
+            bars = day_bars(bucket, day)[req.schema]
         else:
             try:
                 bars = _built(bucket, f'{bars_root(owner, date)}/{req.schema}.parquet', req.symbols)
             except NotFound:  # not built (a rebuild failed): from the recordings now
-                bars = covered(build_bars([_trades_for_bars(bucket, r) for r in day])[req.schema], length, day)
+                bars = covered(day_bars(bucket, day)[req.schema], length, day)
         ts = pc.cast(bars.column('ts_event'), pa.int64())
         keep = pc.and_(pc.greater_equal(ts, req.start), pc.less(ts, req.end))
         if req.symbols is not None:

@@ -195,6 +195,32 @@ def test_each_owner_gets_bars_built_from_its_own_recordings(archive):
     assert bars(s3, OWNER, 'ohlcv-1m', symbols='7203').to_pylist() == minute
 
 
+def test_a_days_bars_are_the_same_built_a_range_of_issues_at_a_time(archive, monkeypatch):
+    from briskapi import _parquet
+    s3, db, put = archive
+    monkeypatch.setattr(_parquet, 'ROW_GROUP', 4)    # many row groups, each holding some issue's trades
+    put(session(0, 150))
+    put(session(120, 300))                          # overlapping: each trade is counted once
+    bucket = engine.Bucket(s3, service.BUCKET)
+    recs = engine.recordings(bucket, OWNER, [DATE])
+    assert len(recs) == 2
+    whole = engine.day_bars(bucket, recs)
+    monkeypatch.setattr(engine, 'BAR_ROWS', 1)      # a range a row group
+    built = []
+    real = engine.build_bars
+    monkeypatch.setattr(engine, 'build_bars', lambda *a, **k: built.append(1) or real(*a, **k))
+    by_range = engine.day_bars(bucket, recs)
+    monkeypatch.setattr(engine, 'build_bars', real)
+    assert len(built) > 1, 'more than one range'
+    everything = [engine._bar_trades(pq.read_table(io.BytesIO(bucket.read(r.files[engine.TRADES])), columns=engine._BAR_COLUMNS))
+                  for r in recs]
+    at_once = engine.build_bars(everything)
+    assert set(whole) == set(by_range) == set(at_once) == set(engine.BARS)
+    for name in whole:
+        assert by_range[name].equals(whole[name]) and at_once[name].equals(whole[name]), name
+    assert whole['ohlcv-1m'].num_rows > 3 and set(whole['ohlcv-1m'].column('symbol').to_pylist()) == set(CODES)
+
+
 def made_up(price10=None):
     """A made-up broker session that passes every check: a bootstrap at 09:00:00 and batches at 09:00:50 (with one
     7203 print at `price10`, if given, in the frame of the real 09:00:50 print) and at 15:30:00, so that its clock
