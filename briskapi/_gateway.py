@@ -129,12 +129,35 @@ class Gateway:
             self._server.close()
             raise BriskError(f'Another feed on this computer already serves {dataset} to briskapi.Live '
                              f'(process {current.get("pid")}); this one does not')
+        try:
+            self._register()
+        except BriskError:
+            self._server.close()
+            raise
+        threading.Thread(target=self._accept, name='brisk-gateway', daemon=True).start()
+
+    def _register(self):
+        """Leave the port and key where Live looks. The file is linked into place, which fails if another feed
+        registered first, so two feeds started at once cannot both think they serve (the check above, on its own,
+        passes in both): the one that lost looks at the winner as a later one would."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         staging = self.path.with_name(f'.{self.path.name}.{secrets.token_hex(4)}')
-        with os.fdopen(os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as f:
-            json.dump({'version': VERSION, 'dataset': dataset, 'port': self.port, 'key': self.key, 'pid': os.getpid()}, f)
-        os.replace(staging, self.path)
-        threading.Thread(target=self._accept, name='brisk-gateway', daemon=True).start()
+        try:
+            with os.fdopen(os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as f:
+                json.dump({'version': VERSION, 'dataset': self.dataset, 'port': self.port, 'key': self.key,
+                           'pid': os.getpid()}, f)
+            try:
+                os.link(staging, self.path)
+            except FileExistsError:
+                current = _read_file(self.path)
+                if current is not None and _answers(current):
+                    raise BriskError(f'Another feed on this computer already serves {self.dataset} to briskapi.Live '
+                                     f'(process {current.get("pid")}); this one does not') from None
+                os.replace(staging, self.path)   # a crashed feed's file: take it over
+            except OSError:
+                os.replace(staging, self.path)   # no hard links on this file system
+        finally:
+            staging.unlink(missing_ok=True)
 
     def __repr__(self):
         return f'Gateway({self.dataset!r}, {HOST}:{self.port})'

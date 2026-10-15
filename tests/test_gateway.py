@@ -555,3 +555,27 @@ def test_a_live_session_joins_the_fast_lane_of_a_running_host_through_the_feed(t
     got, expected = fast_got['mbp-10', '7203'], slow_got['mbp-10', '7203']
     assert len(got) > 20 and got == expected[-len(got):], 'from its join, the recording\'s records, each once'
     assert all(symbol == '7203' for _, symbol in fast_got)
+
+
+def test_two_feeds_starting_at_once_cannot_both_serve(monkeypatch):
+    # Both pass the check that no live gateway is registered (the first feed has not written its file yet when
+    # the second looks); only the first registers, the second is refused as a later one would be.
+    first = _gateway.Gateway('XTKS.BRISK')
+    real = _gateway._read_file
+    looks = []
+    monkeypatch.setattr(_gateway, '_read_file', lambda path: looks.append(path) or (None if len(looks) == 1 else real(path)))
+    with pytest.raises(brisk.BriskError, match='Another feed on this computer already serves XTKS.BRISK'):
+        _gateway.Gateway('XTKS.BRISK')
+    assert real(first.path)['pid'] == os.getpid() and real(first.path)['port'] == first.port, 'the winner stays registered'
+    assert not list(first.path.parent.glob('.*')), 'no staging file is left'
+    first.close('completed', None)
+
+
+def test_a_crashed_feeds_registration_is_taken_over(monkeypatch):
+    first = _gateway.Gateway('XTKS.BRISK')
+    path, stale = first.path, _gateway._read_file(first.path)
+    first.close('completed', None)
+    path.write_text(json.dumps({**stale, 'port': 1, 'pid': 2**22}))   # as a crashed feed leaves it: nothing answers
+    taker = _gateway.Gateway('XTKS.BRISK')
+    assert _gateway._read_file(path)['port'] == taker.port
+    taker.close('completed', None)
