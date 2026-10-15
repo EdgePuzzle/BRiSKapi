@@ -18,6 +18,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14t'
+      - uses: dtolnay/rust-toolchain@stable
+      # The tests run brisk-parquet (the archive's checks of a broker's day), so it is built first.
+      - run: cargo build --release --locked --manifest-path rust/brisk_parquet/Cargo.toml
       - run: python -m pip install -r requirements-dev.txt -e .
       - name: No dependency turns the GIL back on
         run: python -c "import sys, numpy, pyarrow, pandas, briskapi; assert not sys._is_gil_enabled(), 'the GIL is on'"
@@ -48,9 +51,11 @@ jobs:
           /tmp/wheel-venv/bin/python -I -c "import briskapi.cli as c, briskapi.schema as s; assert c.DECODER.exists() and 'historical_mock' in s.REFERENCES"
           /tmp/wheel-venv/bin/brisk live --site demo --cache /tmp/brisk-mock-cache --codes 7203 --speed 0 --limit-frames 3 --quotes > /tmp/live.jsonl
           /tmp/wheel-venv/bin/python -c "import json; rows = [json.loads(l) for l in open('/tmp/live.jsonl')]; assert rows and all(r['code'] == '7203' for r in rows)"
-      - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked --manifest-path rust/brisk_quote_ingest/Cargo.toml
         env:
           BRISK_MOCK_CACHE: /tmp/brisk-mock-cache
       - run: cargo fmt --manifest-path rust/brisk_quote_ingest/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path rust/brisk_quote_ingest/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path rust/brisk_parquet/Cargo.toml
+      - run: cargo fmt --manifest-path rust/brisk_parquet/Cargo.toml --check
+      - run: cargo clippy --locked --manifest-path rust/brisk_parquet/Cargo.toml --all-targets -- -D warnings

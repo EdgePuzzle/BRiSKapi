@@ -35,6 +35,8 @@ does. `briskapi/decoder/board.wat` is assembled into `decoder.cjs` (`BOARD_KERNE
 ```sh
 uv venv --seed --python 3.14t .venv
 .venv/bin/python -m pip install -r requirements-dev.txt -e .
+# the tests run brisk-parquet (the archive's checks of a broker's day): build it first
+cargo build --release --locked --manifest-path rust/brisk_parquet/Cargo.toml
 .venv/bin/python -m pytest tests \
   --cov=archive_service --cov=query_engine --cov=query_service --cov=briskapi --cov-fail-under=85
 .venv/bin/python tools/brisk_mock/download_mock.py --cache /tmp/brisk-mock-cache
@@ -44,6 +46,9 @@ BRISK_MOCK_CACHE=/tmp/brisk-mock-cache cargo test --locked \
   --manifest-path rust/brisk_quote_ingest/Cargo.toml
 cargo fmt --manifest-path rust/brisk_quote_ingest/Cargo.toml --check
 cargo clippy --locked --manifest-path rust/brisk_quote_ingest/Cargo.toml --all-targets -- -D warnings
+cargo test --locked --manifest-path rust/brisk_parquet/Cargo.toml
+cargo fmt --manifest-path rust/brisk_parquet/Cargo.toml --check
+cargo clippy --locked --manifest-path rust/brisk_parquet/Cargo.toml --all-targets -- -D warnings
 ```
 
 Ordinary tests are local and never touch the cloud. `BRISK_MOCK_CACHE` opts into

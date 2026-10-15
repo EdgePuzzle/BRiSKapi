@@ -12,6 +12,7 @@ itself. For usage, see the [README](README.md).
 | BRiSK site client | `briskapi/brisk.py` | Cookie login (SBI by default, or another broker with `site=`: `e-shiten`, `matsui`, `monex`, `smbcnikko`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `briskapi.connect(site=...)` starts the live host through it (`_connect`). |
 | Archive client | `briskapi/cli.py`, `briskapi/schema.py`, `briskapi/_parquet.py`, `briskapi/identity.py` | The `brisk` CLI, upload consent, your identity, Parquet packaging, upload, verified download, deletion, restore and export. |
 | Auction state | `rust/brisk_quote_ingest` | Optional Rust tools: `brisk_quote_ingest` validates batches, keeps per-security state and publishes latest-state files; `brisk_recording` reconstructs a saved recording. |
+| Parquet tool | `rust/brisk_parquet`, `briskapi/_native.py` | `brisk-parquet`, a Rust program for what Python took minutes for: it checks a broker's day for the archive (`verify`), and writes the tables the recorder ships. The function runs a static arm64 build of it (`infra/deploy.py` builds it with Docker); Python runs it as a program (`_native.run`) and `tests/reference_verifier.py` keeps the old Python rules as its reference. |
 | Archive service | `archive_service.py`, `infra/deploy.py` | A Lambda function URL serves each owner's uploads, listings, downloads, deletions and restores; S3-triggered ingest validates and stores and keeps each owner's OHLCV bars in step; DynamoDB holds quotas. |
 | Cloud API | `query_engine.py`, `query_service.py`, `briskapi/_historical.py` | A second Lambda function URL answers Databento-style queries over an owner's recordings and the demo's, with OHLCV bars built from every broker upload; `briskapi.Historical` and `brisk query` are its client. The engine and the service run only in the cloud and are not in the wheel. |
 | Records | `briskapi/records.py` | The Databento-style schemas (`FIELDS`) and the projections from a recording's tables to them, shared by the cloud API's engine and `briskapi.Live`, so a record is the same in history and live. |
@@ -1067,7 +1068,8 @@ address and per owner (`CHANGES`). A request over any limit gets HTTP 429.
 The client is open source, so the service validates every upload. Demo and
 synthetic content must match a reference, and is checked whole, in memory
 (`verify_directory`); broker live content has no reference and is uploader-declared, and
-is checked a row group at a time on disk (`verify_broker`), as a trading session of the whole
+is checked a row group at a time on disk (`verify_broker`, done by `brisk-parquet`, which decodes row groups on
+all the function's cores: a day of 60 million updates takes about 30 seconds on two), as a trading session of the whole
 market is tens of millions of quote updates, about a million batches. Every upload is checked for what it may hold (the
 tables, fields and encodings below); a broker's for being well formed too (each quote's and
 trade's identity, order, batch, clock and value ranges, its books' order, the batches'
@@ -1083,7 +1085,7 @@ nothing could make trustworthy:
   `tools/brisk_mock/build_reference.py` regenerates it after a re-audited asset pin.
   This comparison applies only to demo/synthetic sources, not to the brokers' (`brisk_live`).
 - **Canonical tables.** Each table must have exactly its schema and metadata, a
-  pyarrow writer, zstd, full row groups and no bytes between its column chunks.
+  pyarrow or `brisk-parquet` writer, zstd, full row groups and no bytes between its column chunks.
   Every row group must equal the encoding of the validated content, including the
   columns reading ignores (`flags`, v2's constant Equity fields and a v2 recording's `ts_init`), null for
   every zero price and rows sorted by issue, then batch. Packaging converts recorder

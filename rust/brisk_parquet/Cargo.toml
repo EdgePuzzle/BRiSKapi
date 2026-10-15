@@ -1,0 +1,33 @@
+[package]
+name = "brisk_parquet"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+description = "BRiSK recordings' Parquet tables: the verifier and the packager the archive and the recorder share"
+repository = "https://github.com/honvl/briskapi"
+
+[lib]
+name = "brisk_parquet"
+path = "src/lib.rs"
+
+[[bin]]
+name = "brisk-parquet"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+arrow-array = "59"
+arrow-buffer = "59"
+arrow-schema = "59"
+mimalloc = { version = "0.1", default-features = false }
+parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
+rayon = "1.11"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+strip = true

@@ -39,7 +39,7 @@ Logs expire after 14 days.
 
 Ingest accepts canonical demo/synthetic recordings that match a reference replay
 and decoded broker recordings (SBI, e-shiten, Matsui, Monex, SMBC Nikko; a trading session each, up to 4 GiB,
-checked a row group at a time on the function's 10 GB of `/tmp`) with structural checks, and timing reports
+checked a row group at a time on the function's 10 GB of `/tmp`, by `brisk-parquet`, which `deploy.py` builds static for arm64 with Docker and ships in the function's zip) with structural checks, and timing reports
 from either. It
 stores the verified Parquet tables, each as its own object (see the integrity and storage
 sections of [ARCHITECTURE.md](../ARCHITECTURE.md)). The bucket's prefixes:

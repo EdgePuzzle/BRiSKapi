@@ -32,18 +32,33 @@ def ignore_exists(call, **kwargs):
         if e.response['Error']['Code'] not in {'EntityAlreadyExists', 'ResourceInUseException', 'ResourceConflictException', 'BucketAlreadyOwnedByYou', 'ResourceAlreadyExistsException'}:
             raise
 
-def package():
+# brisk-parquet (rust/brisk_parquet) checks a broker's day; built static for the function's arm64 Linux, in an arm64 image
+# (an Apple-silicon Mac's Docker engine or an arm64 Linux machine runs it natively).
+NATIVE_IMAGE = 'rust:1.92-alpine3.23'
+
+def native():
+    """The program the function runs, built with Docker (a few minutes)."""
+    source = ROOT/'rust/brisk_parquet'
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(['docker','run','--rm','--platform','linux/arm64','-v',f'{source}:/src:ro','-v',f'{tmp}:/target','-w','/src',
+                        '-e','CARGO_TARGET_DIR=/target',NATIVE_IMAGE,'cargo','build','--release','--locked'],check=True)
+        return (Path(tmp)/'release/brisk-parquet').read_bytes()
+
+def package(program=None):
     """The Lambda zip (both functions): the services, the query engine, the shared schema, Parquet format and
-    records, and reference fingerprints only."""
+    records, reference fingerprints only, and `program` (native()'s bytes) for the one that checks uploads."""
     code=io.BytesIO()
     with zipfile.ZipFile(code,'w',zipfile.ZIP_DEFLATED) as z:
         for name in ('archive_service.py','query_engine.py','query_service.py'):
             z.write(ROOT/name,name)
         # An empty package init keeps the client API (and its dependencies) out.
         z.writestr('briskapi/__init__.py','')
-        z.write(ROOT/'briskapi/schema.py','briskapi/schema.py')
-        z.write(ROOT/'briskapi/_parquet.py','briskapi/_parquet.py')
-        z.write(ROOT/'briskapi/records.py','briskapi/records.py')
+        for name in ('schema.py','_parquet.py','_native.py','records.py'):
+            z.write(ROOT/'briskapi'/name,f'briskapi/{name}')
+        if program:
+            entry=zipfile.ZipInfo('briskapi/_bin/brisk-parquet',date_time=(1980,1,1,0,0,0))
+            entry.compress_type,entry.external_attr=zipfile.ZIP_DEFLATED,0o755<<16
+            z.writestr(entry,program)
         # Reference fingerprints verify demo/synthetic content; broker recordings are structurally checked.
         for path in sorted((ROOT/'briskapi/references').glob('*.json')):
             z.write(path,f'briskapi/references/{path.name}')
@@ -182,7 +197,7 @@ def deploy(bucket):
     logs=session.client('logs')
     ignore_exists(logs.create_log_group, logGroupName=f'/aws/lambda/{NAME}')
     logs.put_retention_policy(logGroupName=f'/aws/lambda/{NAME}', retentionInDays=14)
-    code=io.BytesIO(package())
+    code=io.BytesIO(package(native()))
     try:
         existing=lam.get_function_configuration(FunctionName=NAME)['Environment']['Variables']
     except (lam.exceptions.ResourceNotFoundException, KeyError):

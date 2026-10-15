@@ -1255,9 +1255,13 @@ def test_lambda_package_is_self_contained(tmp_path):
     spec = importlib.util.spec_from_file_location('deploy', root / 'infra/deploy.py')
     deploy = importlib.util.module_from_spec(spec); spec.loader.exec_module(deploy)
     with zipfile.ZipFile(io.BytesIO(deploy.package())) as z:
-        assert sorted(z.namelist()) == ['archive_service.py', 'briskapi/__init__.py', 'briskapi/_parquet.py',
+        assert sorted(z.namelist()) == ['archive_service.py', 'briskapi/__init__.py', 'briskapi/_native.py', 'briskapi/_parquet.py',
                                         'briskapi/records.py', 'briskapi/references/historical_mock.json', 'briskapi/schema.py',
                                         'query_engine.py', 'query_service.py']
+    # The function that checks uploads also holds brisk-parquet, executable.
+    with zipfile.ZipFile(io.BytesIO(deploy.package(b'\x7fELF'))) as z:
+        entry = z.getinfo('briskapi/_bin/brisk-parquet')
+        assert entry.external_attr >> 16 == 0o755 and z.read(entry) == b'\x7fELF'
         z.extractall(tmp_path)
     check = ("import archive_service, query_service, briskapi, briskapi.schema as s, sys; "
              f"assert briskapi.__file__.startswith({str(tmp_path)!r}); "
@@ -1265,6 +1269,25 @@ def test_lambda_package_is_self_contained(tmp_path):
              "assert 'briskapi.cli' not in sys.modules")
     subprocess.run([sys.executable, '-c', check], cwd=tmp_path, check=True,
                    env={'PYTHONPATH': str(tmp_path), 'PATH': os.environ.get('PATH', '')})
+
+
+def test_the_function_runs_a_static_arm64_build_of_brisk_parquet(monkeypatch):
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location('deploy', root / 'infra/deploy.py')
+    deploy = importlib.util.module_from_spec(spec); spec.loader.exec_module(deploy)
+    calls = []
+
+    def build(cmd, check):
+        calls.append(cmd)
+        target = Path(cmd[cmd.index('-v', cmd.index('-v') + 1) + 1].split(':')[0]) / 'release'
+        target.mkdir()
+        (target / 'brisk-parquet').write_bytes(b'built')
+    monkeypatch.setattr(deploy.subprocess, 'run', build)
+    assert deploy.native() == b'built'
+    command = calls[0]
+    assert command[:2] == ['docker', 'run'] and 'linux/arm64' in command and deploy.NATIVE_IMAGE in command
+    assert command[-4:] == ['cargo', 'build', '--release', '--locked']
 
 
 def test_lambda_layer_holds_the_pinned_wheels(monkeypatch):
