@@ -585,18 +585,21 @@ async function record({ days = Infinity, retryMs = RETRY_MS, sleep = ms => new P
   }
 }
 
-// BRISK_LANES=1 (the Python feed, serving briskapi.Live): its gateway says on stdin, one JSON line at a time,
+// BRISK_CONTROL=1: the Python parent asks to stop with {"stop": true}, or EOF when it exits.
+// BRISK_LANES=1 (the Python feed, serving briskapi.Live): its gateway also says on stdin, one JSON line at a time,
 // which symbols Live sessions want on the fast lane ({"fast": [codes]}, all of them each time). live() reads
 // `codes` and is told of a change by `onChange`.
-function readLanes(input) {
+function readLanes(input, onStop = null) {
   const lanes = { codes: new Set(), onChange: null };
   require('node:readline').createInterface({ input }).on('line', line => {
     let message;
     try { message = JSON.parse(line); } catch { return; }
+    if (message?.stop === true) { onStop?.(); return; }
     if (!Array.isArray(message?.fast)) return;
     lanes.codes = new Set(message.fast.map(String));
     lanes.onChange?.();
   });
+  input.on('end', () => onStop?.());  // the Python parent closed or died
   input.unref?.();   // the feed's stdin never keeps the host running
   return lanes;
 }
@@ -634,7 +637,8 @@ async function main(argv, env = process.env) {
   };
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
-  const lanes = env.BRISK_LANES === '1' ? readLanes(process.stdin) : null;
+  const control = env.BRISK_CONTROL === '1' || env.BRISK_LANES === '1' ? readLanes(process.stdin, onSignal) : null;
+  const lanes = env.BRISK_LANES === '1' ? control : null;
   await record({ cookies: JSON.parse(env[where.cookies] || 'null'), codes, profile, site: where.id, stop, lanes,
     trace: trace ? line => process.stderr.write(`[brisk protocol] ${line}\n`) : null,
     // A batch whose quotes workers read comes with its line already made.

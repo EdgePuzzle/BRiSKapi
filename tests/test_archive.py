@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import io
 import json
+import os
 import re
 import shutil
 import urllib.error
@@ -1133,7 +1134,8 @@ def test_identity(tmp_path, monkeypatch, harness, capsys):
     # Made on first use, kept owner-only, the same afterwards.
     first = identity.secret()
     assert schema.IDENTITY.fullmatch(first) and identity.secret() == first
-    assert identity.path().stat().st_mode & 0o777 == 0o600
+    if os.name == 'posix':
+        assert identity.path().stat().st_mode & 0o777 == 0o600
     assert json.loads(identity.path().read_text())['owner'] == schema.owner(first) == identity.owner_id()
     harness('identity')
     assert json.loads(capsys.readouterr().out) == {'owner': schema.owner(first), 'kept_in': [str(identity.path())]}

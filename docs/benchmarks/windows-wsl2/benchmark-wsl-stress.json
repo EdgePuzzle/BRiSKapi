@@ -1,0 +1,36 @@
+[
+  {
+    "workers_total": 8,
+    "mode": "32.0x real time",
+    "frames": 18001,
+    "quote_updates": 731251,
+    "source_span_s": 179.97,
+    "startup_s": 2.695,
+    "feed_s": 23.813,
+    "quote_updates_per_s": 30708,
+    "real_time_headroom": 7.56,
+    "receive_to_python_state_ms": {
+      "p50": 14388.07,
+      "p95": 16492.72,
+      "p99": 16680.09,
+      "max": 16910.79
+    },
+    "recording_finalization_s": 16.93,
+    "peak_node_rss_mib": 4515,
+    "gateway": true,
+    "recording": true,
+    "upload": false,
+    "fast_symbols": [
+      "7203",
+      "6758"
+    ],
+    "fast_records": 4276,
+    "consumer_ready_s": 0.046,
+    "receive_to_live_callback_ms": {
+      "p50": 23403.5,
+      "p95": 28612.25,
+      "p99": 29305.83,
+      "max": 29430.28
+    }
+  }
+]

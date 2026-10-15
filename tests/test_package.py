@@ -1,4 +1,5 @@
 """Install-time behavior: the Node preflight, --version and the PyPI package description."""
+import os
 import re
 import subprocess
 import tomllib
@@ -21,6 +22,10 @@ def isolated(tmp_path, monkeypatch):
 
 
 def fake_node(tmp_path, output, executable=True):
+    if os.name == 'nt':
+        script = tmp_path / ('fake-node.cmd' if executable else 'fake-node.txt')
+        script.write_text(f'@echo {output}\n', encoding='utf-8')
+        return str(script)
     script = tmp_path / 'fake-node'
     script.write_text(f'#!/bin/sh\necho {output}\n')
     script.chmod(0o755 if executable else 0o644)
@@ -82,11 +87,11 @@ def test_cli_version(capsys):
 
 
 def test_version_matches_pyproject():
-    project = tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']
+    project = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))['project']
     assert project['version'] == briskapi.__version__
 
 
 def test_readme_links_work_on_pypi():
     # README.md is the PyPI description, where relative links do not resolve.
-    readme = (ROOT / 'README.md').read_text()
+    readme = (ROOT / 'README.md').read_text(encoding='utf-8')
     assert not re.findall(r'\]\((?!https?://|#|mailto:)[^)]+\)', readme)
