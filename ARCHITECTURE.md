@@ -172,7 +172,9 @@ buffers on a few threads (a third of the cores, at most six, as the feed and its
 row group of depths to a block of `PART_ISSUES` issues, with the statistics of the issue alone (a day's thousand parts are
 read again for each range of issues): a part of 50,000 quote updates takes about 0.15 seconds, where Python took 1.5. A writer
 thread of its own writes the parts in order, fsyncs each and renames
-it into place, so a crash loses at most the part still open. A day's
+it into place, so a crash loses at most the part still open. Files are opened for writing when
+flushed, as Windows requires. Recovery checks a previous owner's process with a Windows process
+handle there (`os.kill(pid, 0)` would terminate it); POSIX uses the signal-zero probe. A day's
 parts take about the disk of its recording; its decoded JSON, which the feed used to keep in a
 temporary file, takes some twenty times more. At the day's end the feed hands the spool to a
 worker thread (a `ThreadPoolExecutor` of one, so days finish in order) and reads on. The worker packages
@@ -222,7 +224,8 @@ terminal) uploads by default after a once-per-process notice, without saving a c
 `BRISK_UPLOAD=0` or `upload=False` (`--no-upload`) disables both uploads. Only a segment that
 reached its end, a day or the part of one before a lost connection or a stop (see
 [Trading days](#trading-days)), is packaged and uploaded. `close()` stops a broker feed by asking
-its host to end the running day (SIGTERM, which `brisk live` also gets from Ctrl-C, `kill` or a
+its host to end the running day (a `{"stop":true}` JSON line on its control pipe, which works on Windows too;
+`brisk live` also handles Ctrl-C, `kill` or a
 shutdown) and waits up to 30 s for the host to exit, its end written and read, before killing it;
 a demo replay is killed at once (a partial replay is never uploaded). A broker segment that is
 still unfinished when the feed closes or fails (a host that crashed, was killed or did not end in
@@ -726,6 +729,10 @@ it all (the host and its workers, the feed recording to disk and serving the gat
 open sends some 130,000. Slower cores take fewer: there the opening can fall a few seconds
 behind, which the status line of `brisk live` shows in its data time.
 
+The [native Windows/WSL2 comparison](docs/benchmarks/windows-wsl2.md) records a later i5-12600K experiment
+with a reusable full-pipeline harness, processor-count controls and aggregate results. The earlier M5 Pro
+figure above has not been rerun with that harness; those numbers are not a controlled hardware comparison.
+
 ### Trading days
 
 A recording covers one trading day, and `record()` in `brisk.cjs` runs one `live()`
@@ -740,7 +747,8 @@ batch, when:
   archive's market-clock check;
 - the server closes the stream, cleanly (code 1000) or, once the decoder has called
   `marketFinished`, in any way;
-- the host is asked to stop: `main()` handles SIGINT and SIGTERM by ending the running day
+- the host is asked to stop: `main()` handles SIGINT, SIGTERM, a `{"stop":true}` line on stdin
+  (`BRISK_CONTROL=1`) or EOF when its Python parent exits by ending the running day
   (`stop.end`, the day's `endDay`) and `record()` then returns instead of waiting for the next
   day; with no day running the host simply exits, and a repeated signal changes nothing.
 

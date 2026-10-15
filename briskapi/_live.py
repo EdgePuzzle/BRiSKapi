@@ -45,6 +45,11 @@ def _stop(process):
     if process.poll() is None:
         process.kill()
     process.stdout.close()
+    if process.stdin:
+        try:
+            process.stdin.close()
+        except OSError:  # closing flushes buffered control messages; the host may have already exited
+            pass
     process.wait()
 
 
@@ -154,9 +159,9 @@ class Feed:
         # A broker host serving a gateway has a fast lane (see brisk.cjs): it is told on stdin which symbols for.
         lanes = bool(command and gateway)
         self._lanes_lock = threading.Lock()
-        self._process = (subprocess.Popen(command, stdout=subprocess.PIPE, env={**(env or os.environ), 'BRISK_LANES': '1'},
-                                          stdin=subprocess.PIPE) if lanes else
-                         subprocess.Popen(command, stdout=subprocess.PIPE, env=env) if command
+        self._process = (subprocess.Popen(command, stdout=subprocess.PIPE, stdin=subprocess.PIPE,
+                                          env={**(env or os.environ), 'BRISK_CONTROL': '1',
+                                               **({'BRISK_LANES': '1'} if lanes else {})}) if command
                          else _decoder(cache, codes, speed, limit_frames, node))
         if gateway:
             try:
@@ -303,11 +308,17 @@ class Feed:
     def close(self, timeout=30):
         """Stop the feed. A broker session first ends its day where it is, as the day's end would (its host writes
         the day's end), so the day is kept and uploaded like any other; a host that has not ended within `timeout`
-        seconds is stopped where it is, and what it recorded is kept on this computer, not uploaded. A demo replay
+        seconds is killed and its recording repaired and finalized as the session requested. A demo replay
         stops at once (a partial replay is never uploaded). Returns once the days are kept and uploaded."""
         self._closing = True
         if self._process.poll() is None and self._broker:
-            self._process.terminate()   # SIGTERM: brisk.cjs ends the running day
+            # A control message works on Windows too, where terminate() cannot run the host's SIGTERM handler.
+            with self._lanes_lock:
+                try:
+                    self._process.stdin.write(b'{"stop":true}\n')
+                    self._process.stdin.flush()
+                except (OSError, ValueError):  # the host has already ended
+                    pass
             try:
                 self._process.wait(timeout)
             except subprocess.TimeoutExpired:

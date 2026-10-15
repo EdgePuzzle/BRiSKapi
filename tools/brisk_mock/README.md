@@ -220,6 +220,28 @@ Checked 7 October 2026:
 - No GitHub releases are published. No morning pre-open stream was found in the
   published branches inspected. The site's 2021 mock is a separate dataset.
 
+## Feed throughput benchmark
+
+`benchmark.cjs` measures only local decode and quote extraction. To include the live host's quote workers,
+the JSON pipe, Python state updates, recording spool and local gateway, run:
+
+```sh
+.venv/bin/python tools/brisk_mock/benchmark_feed.py --cache /tmp/brisk-mock-cache --workers 4 8 --frames 18001 --output cache/full.json
+.venv/bin/python tools/brisk_mock/benchmark_feed.py --cache /tmp/brisk-mock-cache --workers 4 --speeds 1 12 --fast-symbols 7203 6758 --output cache/latency.json
+```
+
+Use free-threaded Python and Node 22+. The host serves the pinned demo through a fake broker transport;
+no account is needed, and uploads are disabled. The tool checks applied quote counts and successful
+recording completion. A fast-lane client is fully subscribed before the timed stream starts. Output JSON
+reports startup, stream application, recording finalization and local receipt-to-state/callback latency
+separately; these are not exchange latency measurements.
+
+On Windows, use `.\.venv\Scripts\python.exe`. `benchmark_windows_affinity.py` runs the same harness with an
+eight-logical-processor affinity mask for its process and children. The
+[Windows/WSL2 comparison](../../docs/benchmarks/windows-wsl2.md) includes the environment, aggregate
+measurements, limitations and reproduction commands. For WSL, keep the checkout and fixtures on its
+Linux filesystem; benchmark sequentially when comparing configurations.
+
 ## Verification
 
 Download assets first; fixture integration checks are opt-in to avoid a network

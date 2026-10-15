@@ -26,6 +26,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -67,7 +68,8 @@ def kept_dir() -> Path:
 
 
 def _fsync(path):
-    fd = os.open(path, os.O_RDONLY)
+    # Windows' _commit (os.fsync) needs a handle opened for writing.
+    fd = os.open(path, os.O_RDWR)
     try:
         os.fsync(fd)
     finally:
@@ -341,6 +343,21 @@ class _Replay:
 
 
 def _alive(pid) -> bool:
+    if sys.platform == 'win32':
+        # os.kill(pid, 0) terminates a Windows process. Query its handle instead.
+        import _winapi
+        try:
+            handle = _winapi.OpenProcess(_winapi.SYNCHRONIZE, False, pid)
+        except OSError as error:
+            if error.winerror == 87:  # ERROR_INVALID_PARAMETER: no such process
+                return False
+            if error.winerror == 5:   # ERROR_ACCESS_DENIED: a protected process
+                return True
+            raise
+        try:
+            return _winapi.WaitForSingleObject(handle, 0) == _winapi.WAIT_TIMEOUT
+        finally:
+            _winapi.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

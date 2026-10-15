@@ -162,7 +162,9 @@ def test_login_sources(monkeypatch, tmp_path):
     monkeypatch.delenv('BRISK_SBI_COOKIES')
     briskapi.login(cookies={'saved': 'yes'}, remember=True)
     path = brisk.cookies_path()
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600 and json.loads(path.read_text()) == {'saved': 'yes'}
+    if os.name == 'posix':
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    assert json.loads(path.read_text()) == {'saved': 'yes'}
     assert briskapi.login().session.cookies == {'saved': 'yes'}
     brisk._client.session._opener = Opener({'/api/frontend/boot': BOOT, '/api/app/boot': APP_BOOT})
     brisk._client.session.rate_limit = 0
@@ -427,14 +429,25 @@ def test_cli_sbi_upload_switches(fake_host, monkeypatch, flags, market, timing):
     assert (len(sent['market']), len(sent['timing'])) == (market, timing)
 
 
+def test_cleanup_of_an_exited_host_with_a_buffered_control_message():
+    import subprocess
+    process = subprocess.Popen([sys.executable, '-c', 'pass'], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    process.wait(timeout=30)
+    process.stdin.write(b'{"stop":true}\n')  # buffered until close, after the reader has exited
+    _live._stop(process)
+    assert process.stdin.closed and process.stdout.closed and process.returncode == 0
+
+
 def test_a_feed_stopped_mid_day_ends_the_day_there_and_uploads_it(tmp_path, monkeypatch):
-    # A host that, asked to stop (SIGTERM, as close() sends), ends its day with its end, as brisk.cjs does.
+    # A host that, asked to stop over stdin, ends its day with its end, as brisk.cjs does on every OS.
     batches = sbi_session(frames=150)
     first = batches[:41]
     end = dict(batches[-1], seq=41, source_time_us=first[-1]['source_time_us'], frames=40, quote_updates=40)
     script = tmp_path / 'stoppable.cjs'
     script.write_text(f"""for (const b of {json.dumps(first)}) console.log(JSON.stringify(b));
-process.on('SIGTERM', () => {{ process.stdout.write(JSON.stringify({json.dumps(end)}) + '\\n', () => process.exit(0)); }});
+require('node:readline').createInterface({{ input: process.stdin }}).on('line', line => {{
+  if (JSON.parse(line).stop) process.stdout.write(JSON.stringify({json.dumps(end)}) + '\\n', () => process.exit(0));
+}});
 setInterval(() => {{}}, 1000);
 """)
     monkeypatch.setattr(brisk, 'DECODER', script)

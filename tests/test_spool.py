@@ -135,6 +135,25 @@ def dead_pid():
     return int(subprocess.run([sys.executable, '-c', 'import os; print(os.getpid())'], capture_output=True, text=True).stdout)
 
 
+def test_spool_files_can_be_flushed_to_disk(tmp_path):
+    path = tmp_path / 'part'
+    path.write_bytes(b'recording')
+    _spool._fsync(path)
+    assert path.read_bytes() == b'recording'
+
+
+def test_process_probe_leaves_a_running_process_alive():
+    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+    try:
+        assert _spool._alive(child.pid)
+        with pytest.raises(subprocess.TimeoutExpired):
+            child.wait(timeout=0.1)
+    finally:
+        child.kill()
+        child.wait()
+    assert not _spool._alive(child.pid)
+
+
 def test_leftovers_are_crashed_broker_spools_with_their_sessions_choices_and_a_demos_dropped(tmp_path):
     root, intent = tmp_path / 'spool', {'upload': True, 'output': str(tmp_path / 'days')}
     for source in ('brisk_live', 'historical_mock'):

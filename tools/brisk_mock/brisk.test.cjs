@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { Session, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, fetchCatchUp, Interrupted, fatal,
-  RETRY_MS } = require('../../briskapi/decoder/brisk.cjs');
+  RETRY_MS, readLanes } = require('../../briskapi/decoder/brisk.cjs');
 const { frames, Decoder } = require('../../briskapi/decoder/decoder.cjs');
 const { QuotePool, workerCount, merge } = require('../../briskapi/decoder/workers.cjs');
 const cache = process.env.BRISK_MOCK_CACHE;
@@ -14,6 +14,25 @@ const cache = process.env.BRISK_MOCK_CACHE;
 const IDENTITY = 'a'.repeat(64);
 const MARKET_TOKEN = 'v2.local.MARKETTOKENVALUE';
 const WS_SESSION = 'b'.repeat(48);
+
+test('the parent control pipe handles lane changes, stop requests and EOF on every OS', async () => {
+  const { PassThrough } = require('node:stream');
+  const { once } = require('node:events');
+  const input = new PassThrough();
+  let stops = 0, changes = 0;
+  const lanes = readLanes(input, () => stops++);
+  lanes.onChange = () => changes++;
+  input.write('not JSON\nnull\n{}\n{"fast":[7203,"6758"]}\n');
+  assert.deepEqual([...lanes.codes], ['7203', '6758']);
+  assert.equal(changes, 1);
+  input.write('{"stop":true}\n');
+  assert.equal(stops, 1);
+  assert.equal(changes, 1, 'stopping does not change the fast lane');
+  const ended = once(input, 'end');
+  input.end();
+  await ended;
+  assert.equal(stops, 2, 'losing the parent also asks the host to stop');
+});
 
 function server(files, overrides = {}) {
   const requests = [];
@@ -760,8 +779,9 @@ test('frames queued behind a slow output keep the link alive: a burst is not a m
     const initialize = w._initialize;
     w._initialize = (...a) => { hook.pointers = a.slice(0, 6); return initialize(...a); };
   } }));
-  // The server sends a frame every 20 ms after the opening ones; the output stalls for 400 ms (5 heartbeat
-  // windows) on the first quotes, so nothing is decoded meanwhile, heartbeats included.
+  // The server sends a frame every 100 ms after the opening ones; the output stalls for 2 s (5 heartbeat
+  // windows) on the first quotes, so nothing is decoded meanwhile, heartbeats included. Keep enough timer
+  // headroom for Windows runners loading other WASM modules or Chrome at the same time.
   const Socket = class extends EventTarget {
     constructor() {
       super();
@@ -769,7 +789,7 @@ test('frames queued behind a slow output keep the link alive: a burst is not a m
       const send = chunk => this.dispatchEvent(new MessageEvent('message', { data: chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.length) }));
       setImmediate(() => all.slice(0, 3).forEach(send));
       let i = 3;
-      this.timer = setInterval(() => (i < all.length ? send(all[i++]) : clearInterval(this.timer)), 20);
+      this.timer = setInterval(() => (i < all.length ? send(all[i++]) : clearInterval(this.timer)), 100);
     }
     send() {}
     close(code = 1000) {
@@ -782,12 +802,12 @@ test('frames queued behind a slow output keep the link alive: a burst is not a m
   let stalled = false;
   try {
     const done = live({ cookies: { s: 'v' }, codes: ['7203'], protocolVersion: 16000, fetchImpl: server(files).fetchImpl,
-      WebSocketImpl: Socket, heartbeatMs: 80, emit: async b => {
+      WebSocketImpl: Socket, heartbeatMs: 400, emit: async b => {
         if (b.type === 'bootstrap') hook.wasm.dynCall_viii(hook.pointers[2], hook.decoder.id, 1, 0);   // one heartbeat
         if (b.type === 'quotes' && !stalled) {
           stalled = true;
-          await new Promise(resolve => setTimeout(resolve, 400));
-          setTimeout(() => Socket.last.close(1000), 300);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          setTimeout(() => Socket.last.close(1000), 1500);
         }
       } });
     const summary = await done;
