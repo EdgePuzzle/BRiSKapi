@@ -62,9 +62,9 @@ def stream(cache=None, codes=None, speed=1, limit_frames=None, node='node') -> I
         raise BriskError(f'Decoder exited with {process.returncode}')
 
 
-def _notice(value, created):
+def _notice(value, created, old=None):
     from briskapi import identity
-    warnings.warn('Complete sessions upload to your private BRiSK archive by default: a free off-computer copy only '
+    warnings.warn(cli.policy_changed(old) + 'Complete sessions upload to your private BRiSK archive by default: a free off-computer copy only '
                   f'your identity can reach (owner {cli.owner(value)}, kept in {" and ".join(identity.where())}). '
                   + ('Keep its recovery code: `brisk identity --recovery-code`. ' if created else '')
                   + 'Opt out with upload=False, briskapi.consent(revoke=True) or BRISK_UPLOAD=0; see '

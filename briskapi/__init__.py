@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+import warnings
+
 from briskapi import brisk as _brisk, cli as _cli
 from briskapi._archive import Archive
 from briskapi._gateway import Live, Record
@@ -124,4 +126,10 @@ def consent(accept=False, revoke=False) -> dict | None:
         raise ValueError('Choose accept or revoke')
     if accept:
         return _cli.accept()
-    return _cli.save_consent(False) if revoke else _cli.load_consent() or dict(_cli.DEFAULT)
+    if revoke:
+        return _cli.save_consent(False)
+    saved = _cli.load_consent()
+    if saved is None and (old := _cli.lapsed_consent()):
+        warnings.warn(_cli.policy_changed(old) + 'Uploads are on by default until you decide: briskapi.consent(accept=True) '
+                      'or briskapi.consent(revoke=True).', stacklevel=2)
+    return saved or dict(_cli.DEFAULT)

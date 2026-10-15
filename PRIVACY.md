@@ -225,6 +225,7 @@ infrastructure. Send removal requests and privacy questions to the operator thro
 that GitHub account. Do not post personal data in a public issue.
 
 If a future version collects anything beyond what is described here, or uses it otherwise,
-the policy version increases. Earlier choices then no longer apply: the command line asks
-again before uploading, and where nothing can ask, the tool says so once, as it does before
-you first decide.
+the policy version increases. Earlier choices then no longer apply, a refusal as much as an
+acceptance: the command line asks again before uploading, and where nothing can ask (the Python API,
+a run without a terminal), the tool warns once that the policy changed, naming the choice it replaces,
+and uploads are on by default until you decide, as before you first decide.

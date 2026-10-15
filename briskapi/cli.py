@@ -92,6 +92,26 @@ def load_consent():
         return None
     return choice if isinstance(choice, dict) and choice.get('policy_version') == POLICY_VERSION else None
 
+def lapsed_consent():
+    """The choice saved under an earlier policy version, which no longer applies (a refusal as much as an
+    acceptance), or None."""
+    try:
+        choice = json.loads(consent_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if isinstance(choice, dict) and isinstance(choice.get('policy_version'), int) and choice['policy_version'] != POLICY_VERSION:
+        return choice
+    return None
+
+def policy_changed(old):
+    """What to tell someone whose saved choice lapsed with a new policy version ('' if none did): which choice, and
+    that the policy (PRIVACY.md) says what is different."""
+    if not old:
+        return ''
+    chose = 'upload' if old.get('enabled') else 'not upload'
+    return (f'The upload policy has changed (version {old["policy_version"]}, now {POLICY_VERSION}): your earlier choice '
+            f'to {chose} no longer applies; PRIVACY.md says what is different. ')
+
 def save_consent(enabled):
     choice = dict(policy_version=POLICY_VERSION, enabled=bool(enabled),
                   decided_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'))
@@ -106,7 +126,8 @@ def interactive():
 def ask_consent():
     """One-time first-run question; Enter accepts. Prompts go to stderr, never stdout. Accepting makes the
     identity (if there is none) and shows it."""
-    sys.stderr.write(NOTICE + 'Upload automatically to your private archive? [Y/n] ')
+    sys.stderr.write(policy_changed(lapsed_consent()) + '\n' * bool(lapsed_consent()) + NOTICE
+                     + 'Upload automatically to your private archive? [Y/n] ')
     sys.stderr.flush()
     answer = sys.stdin.readline()  # end of input is no answer, not Enter
     return accept(bool(answer) and answer.strip().lower() in {'', 'y', 'yes'})
@@ -148,12 +169,12 @@ def consented(upload=None, ask=True, notify=None):
     global _told
     if not _told:
         _told = True
-        (notify or tell_default)(*identity.ensure())
+        (notify or tell_default)(*identity.ensure(), lapsed_consent())
     return dict(DEFAULT)
 
-def tell_default(value, created):
-    sys.stderr.write(NOTICE + 'Nothing here can ask, so uploads are on by default until you decide '
-                     '(`brisk consent --accept` or `--revoke`).\n')
+def tell_default(value, created, old=None):
+    sys.stderr.write(policy_changed(old) + '\n' * bool(old) + NOTICE + 'Nothing here can ask, so uploads are on by '
+                     'default until you decide (`brisk consent --accept` or `--revoke`).\n')
     show_identity(value, created)
 
 def declaration(args):
@@ -680,6 +701,8 @@ def _main(argv):
             choice = accept()
         else:
             choice = save_consent(False) if args.revoke else load_consent() or DEFAULT
+            if not args.revoke and choice is DEFAULT:
+                sys.stderr.write(policy_changed(lapsed_consent()) + '\n' * bool(lapsed_consent()))
         print(json.dumps(choice))
     elif args.command in {'record', 'package'}:
         partial = args.command == 'record' and args.limit_frames is not None

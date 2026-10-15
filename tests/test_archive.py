@@ -1323,3 +1323,23 @@ def test_an_upload_form_goes_to_the_accelerated_endpoint_when_the_bucket_has_it(
     monkeypatch.setattr(service, 'ACCELERATED', False)
     s3 = S3()
     assert service.poster(s3) is s3
+
+
+def test_a_choice_that_lapsed_with_a_new_policy_version_is_named_wherever_it_is_asked_or_defaulted(harness, capsys):
+    # Neither a refusal nor an acceptance carries over: each lapses, and says so, in the Python API, in a run that
+    # cannot ask, and in the command line.
+    import briskapi
+    cli.consent_path().parent.mkdir(parents=True, exist_ok=True)
+    for enabled, said in ((False, 'not upload'), (True, 'upload')):
+        cli.consent_path().write_text(json.dumps({'policy_version': cli.POLICY_VERSION - 1, 'enabled': enabled}))
+        assert cli.load_consent() is None and cli.lapsed_consent()['enabled'] is enabled
+        with pytest.warns(UserWarning, match=rf'policy has changed \(version {cli.POLICY_VERSION - 1}, now {cli.POLICY_VERSION}\).*choice to {said} no longer'):
+            assert briskapi.consent() == {'policy_version': cli.POLICY_VERSION, 'enabled': True, 'default': True}
+        harness('consent')
+        assert 'policy has changed' in capsys.readouterr().err
+        cli.tell_default(__import__("briskapi.identity", fromlist=["new"]).new(), False, cli.lapsed_consent())
+        assert f'choice to {said} no longer applies' in capsys.readouterr().err
+    cli.consent_path().write_text(json.dumps({'policy_version': cli.POLICY_VERSION, 'enabled': False}))
+    assert cli.lapsed_consent() is None and cli.policy_changed(None) == ''   # a current choice is not announced
+    cli.consent_path().write_text('garbage')
+    assert cli.lapsed_consent() is None
