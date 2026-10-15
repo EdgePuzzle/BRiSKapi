@@ -38,8 +38,9 @@ from briskapi.schema import SKIPPED, canonical_batches, local_name
 PART_SECONDS = 30
 PART_BYTES = 64 * 2**20
 # A broker's day ships in two pieces: the morning's, at the first part to close after noon (JST: the lunch break),
-# and the afternoon's at the day's end. A piece never holds more than MAX_PIECE_ROWS quote updates (a session has
-# some 25 million), a bound the archive's checks, a row group at a time, take in minutes.
+# and the afternoon's at the day's end. A piece never holds more than MAX_PIECE_ROWS quote updates: a morning
+# session can pass it (a tester's reached 41 million by 10:13, some 65 million by 11:30, a day 100 million or more),
+# and then comes in two pieces; a bound the archive's checks, a row group at a time, take in minutes.
 LUNCH_US = 12 * 3600 * 10**6
 MAX_PIECE_ROWS = 60_000_000
 DEMO_SOURCES = ('historical_mock', 'synthetic_test')   # the same for everyone: nothing to keep

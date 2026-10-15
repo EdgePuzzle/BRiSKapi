@@ -59,7 +59,8 @@ F_MBP, F_SNAPSHOT = 16, 32  # NautilusTrader record flags: market by price; the 
 MAX_ROWS = {EQUITY: 20_000, DEPTHS: 4_000_000, TRADES: 20_000_000, BATCHES: 4_000_000}
 MAX_DECODED = 2 * 1024**3
 # A broker's recording (a trading session of the whole market) is checked a row group at a time (verify_broker),
-# so it may be far larger: a session holds some 25 million quote updates.
+# so it may be far larger: a trading day holds 100 million quote updates or more (a tester measured 41 million by
+# 10:13 and some 65 million by the morning's end), and about a million batches a session.
 BROKER_MAX_ROWS = {EQUITY: 20_000, DEPTHS: 100_000_000, TRADES: 50_000_000, BATCHES: 10_000_000}
 BROKER_MAX_DECODED = 256 * 1024**3
 JST = dt.timezone(dt.timedelta(hours=9))

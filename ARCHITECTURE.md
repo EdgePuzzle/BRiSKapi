@@ -134,7 +134,7 @@ quote as custom data `BriskQuote` (int64 columns in vendor units, so a v2
 `customdataclass` can declare them, and the closing-condition books as JSON text).
 `--jsonl FILE` writes canonical batches.
 
-A broker's recording is a trading session of the whole market, some 25 million updates, so reading
+A broker's recording is a trading session of the whole market, tens of millions of updates, so reading
 one never holds it whole in memory where it can be avoided: one security's quotes and trades read
 only its row groups, `state()` (and so `Market`'s views of every security at a time) reads a row
 group at a time, `Market.trades()` reads the trades table alone, and the Nautilus export writes an
@@ -186,10 +186,11 @@ and put in the canonical order) and writes the same bytes as the day's batches a
 minutes 35 seconds and would take a day most of an hour: the archive runs them on every upload, and
 an upload it rejects is kept like a failed one.
 
-A broker's day is shipped as it runs, in two pieces (`Spool.ship`): a whole-market day has some 50
-million quote updates, more than a computer should package, or the archive check, at once. The morning
+A broker's day is shipped as it runs, in two pieces (`Spool.ship`): a whole-market day has 100 million
+quote updates or more, more than a computer should package, or the archive check, at once. The morning
 session's piece ships as soon as a part closes after noon (`LUNCH_US`, the lunch break), the afternoon's
-at the day's end; no piece holds more than `MAX_PIECE_ROWS` (60 million). After each part is written
+at the day's end; no piece holds more than `MAX_PIECE_ROWS` (60 million: a morning session can pass it, a tester's
+reached 41 million by 10:13 and some 65 million by 11:30, and then comes in two pieces). After each part is written
 the spool tells the feed's worker, which decides from the parts' small columns (`_parquet.part_index`).
 Each piece is a recording of its own: the afternoon's (`_parquet.write_piece` with a cut) starts with a
 bootstrap like the day's, at the clock of the batch before it, holding each issue's last quote so far
@@ -1067,7 +1068,7 @@ The client is open source, so the service validates every upload. Demo and
 synthetic content must match a reference, and is checked whole, in memory
 (`verify_directory`); broker live content has no reference and is uploader-declared, and
 is checked a row group at a time on disk (`verify_broker`), as a trading session of the whole
-market is some 25 million quote updates. Every upload is checked for what it may hold (the
+market is tens of millions of quote updates, about a million batches. Every upload is checked for what it may hold (the
 tables, fields and encodings below); a broker's for being well formed too (each quote's and
 trade's identity, order, batch, clock and value ranges, its books' order, the batches'
 sequence, kinds, clocks, transport and local timing, and the end's count), but not for the

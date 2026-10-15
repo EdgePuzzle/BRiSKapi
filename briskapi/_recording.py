@@ -234,7 +234,7 @@ class Recording:
         if limit is None and self._final is not None:
             return dict(self._final)
         if self.format == 'parquet':
-            # Read a row group at a time unless already in memory: a broker's session is some 25 million updates.
+            # Read a row group at a time unless already in memory: a broker's session is tens of millions of updates.
             quotes = self._columns.state(limit) if self._columns is not None else _parquet.state(self.directory, limit)
             if limit is None:
                 self._final = dict(quotes)
