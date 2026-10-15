@@ -11,11 +11,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from briskapi._parquet import (BATCHES, DEPTHS, EQUITY, KINDS, TRADES, BROKER_MAX_ROWS, Columns, _decode_batches,
-                               _decode_equity, _decode_trades, _depth_rows, _no_trades, _per_batch, as_format, batch_lengths,
+                               _decode_equity, _decode_trades, _depth_rows, _no_trades, as_format, batch_lengths,
                                check, midnight_ns, quote_lengths, trade_lengths)
 from briskapi.schema import (LEVELS, MASTER_KEYS, MAX_DECODE_NS, MAX_HISTORY, MAX_SESSION_MS, SKIPPED, UNIX_MS, code, integer, measurement,
                              require, transports, validate_manifest)
 from briskapi.schema import broker as is_broker
+from reference_package import _per_batch
 
 
 def _check_master(master):

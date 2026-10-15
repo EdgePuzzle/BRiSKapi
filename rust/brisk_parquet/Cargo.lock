@@ -134,6 +134,8 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
+ "arrow-select",
+ "bytes",
  "mimalloc",
  "parquet",
  "rayon",

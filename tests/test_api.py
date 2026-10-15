@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+import reference_package
 import briskapi as brisk
 import briskapi.cli as cli
 import briskapi.schema as schema
@@ -486,7 +487,7 @@ def test_feed_uploads_complete_sessions(gated_decoder, tmp_path, monkeypatch):
     packaged = []
 
     def package_parts(equity, parts, output, repair=False, piece=None):
-        packaged.append([b['seq'] for b in _parquet.load_parts(equity, parts).iter_batches()])
+        packaged.append([b['seq'] for b in reference_package.load_parts(Path(equity), parts).iter_batches()])
 
     monkeypatch.setattr(cli, 'package_parts', package_parts)
     monkeypatch.setattr(cli, 'upload', lambda directory, url, verify, out: {'status': 'stored', 'verify': verify})

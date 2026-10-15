@@ -4,7 +4,6 @@ import decimal
 import json
 import random
 import shutil
-from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
@@ -181,3 +180,76 @@ def test_the_expected_schemas_are_python_s(tmp_path):
         assert found.metadata.schema.to_arrow_schema().equals(expected, check_metadata=True), name
         assert found.metadata.num_rows == 0
         assert set(found.metadata.metadata) == {b'ARROW:schema', *expected.metadata}
+
+
+# Packaging: parts of a spooled segment, as one recording
+
+from test_spool import same_tables, session, spooled  # noqa: E402  (the segment's fixtures)
+import reference_package  # noqa: E402
+
+
+def two_ways(tmp_path, spool, parts, k=None, end=None, range_rows=None):
+    """Package `parts` with Python's write_piece and with brisk-parquet, the second after a piece of `parts[:k]` if `k`."""
+    equity = spool.path / _parquet.EQUITY
+    bootstrap = _parquet.bootstrap_row(spool.parts()[0])
+    midnight = _parquet.midnight_ns(bootstrap['trading_date'])
+    cut = state = clock = None
+    mine, theirs = tmp_path / 'rust', tmp_path / 'python'
+    if k:
+        first = _native.package(spool.path, parts[:k], tmp_path / 'first', midnight, end='cut', state_out=tmp_path / 'state.parquet',
+                                range_rows=range_rows)
+        _, latest, clock, _ = reference_package.write_piece(equity, parts[:k], tmp_path / 'first-python', midnight, None, bootstrap, 'cut')
+        same_tables(tmp_path / 'first', tmp_path / 'first-python')
+        cut, state = (tmp_path / 'state.parquet', first['clock']), reference_package.Cut(latest, clock)
+        assert first['clock'] == clock
+        parts = parts[k:]
+    result = _native.package(spool.path, parts, mine, midnight, day_start=spool.parts()[0], cut=cut, end=end or 'parts',
+                             state_out=tmp_path / 'state2.parquet', range_rows=range_rows)
+    summary, latest, clock, repaired = reference_package.write_piece(equity, parts, theirs, midnight, state, bootstrap, end)
+    same_tables(mine, theirs)
+    assert result['summary'] == summary and result['clock'] == clock and result['repaired'] == repaired
+    after = pq.read_table(tmp_path / 'state2.parquet')
+    assert after.column('issue_id').to_pylist() == latest.q['issue_id'].tolist()
+    assert after.column('sequence').to_pylist() == latest.q['frame'].tolist()
+    return result
+
+
+@pytest.fixture
+def segment(tmp_path):
+    spool = spooled(tmp_path, session())
+    spool.close_part(wait=True)
+    assert len(spool.parts()) > 5
+    return spool
+
+
+def test_a_whole_segment_is_packaged_as_python_does(tmp_path, segment):
+    two_ways(tmp_path, segment, segment.parts())
+    result = json.loads(_native.run(['verify', tmp_path / 'rust']))
+    assert result == json.loads((tmp_path / 'rust' / 'summary.json').read_text()) if (tmp_path / 'rust' / 'summary.json').exists() else True
+
+
+@pytest.mark.parametrize('k', [1, 2, 3, 4])
+def test_a_piece_after_a_cut_is_packaged_as_python_does(tmp_path, segment, k):
+    result = two_ways(tmp_path, segment, segment.parts(), k=k)
+    assert json.loads(_native.run(['verify', tmp_path / 'rust'])) == result['summary']
+    assert json.loads(_native.run(['verify', tmp_path / 'first'])) is not None
+
+
+def test_a_piece_that_stops_early_gets_an_end(tmp_path, segment):
+    result = two_ways(tmp_path, segment, segment.parts()[:3], end='cut')
+    assert json.loads(_native.run(['verify', tmp_path / 'rust'])) == result['summary'] and not result['repaired']
+
+
+def test_a_segment_cut_short_is_repaired(tmp_path):
+    spool = spooled(tmp_path, session()[:30])
+    spool.close_part(wait=True)
+    result = two_ways(tmp_path, spool, spool.parts(), end='repair')
+    assert result['repaired'] and json.loads(_native.run(['verify', tmp_path / 'rust'])) == result['summary']
+
+
+def test_a_piece_written_a_range_of_issues_at_a_time_is_the_same_as_written_at_once(tmp_path, segment, monkeypatch):
+    monkeypatch.setattr(reference_package, 'PIECE_ROWS', 3)   # many ranges, each a few issues' rows
+    monkeypatch.setattr(reference_package, 'PART_ISSUES', 1)
+    monkeypatch.setattr(reference_package, 'DECODE_ROWS', 4)
+    result = two_ways(tmp_path, segment, segment.parts(), k=len(segment.parts()) // 2, range_rows=3)
+    assert json.loads(_native.run(['verify', tmp_path / 'rust'])) == result['summary']

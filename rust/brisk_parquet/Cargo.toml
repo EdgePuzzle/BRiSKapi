@@ -18,8 +18,10 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 arrow-array = "59"
+bytes = "1"
 arrow-buffer = "59"
 arrow-schema = "59"
+arrow-select = "59"
 mimalloc = { version = "0.1", default-features = false }
 parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
 rayon = "1.11"

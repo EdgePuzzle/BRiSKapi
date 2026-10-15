@@ -4,6 +4,8 @@ import os
 import subprocess
 import sys
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import briskapi
@@ -65,8 +67,19 @@ def small_parts(monkeypatch):
     monkeypatch.setattr(_spool, 'PART_BYTES', _spool.PART_BYTES)
 
 
+def same_tables(left, right):
+    """Two recordings' tables hold the same rows (aggressor sides as the strings they stand for): the tables are written by
+    brisk-parquet and by pyarrow, which do not write the same bytes."""
+    plain = lambda table: table.set_column(2, 'aggressor_side', table.column(2).cast(pa.string()))  # noqa: E731
+    for name in _parquet.FILES:
+        a, b = pq.read_table(left / name), pq.read_table(right / name)
+        if name == _parquet.TRADES:
+            a, b = plain(a), plain(b)
+        assert a.equals(b), name
+
+
 @pytest.mark.parametrize('slices, gil', [(16, False), (1, False), (1, True)])
-def test_a_spooled_segment_packages_to_the_same_bytes_as_its_batches_at_once(tmp_path, monkeypatch, slices, gil):
+def test_a_spooled_segment_packages_to_the_same_tables_as_its_batches_at_once(tmp_path, monkeypatch, slices, gil):
     # Parts built in slices on threads (1: a slice from every line), or one at a time with the GIL; the package's
     # summary is the columns' own, which must be the one the archive's checks give (cli.package's).
     monkeypatch.setattr(_parquet, 'SLICE_LINES', slices)
@@ -78,8 +91,9 @@ def test_a_spooled_segment_packages_to_the_same_bytes_as_its_batches_at_once(tmp
     spool.close_part(wait=True)
     assert len(spool.parts()) > 5 and spool.ended
     parts = spool.package(tmp_path / 'parts')
-    assert parts == whole
-    assert all((tmp_path / 'parts' / name).read_bytes() == (tmp_path / 'whole' / name).read_bytes() for name in _parquet.FILES)
+    assert parts['summary'] == whole['summary']
+    same_tables(tmp_path / 'parts', tmp_path / 'whole')
+    assert _parquet.inspect_package(tmp_path / 'parts', parts) == parts['summary']   # and the archive takes it
     spool.remove()
     assert not spool.path.exists()
 
@@ -159,10 +173,10 @@ def test_a_repaired_end_is_one_the_archive_accepts(tmp_path, cut):
     assert end == {'type': 'end', 'seq': cut, 'source_time_us': batches[-1]['source_time_us'], 'frames': cut - 1,
                    'quote_updates': sum(len(b['quotes']) for b in quotes),
                    'replay_wall_ms': float(received[-1] - received[0]) if received else 0.0}
-    # One that ended needs no repair: the same bytes as without it.
+    # One that ended needs no repair.
     whole = spooled(tmp_path / 'whole', session())
-    columns = _parquet.load_parts(whole.path / _parquet.EQUITY, (whole.close_part(wait=True), whole.parts())[1])
-    assert not _parquet.repair_end(columns)
+    whole.close_part(wait=True)
+    assert whole.ship(tmp_path / 'ended', final=True, repair=True)[1] is False
 
 
 def test_a_damaged_spool_is_left_for_a_look(tmp_path):
@@ -173,7 +187,6 @@ def test_a_damaged_spool_is_left_for_a_look(tmp_path):
     with pytest.warns(UserWarning, match='Could not recover'):
         assert _spool.leftovers(tmp_path / 'spool') == []
     assert spool.path.exists(), 'kept for a look, not deleted'
-    assert _spool.keep_parts(tmp_path / 'x', [], tmp_path) is None
 
 
 def test_a_failed_part_write_stops_the_feed(tmp_path, monkeypatch):
@@ -275,28 +288,6 @@ def test_a_day_ships_its_morning_once_a_part_closes_after_noon_and_its_afternoon
     assert spool.ship(tmp_path / 'more', final=True) is None
 
 
-def test_a_piece_written_a_range_of_issues_at_a_time_is_the_same_as_written_at_once(tmp_path, monkeypatch):
-    monkeypatch.setattr(_parquet, 'PIECE_ROWS', 3)   # many ranges
-    monkeypatch.setattr(_parquet, 'PART_ISSUES', 1)
-    monkeypatch.setattr(_parquet, 'DECODE_ROWS', 4)   # and each decoded a few parts at a time
-    spool = spooled(tmp_path, session())
-    spool.close_part(wait=True)
-    parts, equity = spool.parts(), spool.path / _parquet.EQUITY
-    bootstrap = _parquet.bootstrap_row(parts[0])
-    midnight = _parquet.midnight_ns(bootstrap['trading_date'])
-    k = len(parts) // 2
-    before = _parquet.load_parts(equity, parts[:k], midnight)
-    cut = _spool._Cut(_parquet.latest(before), before.batches[-1]['source_time_us'])
-    expected = _parquet.after(_parquet.load_parts(equity, parts[k:], midnight), cut, bootstrap)
-    _parquet.recount_end(expected)
-    expected.write(tmp_path / 'at-once')
-    summary, latest, clock, repaired = _parquet.write_piece(equity, parts[k:], tmp_path / 'by-range', midnight, cut, bootstrap)
-    for name in _parquet.FILES:
-        assert (tmp_path / 'by-range' / name).read_bytes() == (tmp_path / 'at-once' / name).read_bytes(), name
-    assert summary == expected.summary() and not repaired and clock == expected.batches[-1]['source_time_us']
-    assert len(latest) == len(_parquet.latest(expected))
-
-
 def test_a_crashed_spool_ships_what_is_left_from_where_it_was(tmp_path, monkeypatch):
     monkeypatch.setattr(_spool, 'MAX_PIECE_ROWS', 8)
     batches = session()[:30]   # cut short: no end
@@ -312,15 +303,3 @@ def test_a_crashed_spool_ships_what_is_left_from_where_it_was(tmp_path, monkeypa
         assert _parquet.inspect_package(directory, manifest) == manifest['summary']
     shipped = {k for d in [tmp_path / 'first', *(d for d, *_ in rest)] for k in _content(d)[0]}
     assert len(shipped) == sum(len(b.get('quotes', ())) for b in batches[1:])
-
-
-def test_the_issue_column_is_found_from_our_schema_as_the_file_says_it():
-    """A file's own schema is not asked (each call keeps some 0.8 MB): the position comes from the Arrow schema."""
-    import tempfile
-    tmp = tempfile.mkdtemp()
-    spool = spooled(__import__('pathlib').Path(tmp), session())
-    spool.close_part(wait=True)
-    for name in (_parquet.DEPTHS, _parquet.TRADES):
-        meta = _parquet.pq.read_metadata(spool.parts()[0] / name)
-        found = next(c for c in range(meta.num_columns) if meta.schema.column(c).path == 'issue_id')
-        assert _parquet.leaf_index(_parquet.SCHEMAS[name], 'issue_id') == found

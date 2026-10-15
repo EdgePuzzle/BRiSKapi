@@ -5,13 +5,14 @@ use std::path::Path;
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float64Type, TimestampNanosecondType, UInt64Type};
 use arrow_array::{Array, RecordBatch};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::error::{Failure, Res, refuse};
 use crate::files::Table;
 use crate::master::Master;
 use crate::require;
 use crate::schema::{self, SKIPPED};
+use crate::sizes::line_length;
 use crate::units::{TWO_53, measurement, midnight_ns};
 
 pub const BOOTSTRAP: u8 = 0;
@@ -86,7 +87,6 @@ struct Rules<'a> {
     midnight: i64,
     transport: Value,
     out: Batches,
-    master_json: Option<Vec<Value>>,
     legacy: bool,
 }
 
@@ -260,7 +260,6 @@ impl<'a> Rules<'a> {
                 self.previous_stamp = stamp;
                 require!(lateness.is_null(i), "Broker streams are not demo replays");
             }
-            let mut skipped_len = 0;
             if !skipped.is_null(i) {
                 let list = skipped.value(i);
                 let values = list.as_primitive_opt::<UInt64Type>().ok_or_else(|| {
@@ -281,9 +280,8 @@ impl<'a> Rules<'a> {
                 self.out
                     .skipped
                     .extend(values.values().iter().map(|issue| issue << 32 | seq as u64));
-                skipped_len = values.len();
                 if seq == 0 {
-                    self.out.first_skipped = skipped_len;
+                    self.out.first_skipped = values.len();
                 }
             }
             if code == END {
@@ -309,7 +307,15 @@ impl<'a> Rules<'a> {
             let _ = issues;
             self.out.kinds[seq] = code;
             self.out.clocks[seq] = now;
-            self.out.lengths[seq] = self.line_length(batch, i, code, seq, now, skipped_len)?;
+            self.out.lengths[seq] = line_length(
+                batch,
+                i,
+                code,
+                seq as u64,
+                now,
+                &self.transport,
+                self.master,
+            );
             self.last = now;
             self.previous_kind = Some(code);
             self.seq = seq + 1;
@@ -319,108 +325,6 @@ impl<'a> Rules<'a> {
             self.out.last_source_time_us = now;
         }
         self.canonical(batch, kinds)
-    }
-
-    /// The canonical line of the batch without its quotes' and trades' own objects (`batch_lengths`), whose shape
-    /// is fixed by its kind once the other tables are checked: a bootstrap or quotes batch has both lists, history
-    /// has trades, an end neither. The lists' elements and commas are added when the rows are counted.
-    fn line_length(
-        &mut self,
-        batch: &RecordBatch,
-        i: usize,
-        code: u8,
-        seq: usize,
-        now: i64,
-        skipped: usize,
-    ) -> Res<u32> {
-        let mut o = Map::new();
-        o.insert("seq".into(), json!(seq));
-        o.insert("source_time_us".into(), json!(now));
-        let get_u64 = |name: &str| -> Value {
-            let a = batch
-                .column_by_name(name)
-                .and_then(|c| c.as_primitive_opt::<UInt64Type>());
-            match a {
-                Some(a) if !a.is_null(i) => json!(a.value(i)),
-                _ => Value::Null,
-            }
-        };
-        let get_f64 = |name: &str| -> Value {
-            let a = batch
-                .column_by_name(name)
-                .and_then(|c| c.as_primitive_opt::<Float64Type>());
-            match a {
-                Some(a) if !a.is_null(i) => {
-                    serde_json::Number::from_f64(a.value(i)).map_or(Value::Null, Value::Number)
-                }
-                _ => Value::Null,
-            }
-        };
-        let get_str = |name: &str| -> Value {
-            let a = batch
-                .column_by_name(name)
-                .and_then(|c| c.as_string_opt::<i32>());
-            match a {
-                Some(a) if !a.is_null(i) => json!(a.value(i)),
-                _ => Value::Null,
-            }
-        };
-        let (kind, lists) = match code {
-            BOOTSTRAP => {
-                o.insert("exchange_delay_ms".into(), get_f64("exchange_delay_ms"));
-                o.insert("input_transport".into(), self.transport.clone());
-                o.insert("market_issue_count".into(), get_u64("market_issue_count"));
-                o.insert("source".into(), get_str("source"));
-                o.insert(
-                    "source_timestamp_origin".into(),
-                    get_str("source_timestamp_origin"),
-                );
-                o.insert("trading_date".into(), get_str("trading_date"));
-                let master = self
-                    .master_json
-                    .get_or_insert_with(|| self.master.iter().map(Master::json).collect());
-                o.insert("master".into(), Value::Array(master.clone()));
-                ("bootstrap", 3)
-            }
-            QUOTES => {
-                for name in ["decode_ns", "received_unix_ms"] {
-                    o.insert(name.into(), get_u64(name));
-                }
-                o.insert("replay_lateness_ms".into(), get_f64("replay_lateness_ms"));
-                ("quotes", 3)
-            }
-            HISTORY => ("history", 2),
-            _ => {
-                o.insert("frames".into(), get_u64("frames"));
-                o.insert("quote_updates".into(), get_u64("quote_updates"));
-                o.insert("replay_wall_ms".into(), get_f64("replay_wall_ms"));
-                ("end", 0)
-            }
-        };
-        o.insert("type".into(), json!(kind));
-        if lists & 1 != 0 {
-            o.insert("quotes".into(), Value::Array(Vec::new()));
-        }
-        if lists & 2 != 0 {
-            o.insert("trades".into(), Value::Array(Vec::new()));
-        }
-        if skipped > 0 {
-            let values = batch
-                .column_by_name(SKIPPED)
-                .and_then(|c| c.as_list_opt::<i32>())
-                .map(|l| l.value(i));
-            let values: Vec<u64> = values
-                .and_then(|v| {
-                    v.as_primitive_opt::<UInt64Type>()
-                        .map(|p| p.values().to_vec())
-                })
-                .unwrap_or_default();
-            o.insert(SKIPPED.into(), json!(values));
-        }
-        let length = serde_json::to_vec(&Value::Object(o))
-            .map(|v| v.len() + 1)
-            .unwrap_or(0);
-        Ok(length as u32)
     }
 
     /// The group is the canonical encoding of its batches (`Columns._batches`): each kind has its own columns and no
@@ -504,7 +408,6 @@ pub fn verify(directory: &Path, table: &Table, master: &[Master], legacy: bool) 
             last_source_time_us: 0,
             end_quote_updates: 0,
         },
-        master_json: None,
         legacy,
     };
     for group in 0..table.groups {

@@ -180,10 +180,9 @@ TO are the day's first and last source clock, JST HHMMSS; a folder already there
 alone, with a warning), uploads it to the owner's private archive and uploads its
 timing summary, as chosen, then appends its result (`trading_date`, `name`, `path`,
 `uploaded`, `timing_uploaded`, `repaired`, `error`) to `feed.recordings`, calls `on_day(result)` and deletes
-the spool. Packaging reads the parts back (`load_parts`: each part's tables decoded, joined
-and put in the canonical order) and writes the same bytes as the day's batches at once would;
-`tests/test_spool.py` checks it. Its manifest's summary comes from those columns
-(`Columns.summary`) rather than from the archive's checks run here, which took the demo's three
+the spool. Packaging (`brisk-parquet package`) reads the parts back, joins their rows and puts them in the canonical order, and writes the same tables as the day's batches at once would;
+`tests/test_native.py` and `tests/test_spool.py` check it. Its manifest's summary is counted as the tables are written
+(`brisk-parquet` sizes the canonical JSON as it goes) rather than from the archive's checks run here, which took the demo's three
 minutes 35 seconds and would take a day most of an hour: the archive runs them on every upload, and
 an upload it rejects is kept like a failed one.
 
@@ -193,17 +192,19 @@ session's piece ships as soon as a part closes after noon (`LUNCH_US`, the lunch
 at the day's end; no piece holds more than `MAX_PIECE_ROWS` (60 million: a morning session can pass it, a tester's
 reached 41 million by 10:13 and some 65 million by 11:30, and then comes in two pieces). After each part is written
 the spool tells the feed's worker, which decides from the parts' small columns (`_parquet.part_index`).
-Each piece is a recording of its own: the afternoon's (`_parquet.write_piece` with a cut) starts with a
+Each piece is a recording of its own: the afternoon's (`brisk-parquet package` with a cut) starts with a
 bootstrap like the day's, at the clock of the batch before it, holding each issue's last quote so far
 (an issue with none is skipped), then its batches numbered on from it and the day's end with its own
 count. The two meet at a clock, and the cloud API reads them as one: its bars merge their clock ranges,
 and the quotes a bootstrap repeats carry the frame numbers already seen, so its deduplication drops
-them. A piece is written a range of issues at a time (each part's depths hold a row group per
-`PART_ISSUES` issue IDs, and a range gathers about `PIECE_ROWS` rows from every part), in the row
-groups writing it at once would make, so the bytes are the same and no session is ever whole in memory;
-its zip is written and hashed on disk (`pack_to`). The worker keeps and uploads each piece as it would a
+them. A piece is written by `brisk-parquet package` a range of issues at a time (each part's depths hold a row group per
+`PART_ISSUES` issue IDs, and a range of about a million rows gathers the issues' rows from every part), in the row
+groups writing it at once would make, so the tables are the same and no session is ever whole in memory: the
+row groups are encoded on a few threads (a third of the cores, so that the feed keeps up) and appended in order. A 60-million-update
+piece takes about 80 seconds and at most 5.5 GB; the book the next piece starts from is a Parquet file of the last quote
+of each issue, written with the piece (`cut/`). Its zip is written and hashed on disk (`pack_to`). The worker keeps and uploads each piece as it would a
 day. `shipped.json` counts the parts shipped, so a crashed session's spool is finished from there; where
-the morning left the book is rebuilt from its parts a part at a time. A demo's replay is one recording,
+the morning left the book is rebuilt from its parts (`brisk-parquet state`). A demo's replay is one recording,
 as its reference requires.
 
 A packaging or upload failure is a warning (`Packaging failed: ...` or `Automatic upload failed: ...`; with uploads off, `uploaded` stays null) and a result that

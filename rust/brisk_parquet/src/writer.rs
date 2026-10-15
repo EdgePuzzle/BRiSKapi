@@ -32,6 +32,8 @@ pub fn properties(name: &str, row_group: usize) -> WriterProperties {
         .set_writer_version(WriterVersion::PARQUET_1_0)
         .set_statistics_enabled(EnabledStatistics::Chunk)
         .set_dictionary_enabled(true)
+        // Nothing but the row groups' column chunks between the magic and the footer: the archive checks for it.
+        .set_offset_index_disabled(true)
         .set_max_row_group_row_count(Some(row_group));
     for column in schema::deltas(name) {
         let path = ColumnPath::from(*column);
@@ -46,7 +48,11 @@ pub type TableWriter = ArrowWriter<BufWriter<File>>;
 
 /// A writer for the table `name` under `directory` (its folders made).
 pub fn create(directory: &Path, name: &str, row_group: usize) -> Res<TableWriter> {
-    let path = directory.join(name);
+    create_file(&directory.join(name), name, row_group)
+}
+
+/// A writer for a table of the kind `name` in the file `path`.
+pub fn create_file(path: &Path, name: &str, row_group: usize) -> Res<TableWriter> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

@@ -11,12 +11,12 @@ connection) to a spool folder as its batches arrive, in the recording's own Parq
 A part closes every PART_SECONDS, or sooner after PART_BYTES of decoder output, and when the segment ends or
 the feed stops, so a crash loses at most the part still open. A segment takes about the disk of its finished
 recording (its decoded JSON would take some twenty times more). package() turns the parts into the canonical
-recording: the same bytes as from the segment's batches at once. A whole-market day is far more than one
+recording: the same tables as from the segment's batches at once (brisk-parquet writes them). A whole-market day is far more than one
 recording is comfortable with, so a broker feed ships it as it goes, the morning's session as soon as it is over
 and the afternoon's at the day's end (ship()), each a recording of its own; the afternoon's starts with a
 bootstrap of the book as the morning's left it. A feed that crashed leaves its folder behind, with its
 session's choices (upload, output) in owner.json; the next feed ships what is left as that session would have,
-repairing the end it never got (leftovers(), _parquet.repair_end).
+repairing the end it never got (leftovers(), brisk-parquet).
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ import time
 from typing import NamedTuple
 import warnings
 
-from briskapi import _parquet
+from briskapi import _native, _parquet
 from briskapi.schema import SKIPPED, canonical_batches, local_name
 
 PART_SECONDS = 30
@@ -47,8 +47,8 @@ DEMO_SOURCES = ('historical_mock', 'synthetic_test')   # the same for everyone: 
 
 
 class _Cut(NamedTuple):
-    """Where the shipped pieces left the day: each issue's last quote (Columns) and the last batch's clock."""
-    latest: object
+    """Where the shipped pieces left the day: a file with each issue's last quote (a depths table) and the last batch's clock."""
+    state: object
     clock: int
 
 
@@ -230,14 +230,16 @@ class Spool:
         if not parts:
             return None
         bootstrap = _parquet.bootstrap_row(self.parts()[0])
-        piece = {'midnight': _parquet.midnight_ns(bootstrap['trading_date']),
-                 'cut': self._cut_state() if self._shipped else None, 'bootstrap': bootstrap,
+        cut = self._cut_state() if self._shipped else None
+        piece = {'midnight': _parquet.midnight_ns(bootstrap['trading_date']), 'day_start': self.parts()[0],
+                 'cut': cut and (cut.state, cut.clock), 'bootstrap': bootstrap,
+                 'state_out': self.path / 'cut' / f'{self._shipped + len(parts):06d}.parquet',
                  'end': 'cut' if not last else 'repair' if repair else None}
         self._last_piece = piece
         try:
             manifest = cli.package_parts(self.path / _parquet.EQUITY, parts, output, piece=piece)
-            if 'latest' in piece:
-                self._cut, self._cut_at = _Cut(piece['latest'], piece['clock']), self._shipped + len(parts)
+            if 'clock' in piece:
+                self._cut, self._cut_at = _Cut(piece['state_out'], piece['clock']), self._shipped + len(parts)
         finally:
             self._mark(len(parts))
         return manifest, piece.get('repaired', False)
@@ -249,16 +251,14 @@ class Spool:
         return self._index[part]
 
     def _cut_state(self):
-        """Where the shipped pieces left the day; for a reopened spool, or after a piece that failed, rebuilt from
-        their parts a part at a time."""
+        """Where the shipped pieces left the day; for a reopened spool, or after a piece that failed, found again from
+        their parts (brisk-parquet reads them a range of issues at a time)."""
         if self._cut is None or self._cut_at != self._shipped:
-            cut, parts = _Cut(None, 0), self.parts()[:self._shipped]
-            if parts:
-                midnight = _parquet.midnight_ns(_parquet.bootstrap_row(self.parts()[0])['trading_date'])
-            for part in parts:
-                columns = _parquet.load_parts(self.path / _parquet.EQUITY, [part], midnight)
-                cut = _Cut(_parquet.latest(columns, cut.latest), columns.batches[-1]['source_time_us'])
-            self._cut, self._cut_at = cut, self._shipped
+            parts = self.parts()[:self._shipped]
+            state = self.path / 'cut' / f'{self._shipped:06d}.parquet'
+            midnight = _parquet.midnight_ns(_parquet.bootstrap_row(self.parts()[0])['trading_date'])
+            clock = _native.state(self.path, parts, midnight, state, day_start=self.parts()[0], threads=_native.threads())
+            self._cut, self._cut_at = _Cut(state, clock), self._shipped
         return self._cut
 
     def _mark(self, count):
@@ -285,13 +285,13 @@ class Spool:
         elif not self._shipped and self.parts():
             parts = self.parts()
             bootstrap = _parquet.bootstrap_row(parts[0])
-            piece = {'midnight': _parquet.midnight_ns(bootstrap['trading_date']), 'cut': None, 'bootstrap': bootstrap,
-                     'end': 'repair'}
+            piece = {'midnight': _parquet.midnight_ns(bootstrap['trading_date']), 'day_start': parts[0], 'cut': None,
+                     'bootstrap': bootstrap, 'end': 'repair'}
         else:
             return None
         staging = Path(tempfile.mkdtemp(dir=self.path))
-        summary = _parquet.write_piece(self.path / _parquet.EQUITY, parts, staging, piece['midnight'], piece['cut'],
-                                       piece['bootstrap'], piece['end'] or 'repair')[0]
+        summary = _native.package(self.path, parts, staging, piece['midnight'], day_start=piece['day_start'], cut=piece['cut'],
+                                  end=piece['end'] or 'repair', threads=_native.threads())['summary']
         name = local_name(summary, piece['bootstrap'].get('input_transport'))
         target = Path(root) / name
         for n in range(2, 100):
@@ -376,25 +376,3 @@ def leftovers(root=None):
         else:
             spool.remove()
     return found
-
-
-def keep_parts(equity, parts, root):
-    """Write spooled parts as a recording (tables, no manifest) in a new folder of `root` named after the
-    segment, SOURCE_YYYYMMDD_FROM-TO; None when there are none."""
-    if not parts:
-        return None
-    return _keep_columns(_parquet.load_parts(equity, parts), root)
-
-
-def _keep_columns(columns, root):
-    first, last = columns.batches[0], columns.batches[-1]
-    name = local_name({'source': first['source'], 'trading_date': first['trading_date'],
-                       'first_source_time_us': first['source_time_us'], 'last_source_time_us': last['source_time_us']},
-                      first.get('input_transport'))
-    target = Path(root) / name
-    for n in range(2, 100):
-        if not target.exists():
-            break
-        target = Path(root) / f'{name}-{n}'
-    columns.write(target)
-    return target

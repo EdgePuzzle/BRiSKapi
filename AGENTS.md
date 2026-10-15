@@ -16,7 +16,7 @@ API and runs without a terminal upload by default after a once-per-process notic
 clean session uploads, broker market recordings and timing reports included, with explicit
 opt-outs (`--no-upload`, `--no-upload-market-data`, `BRISK_UPLOAD=0`, `brisk consent --revoke`).
 Never archive cookies, tokens or connection diagnostics; the live spool (`briskapi/_spool.py`)
-writes only canonical batches, and its parts package to the same bytes as the day's batches at once
+writes only canonical batches, and its parts package to the same tables as the day's batches at once
 (`tests/test_spool.py`). New uploads must be decoded;
 the existing legacy wire capture is labeled sample_data and is not an ingest format.
 

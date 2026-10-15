@@ -1,10 +1,11 @@
 //! The master (the equity table): the securities a recording holds, decoded and checked the way the archive does
 //! (`_decode_equity`, `_check_master`) and compared with the table its content implies.
 use std::path::Path;
+use std::sync::Arc;
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Decimal128Type, TimestampNanosecondType, UInt8Type, UInt64Type};
-use arrow_array::{Array, RecordBatch, StringArray};
+use arrow_array::{Array, ArrayRef, RecordBatch, StringArray};
 use serde_json::{Value, json};
 
 use crate::error::Res;
@@ -250,4 +251,60 @@ pub fn check_canonical(batch: &RecordBatch, master: &[Master], midnight: i64) ->
         require!(ok, BAD);
     }
     Ok(())
+}
+
+/// The equity table a master implies (`Columns._equity`): a row a security, the day's midnight as its clock.
+pub fn table(master: &[Master], midnight: i64) -> Res<RecordBatch> {
+    use arrow_array::builder::{StringBuilder, UInt64Builder};
+    use arrow_array::{Decimal128Array, TimestampNanosecondArray, UInt8Array};
+    let n = master.len();
+    let strings = |f: &dyn Fn(&Master) -> Option<String>| -> ArrayRef {
+        let mut b = StringBuilder::with_capacity(n, n * 8);
+        for m in master {
+            b.append_option(f(m));
+        }
+        Arc::new(b.finish())
+    };
+    let u64s = |f: &dyn Fn(&Master) -> u64| -> ArrayRef {
+        let mut b = UInt64Builder::with_capacity(n);
+        for m in master {
+            b.append_value(f(m));
+        }
+        Arc::new(b.finish())
+    };
+    let ts = |v: i64| -> ArrayRef {
+        Arc::new(TimestampNanosecondArray::from(vec![v; n]).with_timezone("UTC"))
+    };
+    let base: Decimal128Array = master
+        .iter()
+        .map(|m| (m.base_price10 != 0).then(|| crate::units::tenths_raw(m.base_price10)))
+        .collect::<Decimal128Array>()
+        .with_precision_and_scale(38, 16)
+        .map_err(crate::error::Failure::from)?;
+    let columns: Vec<ArrayRef> = vec![
+        strings(&|m| Some(format!("{}{}", m.code, crate::schema::VENUE_SUFFIX))),
+        strings(&|m| Some(m.code.clone())),
+        strings(&|_| Some("JPY".into())),
+        Arc::new(UInt8Array::from(vec![1u8; n])),
+        strings(&|_| Some("0.1".into())),
+        strings(&|m| Some(m.lot_size.to_string())),
+        strings(&|_| None),
+        strings(&|_| None),
+        strings(&|_| None),
+        strings(&|m| price_text(m.limit_up10)),
+        strings(&|m| price_text(m.limit_down10)),
+        strings(&|_| Some("0".into())),
+        strings(&|_| Some("0".into())),
+        strings(&|_| None),
+        strings(&|_| None),
+        ts(midnight),
+        ts(midnight),
+        u64s(&|m| m.issue_id),
+        u64s(&|m| m.tick_type),
+        u64s(&|m| m.issue_type),
+        strings(&|m| Some(m.name.clone())),
+        Arc::new(base),
+    ];
+    RecordBatch::try_new(Arc::new(crate::schema::equity_schema()), columns)
+        .map_err(crate::error::Failure::from)
 }

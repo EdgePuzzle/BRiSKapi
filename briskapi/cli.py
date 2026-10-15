@@ -20,7 +20,7 @@ import urllib.request
 import uuid
 import warnings
 
-from briskapi import _https, _parquet, identity
+from briskapi import _https, _native, _parquet, identity
 from briskapi._recording import BriskError, Recording
 from briskapi.schema import (RECORDING_PREFIX, REFERENCES, SCHEMA, SOURCES, MAX_COMPRESSED, TIMING_KEY, canonical_batches,
                              encode, local_name, max_package, owner, recording_name, validate_manifest, validate_timing,
@@ -199,18 +199,20 @@ def package(events, output):
     return _package(output, lambda: save_recording(events, output))
 
 def package_parts(equity, parts, output, repair=False, piece=None):
-    """A spooled segment (briskapi._spool) as a package: the same tables and manifest as package() of its batches,
-    written a range of issues at a time (_parquet.write_piece). With `repair`, a segment cut short first gets the
-    end its host never wrote (_parquet.repair_end). `piece` ({midnight, cut, bootstrap, end}: Spool.ship's) makes
-    a piece of a day instead, and gets back where it leaves the day ({latest, clock}) and whether it was repaired."""
+    """A spooled segment (briskapi._spool) as a package: the same tables and manifest as package() of its batches, written by
+    brisk-parquet a range of issues at a time (`equity` is the segment's master table, in its folder's data/). With `repair`, a
+    segment cut short first gets the end its host never wrote. `piece` ({midnight, day_start, cut, state_out, end}: Spool.ship's)
+    makes a piece of a day instead, and gets back where it leaves the day ({clock}, and the book in the file `state_out`) and
+    whether it was repaired."""
     piece = {} if piece is None else piece
 
     def write():
         midnight = piece.get('midnight') or _parquet.midnight_ns(_parquet.bootstrap_row(parts[0])['trading_date'])
-        summary, piece['latest'], piece['clock'], piece['repaired'] = _parquet.write_piece(
-            equity, parts, output, midnight, piece.get('cut'), piece.get('bootstrap'),
-            piece.get('end', 'repair' if repair else None))
-        return summary   # not checked here: the archive checks every upload, and a day took minutes
+        result = _native.package(Path(equity).parent.parent, parts, output, midnight, day_start=piece.get('day_start'),
+                                 cut=piece.get('cut'), end=piece.get('end') or ('repair' if repair else 'parts'),
+                                 state_out=piece.get('state_out'), threads=_native.threads())
+        piece['clock'], piece['repaired'] = result['clock'], result['repaired']
+        return result['summary']   # not checked here: the archive checks every upload, and a day took minutes
     return _package(output, write)
 
 def _package(output, write):

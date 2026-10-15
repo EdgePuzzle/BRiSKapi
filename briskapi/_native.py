@@ -3,6 +3,7 @@
 The archive's function and the recorder use it where Python took minutes: checking a broker's day and packaging its
 pieces. It reads and writes the same tables `briskapi._parquet` defines.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -50,3 +51,35 @@ def run(arguments, progress=None) -> str:
     if process.returncode == 2 and message.startswith('refused: '):
         raise ValueError(message[len('refused: '):])
     raise RuntimeError(message or f'{NAME} failed ({process.returncode})')
+
+
+def package(spool, parts, out, midnight, *, day_start=None, cut=None, end='parts', state_out=None, threads=None, range_rows=None):
+    """Write consecutive parts of a spooled segment (`spool`: its folder) as a recording in `out`, a range of issues at a
+    time. After a piece, `cut` is (the file `state_out` gave then, the clock it ended at) and `day_start` the day's first
+    part. `end`: 'parts' for the parts' own, 'cut' for an end to a piece that stops early, 'repair' for one if they have none.
+    Returns {'summary', 'clock' (the last batch's), 'repaired'}; `state_out` gets each issue's last quote."""
+    arguments = ['package', '--spool', spool, '--midnight', midnight, '--out', out, '--end', end]
+    for flag, value in (('--day-start', day_start), ('--state-out', state_out), ('--threads', threads), ('--range-rows', range_rows)):
+        if value is not None:
+            arguments += [flag, value]
+    if cut:
+        arguments += ['--cut-state', cut[0], '--cut-clock', cut[1]]
+    return json.loads(run([*arguments, *parts]))
+
+
+def state(spool, parts, midnight, state_out, *, day_start=None, cut=None, threads=None):
+    """Each issue's last quote after `parts` (and after `cut`'s book, if they follow a piece), written to `state_out`, and the
+    last batch's clock."""
+    arguments = ['state', '--spool', spool, '--midnight', midnight, '--state-out', state_out]
+    for flag, value in (('--day-start', day_start), ('--threads', threads)):
+        if value is not None:
+            arguments += [flag, value]
+    if cut:
+        arguments += ['--cut-state', cut[0], '--cut-clock', cut[1]]
+    return json.loads(run([*arguments, *parts]))['clock']
+
+
+def threads() -> int:
+    """How many threads packaging a day may use: a third of the cores, between 2 and 6. The live feed and its decoder host run
+    meanwhile (the afternoon's, as the morning is packaged), and come first."""
+    return min(6, max(2, (os.cpu_count() or 1) // 3))
