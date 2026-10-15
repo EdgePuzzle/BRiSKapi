@@ -313,7 +313,13 @@ to the broker; a session needs the gateway's key and nothing else.
   batch's depths and trades tables with `_parquet.stream_tables` (the recording's own row
   encoding, in arrival order) and the day's equity table once, then applies
   `briskapi.records`' projections: the same code the cloud API runs over stored tables, which
-  is why a live record equals the stored one. `ts_recv` is the batch's `received_unix_ms` for
+  is why a live record equals the stored one. Arrow costs some two milliseconds of fixed work a batch,
+  more than the spacing of an opening burst's batches (a frame every 1.4 ms at 32x the demo's pace) when a
+  batch holds a quote or two, so a live batch of `mbp-10`, `trades` and `imbalance` subscriptions alone is
+  projected record by record (`Live._rows`, 0.06 ms): the same records, which `tests/test_gateway.py`
+  compares with the Arrow projection on random batches (Arrow converts five tenths of a yen, 0.1 to
+  0.4 and 1.8, one digit below the true quotient, and so does `_yen`). Replays, snapshots, bars,
+  `brisk-quotes` and mixed sessions use the Arrow path. `ts_recv` is the batch's `received_unix_ms` for
   `XTKS.BRISK` and `ts_event` for the demo, as in the cloud. Trade IDs (`FRAME-PLACE`) carry
   each issue's last frame and place across batches (`Columns.trade_ids(carry)`), so a replay
   from the day's start numbers them as the stored recording does. A session that named

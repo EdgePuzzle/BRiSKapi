@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -35,7 +36,19 @@ def distribution(values):
             for name, q in [('p50', .5), ('p95', .95), ('p99', .99), ('max', 1)]}
 
 
-def run(workers, speed, frames, cache, fast_symbols=()):
+def _finish(consumer):
+    """What a consumer in its own process measured, once the feed has ended."""
+    out, _ = consumer.communicate(timeout=120)
+    result = json.loads(out.strip().splitlines()[-1])
+    if result.get('spent'):
+        for step, (seconds, calls) in sorted(result['spent'].items(), key=lambda item: -item[1][0]):
+            print(f'  consumer {step}: {seconds:.2f} s in {calls} calls ({seconds / max(calls, 1) * 1000:.3f} ms each)', file=sys.stderr)
+    if os.environ.get('BENCH_LAGS'):
+        Path(os.environ['BENCH_LAGS']).write_text(json.dumps(result['lag']))
+    return result['lag'], [None] * result['errors']
+
+
+def run(workers, speed, frames, cache, fast_symbols=(), separate=False):
     with tempfile.TemporaryDirectory(prefix='bench-', dir=ROOT / 'cache') as folder:
         folder = Path(folder)
         environment = {**os.environ, 'BRISK_WORKERS': str(workers), 'BENCH_SPEED': str(speed), 'BENCH_FRAMES': str(frames),
@@ -53,7 +66,19 @@ def run(workers, speed, frames, cache, fast_symbols=()):
             feed.ready(timeout=90)
             ready_s = time.perf_counter() - startup
             consumer_ready_s = None
-            if fast_symbols:
+            if fast_symbols and separate:
+                # The consumer in a process of its own, as a real one is: it reads the gateway's file from this process's
+                # environment (XDG_CONFIG_HOME was set above).
+                consumer_began = time.perf_counter()
+                consumer = subprocess.Popen([sys.executable, str(Path(__file__).with_name('benchmark_consumer.py')), *fast_symbols],
+                                            stdout=subprocess.PIPE, text=True, env={**os.environ, 'PYTHONPATH': str(ROOT)})
+                assert consumer.stdout.readline().strip() == 'ready'
+                deadline = time.monotonic() + 10
+                while feed.gateway._fast_codes != set(fast_symbols) or any(c.lane != 'fast' for c in feed.gateway._clients):
+                    assert time.monotonic() < deadline, 'Fast lane consumer did not become ready'
+                    time.sleep(.01)
+                consumer_ready_s = round(time.perf_counter() - consumer_began, 3)
+            elif fast_symbols:
                 consumer_began = time.perf_counter()
                 consumer = Live()
                 consumer.subscribe('XTKS.BRISK', 'mbp-10', symbols=fast_symbols)
@@ -76,7 +101,10 @@ def run(workers, speed, frames, cache, fast_symbols=()):
                 feed._process.stdin.flush()
             feed.wait(timeout=300)
             finished = time.perf_counter()
-            if consumer:
+            if consumer and separate:
+                fast_lag, fast_errors = _finish(consumer)
+                assert fast_lag and not fast_errors
+            elif consumer:
                 consumer.block_for_close(timeout=60)
                 assert fast_lag and not fast_errors
             host = json.loads((folder / 'host.json').read_text())
@@ -100,7 +128,9 @@ def run(workers, speed, frames, cache, fast_symbols=()):
             return result
         finally:
             feed.close()
-            if consumer:
+            if consumer and separate:
+                consumer.kill()
+            elif consumer:
                 consumer.stop()
 
 
@@ -112,6 +142,7 @@ def main():
     parser.add_argument('--speeds', nargs='+', type=float)
     parser.add_argument('--frames', type=int, default=600)
     parser.add_argument('--fast-symbols', nargs='+', default=[])
+    parser.add_argument('--consumer-process', action='store_true', help='Run the Live consumer in a process of its own')
     parser.add_argument('--output', type=Path, default=ROOT / 'cache/benchmark-feed.json')
     args = parser.parse_args()
     if args.frames < 4 or any(w < 0 for w in args.workers):
@@ -126,7 +157,7 @@ def main():
     rows = []
     for workers in args.workers:
         for speed in args.speeds or [args.speed]:
-            rows.append(run(workers, speed, args.frames, args.cache.resolve(), args.fast_symbols))
+            rows.append(run(workers, speed, args.frames, args.cache.resolve(), args.fast_symbols, args.consumer_process))
             args.output.write_text(json.dumps(rows, indent=2), encoding='utf-8')
 
 

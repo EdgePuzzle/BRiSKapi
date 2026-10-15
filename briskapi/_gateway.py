@@ -637,9 +637,40 @@ class _Day:
         self.midnight = _parquet.midnight_ns(self.date)
         self.first = self.midnight + bootstrap['source_time_us'] * 1000
         self.carry = {}
+        self._collars = None
+
+    def collars(self):
+        """{issue ID: (upper, lower) price limit in yen, or None} as the imbalance records have them."""
+        if self._collars is None:
+            ids = self.equity.column('issue_id').to_pylist()
+            upper = pc.cast(self.equity.column('max_price'), pa.float64()).to_pylist()
+            lower = pc.cast(self.equity.column('min_price'), pa.float64()).to_pylist()
+            self._collars = dict(zip(ids, zip(upper, lower)))
+        return self._collars
 
     def clock(self, batch):
         return self.midnight + batch['source_time_us'] * 1000
+
+
+# A live batch holds a few quotes or trades (the fast lane's, a handful of symbols), and building Arrow tables to project them
+# costs some two milliseconds of fixed work: more than the batches' spacing in an opening burst. For the schemas where it
+# matters most, mbp-10, trades and imbalance, `Live._rows` makes the records straight from the batch, the same records (Arrow's price
+# conversion is exact but for these five tenths of a yen, which it rounds down a digit; tests/test_gateway.py compares
+# the two ways on every value it can).
+_YEN = {1: 0.09999999999999999, 2: 0.19999999999999998, 4: 0.39999999999999997, 8: 0.7999999999999999, 18: 1.7999999999999998}
+_LEVEL_KEYS = {side: [(f'{side}_px_{n:02d}', f'{side}_sz_{n:02d}', f'{side}_ct_{n:02d}') for n in range(records.LEVELS)]
+               for side in ('bid', 'ask')}
+_AGGRESSOR = {1: 'B', 2: 'A'}
+
+
+def _yen(tenths):
+    """A price in yen from tenths of a yen, as Arrow's decimal to float64 gives it."""
+    return _YEN.get(tenths) or tenths / 10
+
+
+def _stamp(ns):
+    """A time as the records have it (what Arrow's to_pylist makes of a UTC nanosecond timestamp)."""
+    return pa.scalar(ns, records.TIME).as_py()
 
 
 class Live:
@@ -653,6 +684,8 @@ class Live:
     each security's current quote. A bar subscription gives the bars its trades cover: with `start`, from the
     feed's start; without, those that begin after it joined.
     """
+
+    _by_rows = True   # live mbp-10 and trades are projected record by record (_rows); tests turn it off to compare
 
     def __init__(self, key: str | None = None, gateway: str = HOST, port: int | None = None):
         self._key, self._host, self._port = key, gateway, port
@@ -915,6 +948,9 @@ class Live:
     def _project(self, batch, takers, day, snapshot=False, replayed=False):
         """One batch's records for these subscriptions, ordered as Historical orders them, and the bars it
         completes."""
+        if self._by_rows and not snapshot and not replayed and batch['type'] in ('quotes', 'history') \
+                and all(s.schema in ('mbp-10', 'trades', 'imbalance') for s in self._subscriptions):
+            return self._rows(batch, takers, day)
         quoted = ('mbp-10', 'imbalance', 'brisk-quotes')
         depths_wanted = any(s.schema in quoted for s in takers)
         # Trades are read whenever a subscription wants them (on the live day, any), so trade IDs carry on exactly.
@@ -941,6 +977,91 @@ class Live:
             for index, s in enumerate(takers):
                 if s.bars:
                     found += _ordered(_bar_table(s.bars.ready(clock, final=batch['type'] == 'end'), publisher), s, index)
+        if len(takers) > 1:
+            found.sort(key=lambda item: item[:3])
+        return [item[3] for item in found]
+
+    def _rows(self, batch, takers, day):
+        """_project for a live batch of mbp-10, trades and imbalance subscriptions alone, record by record: the same records, ordered
+        the same, without building a table for a few rows."""
+        publisher = records.DATASETS[self.dataset][0]
+        received = batch.get('received_unix_ms') if self.dataset == 'XTKS.BRISK' else None
+        stamped = {}
+
+        def stamp(ns):
+            if ns not in stamped:
+                stamped[ns] = _stamp(ns)
+            return stamped[ns]
+        recv = stamp(received * 10**6) if received else None
+        found = []
+        books = trades = None
+        if any(s.schema == 'mbp-10' for s in takers):
+            books = []
+            for q in batch.get('quotes', ()):
+                ns = day.midnight + q['source_time_us'] * 1000
+                row = {'ts_recv': recv or stamp(ns), 'ts_event': stamp(ns), 'publisher_id': publisher,
+                       'instrument_id': records.instrument_id(q['code']), 'action': 'N', 'side': 'N', 'depth': 0, 'price': None,
+                       'size': 0, 'flags': 0, 'sequence': q['frame']}
+                for key, side in (('bid_levels', 'bid'), ('ask_levels', 'ask')):
+                    levels = q[key]
+                    for n, (price, size, count) in enumerate(_LEVEL_KEYS[side]):
+                        if n < len(levels):
+                            row[price], row[size], row[count] = _yen(levels[n][0]), levels[n][1], levels[n][2]
+                        else:
+                            row[price] = row[size] = row[count] = None
+                row['symbol'] = q['code']
+                books.append((ns, row))
+        imbalances = None
+        if any(s.schema == 'imbalance' for s in takers):
+            imbalances, collars = [], day.collars()
+            for auction, prefix, side in (('O', '', ''), ('C', 'closing_', '_closing')):
+                for q in batch.get('quotes', ()):
+                    indicative = q[f'{prefix}indicative_price10']
+                    if not indicative:   # BRiSK shows no indicative price: no auction state
+                        continue
+                    ns = day.midnight + q['source_time_us'] * 1000
+                    buy, sell = q[f'{prefix}market_buy_quantity'], q[f'{prefix}market_sell_quantity']
+                    gap = buy - sell
+                    upper, lower = collars.get(q['issue_id'], (None, None))
+                    imbalances.append((ns, {
+                        'ts_recv': recv or stamp(ns), 'ts_event': stamp(ns), 'publisher_id': publisher,
+                        'instrument_id': records.instrument_id(q['code']), 'auction_type': auction,
+                        'ref_price': _yen(q['reference_price10']) if q['reference_price10'] else None,
+                        'ind_match_price': _yen(indicative), 'paired_qty': q[f'{prefix}indicative_volume'],
+                        'side': 'A' if q[f'{prefix}indicative_imbalance_side'] == 1 else 'B', 'market_buy_qty': buy,
+                        'market_sell_qty': sell, 'market_imbalance_qty': abs(gap),
+                        'market_imbalance_side': 'B' if gap > 0 else 'A' if gap < 0 else 'N',
+                        'bid_total_qty': q[f'bid{side}_total_quantity'], 'ask_total_qty': q[f'ask{side}_total_quantity'],
+                        'upper_collar': upper, 'lower_collar': lower,
+                        'auction_time': stamp(day.midnight + q['special_quote_time_us'] * 1000) if q['special_quote_time_us'] else None,
+                        'sequence': q['frame'], 'symbol': q['code']}))
+        # Trade IDs carry on from every trade the feed gives, whoever wants it (Columns.trade_ids).
+        if batch.get('trades') and any(s.schema == 'trades' for s in self._subscriptions):
+            trades, key, place = [], None, 0
+            for t in sorted(batch['trades'], key=lambda t: t['issue_id']):
+                issue, frame = t['issue_id'], t['frame']
+                if (issue, frame) == key:
+                    place += 1
+                elif day.carry.get(issue, (None,))[0] == frame:
+                    place = day.carry[issue][1] + 1
+                else:
+                    place = 0
+                key = (issue, frame)
+                day.carry[issue] = (frame, place)
+                ns = day.midnight + t['time_us'] * 1000
+                trades.append((ns, {'ts_recv': recv or stamp(ns), 'ts_event': stamp(ns), 'publisher_id': publisher,
+                                    'instrument_id': records.instrument_id(t['code']), 'action': 'T',
+                                    'side': _AGGRESSOR.get(t['side'], 'N'), 'depth': 0, 'price': _yen(t['price10']),
+                                    'size': t['quantity'], 'flags': 0, 'sequence': frame, 'trade_id': f'{frame}-{place}',
+                                    'symbol': t['code']}))
+        for index, s in enumerate(takers):
+            rows = books if s.schema == 'mbp-10' else imbalances if s.schema == 'imbalance' else trades
+            if not rows:
+                continue
+            chosen = [(ns, row) for ns, row in rows
+                      if (s.symbols is None or row['symbol'] in s.symbols) and (s.start is None or ns >= s.start)]
+            chosen.sort(key=lambda item: (item[0], item[1]['instrument_id'], item[1]['sequence']))
+            found += [(ns, row['instrument_id'], index, Record(row, s.schema)) for ns, row in chosen]
         if len(takers) > 1:
             found.sort(key=lambda item: item[:3])
         return [item[3] for item in found]

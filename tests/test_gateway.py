@@ -10,11 +10,13 @@ import socket
 import threading
 import time
 
+import pyarrow as pa
 import pytest
 
 import briskapi as brisk
 import briskapi.cli as cli
 from briskapi import _gateway, _live, records
+from briskapi import schema as brisk_schema
 from test_api import market
 from test_query import OPEN_US, OWNER, archive, at, isolated, query, session, trades_at  # noqa: F401
 
@@ -579,3 +581,87 @@ def test_a_crashed_feeds_registration_is_taken_over(monkeypatch):
     taker = _gateway.Gateway('XTKS.BRISK')
     assert _gateway._read_file(path)['port'] == taker.port
     taker.close('completed', None)
+
+
+# Live batches are projected record by record where it matters (Live._rows): the same records as the Arrow projection.
+
+def _live_batches(seed, count=150):
+    import random
+    rng = random.Random(seed)
+    master = [(0, '7203'), (1, '167A'), (2, '6758')]
+    prices = [0, 1, 2, 4, 8, 18, 10, 11, 99, 9990, 10010, 123456, 30000, 2**31]
+    now = OPEN_US = 9 * 3600 * 10**6
+    out = [dict(type='bootstrap', seq=0, source='brisk_live', trading_date='20260311', source_time_us=OPEN_US,
+                input_transport=dict(brisk_schema.BROKER_TRANSPORTS['sbi']), source_timestamp_origin='brisk_decoder_unverified',
+                exchange_delay_ms=None, market_issue_count=3, quotes=[], trades=[],
+                master=[{**dict.fromkeys(brisk_schema.MASTER_KEYS, 0), 'issue_id': i, 'code': c, 'name': c, 'lot_size': 100,
+                         'limit_up10': 99999, 'limit_down10': 100} for i, c in master])]
+    for seq in range(1, count):
+        now += rng.randrange(1, 90_000)
+        quotes, trades = [], []
+        for issue, code in master:
+            if rng.random() < .6:
+                book = lambda: [[rng.choice(prices), rng.randrange(0, 10**7), rng.randrange(0, 1000)]  # noqa: E731
+                                for _ in range(rng.choice([0, 1, 2, 5, 10, 11]))]
+                quotes.append({**dict.fromkeys(brisk_schema.QUOTE_KEYS, 0), **{k: [] for k in brisk_schema.BOOK_KEYS}, 'issue_id': issue,
+                               'code': code, 'frame': rng.randrange(1, 10**6), 'source_time_us': now - rng.randrange(0, 5000),
+                               'bid_levels': book(), 'ask_levels': book(),
+                               **{k: rng.choice(prices) for k in ('indicative_price10', 'closing_indicative_price10', 'reference_price10')},
+                               **{k: rng.randrange(0, 10**6) for k in ('indicative_volume', 'closing_indicative_volume', 'market_buy_quantity',
+                                                                          'market_sell_quantity', 'closing_market_buy_quantity',
+                                                                          'closing_market_sell_quantity', 'bid_total_quantity',
+                                                                          'ask_total_quantity', 'bid_closing_total_quantity',
+                                                                          'ask_closing_total_quantity')},
+                               **{k: rng.choice([0, 1]) for k in ('indicative_imbalance_side', 'closing_indicative_imbalance_side')},
+                               'special_quote_time_us': rng.choice([0, 0, now - 1000])})
+            for _ in range(rng.choice([0, 0, 1, 3])):
+                trades.append({'issue_id': issue, 'code': code, 'frame': rng.choice([5, 5, 6, 7]), 'time_us': now,
+                               'price10': rng.choice(prices[:-1]) + 1, 'quantity': rng.randrange(1, 10**6), 'side': rng.choice([0, 1, 2, 3])})
+        rng.shuffle(trades)
+        if rng.random() < .15:
+            out.append(dict(type='history', seq=seq, source_time_us=now, trades=trades))
+        else:
+            out.append(dict(type='quotes', seq=seq, source_time_us=now, received_unix_ms=1773187200000 + now // 1000 + rng.choice([0, 20]),
+                            decode_ns=1, replay_lateness_ms=None, quotes=quotes if rng.random() < .9 else [], trades=trades))
+    return out
+
+
+@pytest.mark.parametrize('seed, subscriptions', [
+    (1, [('mbp-10', None, None)]),
+    (2, [('trades', None, None)]),
+    (3, [('mbp-10', {'167A', '7203'}, None), ('trades', {'6758'}, None)]),
+    (4, [('mbp-10', {'7203'}, 9 * 3600 * 10**6 + 2_000_000 * 10**3), ('mbp-10', None, None), ('trades', None, None)]),
+    (5, [('imbalance', None, None)]),
+    (6, [('imbalance', {'167A'}, None), ('mbp-10', {'7203', '6758'}, None), ('trades', None, None)]),
+])
+def test_live_records_made_record_by_record_are_those_the_arrow_projection_makes(seed, subscriptions):
+    from briskapi import _gateway
+    batches = _live_batches(seed)
+    sides = []
+    for by_rows in (True, False):
+        live = _gateway.Live()
+        live.dataset, live._by_rows = 'XTKS.BRISK', by_rows
+        live._subscriptions = [_gateway._Subscription(i, name, symbols, start, False) for i, (name, symbols, start) in enumerate(subscriptions)]
+        for s in live._subscriptions:
+            s.active = True
+        live._new_day(batches[0])
+        used = []
+        real = live._rows
+        live._rows = lambda *a: used.append(1) or real(*a)
+        sides.append([live._project(b, live._subscriptions, live._day) for b in batches[1:]])
+        assert bool(used) == by_rows, 'each way used its own projection'
+    by_rows, by_arrow = sides
+    assert sum(len(r) for r in by_arrow) > 100
+    for mine, theirs in zip(by_rows, by_arrow):
+        assert [(r.schema, dict(r)) for r in mine] == [(r.schema, dict(r)) for r in theirs]
+        assert [[type(v) for v in r.values()] for r in mine] == [[type(v) for v in r.values()] for r in theirs]
+        assert [list(r) for r in mine] == [list(r) for r in theirs]   # and in the same order of fields
+
+
+def test_the_tenths_of_a_yen_arrow_rounds_down_are_those_the_records_say():
+    import numpy as np
+    import pyarrow.compute as pc
+    from briskapi import _gateway, _parquet
+    values = list(range(0, 400_000)) + [10**9 + n for n in range(1000)] + [2**53 - 1]
+    arrow = pc.cast(_parquet._decimal(np.array(values, dtype=np.int64), 1), pa.float64()).to_pylist()
+    assert [_gateway._yen(v) for v in values] == arrow
