@@ -1,5 +1,6 @@
 """The archive's checks of a broker's recording, a row group at a time (briskapi._parquet.verify_broker)."""
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -124,3 +125,44 @@ def test_quotes_out_of_order_across_row_groups_are_refused(tmp_path, broker, mon
     with pytest.raises(ValueError, match='sorted'):
         _parquet.verify_broker(spoiled(tmp_path, columns.take(order), 'reversed'))
     assert json.loads((tmp_path / 'package' / 'manifest.json').read_text()) == m
+
+
+@pytest.mark.parametrize('spoil, message', [
+    (lambda b: b[4].__setitem__('source_time_us', b[3]['source_time_us'] - 1), 'Market clock regression'),
+    (lambda b: b[8].__setitem__('seq', 7), 'Sequence gap'),
+    (lambda b: b[4].__setitem__('received_unix_ms', 1), 'Implausible local receipt clock'),
+    (lambda b: b[9].__setitem__('received_unix_ms', b[8]['received_unix_ms'] - 1), 'receipt clock regression'),
+    (lambda b: b[9].__setitem__('replay_lateness_ms', 1.0), 'not demo replays'),
+])
+def test_the_batch_rules_hold_across_row_groups(tmp_path, broker, monkeypatch, spoil, message):
+    # Batches are checked a row group at a time, carrying what each rule needs from one to the next.
+    monkeypatch.setattr(_parquet, 'ROW_GROUP', 4)
+    m, columns = broker
+    good = spoiled(tmp_path, columns, 'good')
+    assert _parquet.verify_broker(good)['batches'] == len(columns.batches), 'and a clean recording passes in many groups'
+    assert _parquet.pq.ParquetFile(good / _parquet.BATCHES).num_row_groups > 5
+    spoil(columns.batches)
+    with pytest.raises(ValueError, match=message):
+        _parquet.verify_broker(spoiled(tmp_path, columns, 'spoiled-groups'))
+
+
+def test_a_recording_with_a_million_batches_is_verified_without_holding_them_all(tmp_path):
+    """The batches as dicts take 1.6 GB a million: the archive's function has 3 GB. Rows are a row group at a time."""
+    import resource, subprocess, sys
+    write = (f"import sys; sys.path.insert(0, 'tests')\nimport io, json\nfrom briskapi import _parquet, schema\n"
+             f"from test_spool import session\nbase = session(frames=8)\nboot, n = base[0], 1_000_000\n"
+             f"issue = boot['master'][0]['issue_id']\n"
+             f"boot = dict(boot, master=[boot['master'][0]], market_issue_count=1,\n"
+             f"    quotes=[q for q in boot['quotes'] if q['issue_id'] == issue][:1])\n"
+             f"boot = next(schema.canonical_batches(io.BytesIO(json.dumps(boot).encode() + b'\\n')))\n"
+             f"O = 9 * 3600 * 10**6\nmid = [dict(type='quotes', seq=i, source_time_us=O + i * 20, received_unix_ms=1773187200000 + i // 50,\n"
+             f"    decode_ns=1000 + i % 500, replay_lateness_ms=None, quotes=[], trades=[]) for i in range(1, n)]\n"
+             f"_parquet.Columns.from_batches([boot, *mid, dict(type='end', seq=n, source_time_us=O + n * 20, frames=n,\n"
+             f"    quote_updates=0, replay_wall_ms=1.0)]).write({str(tmp_path / 'big')!r})")
+    subprocess.run([sys.executable, '-c', write], check=True, cwd=Path(__file__).parent.parent)
+    verify = (f"import resource\nfrom briskapi import _parquet\n"
+              f"s = _parquet.verify_broker({str(tmp_path / 'big')!r})\n"
+              f"print(s['batches'], resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 2**20)")
+    out = subprocess.run([sys.executable, '-c', verify], check=True, capture_output=True, text=True,
+                         cwd=Path(__file__).parent.parent).stdout.split()
+    assert int(out[0]) == 1_000_000 + 1 and int(out[1]) < 1200, f'{out[1]} MB for a million batches (3000 before they were streamed)'

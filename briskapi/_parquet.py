@@ -1383,51 +1383,83 @@ def _check_master(master):
                 integer(value)
 
 
-def _check_batches(batches, master):
-    """The batch rules of schema._scan, for a broker's recording: its batches without their quotes and trades.
-    Returns each batch's kind and clock."""
-    require(batches and len(batches) <= BROKER_MAX_ROWS[BATCHES], 'Recording has no bootstrap')
-    identities = {m['issue_id'] for m in master}
-    first, last, received, previous_stamp, previous_kind = batches[0], 0, None, None, None
-    require(first['type'] == 'bootstrap' and is_broker(first['source']), 'Unsupported bootstrap/source')
-    require(isinstance(first['trading_date'], str) and re.fullmatch(r'\d{8}', first['trading_date']), 'Invalid date')
-    dt.datetime.strptime(first['trading_date'], '%Y%m%d')
-    require(integer(first['market_issue_count']) >= len(master), 'Invalid market count')
-    require(first['input_transport'] in transports(first['source']), 'Invalid broker transport fields')
-    require(first['source_timestamp_origin'] == 'brisk_decoder_unverified', 'Invalid clock provenance')
-    require(first['exchange_delay_ms'] is None, 'Unverified exchange delay')
-    for seq, b in enumerate(batches):
-        kind = b['type']
-        require(integer(b['seq']) == seq, 'Sequence gap')
-        now = integer(b['source_time_us'], 86_400_000_000 - 1)
-        require(now >= last, 'Market clock regression')
-        require(seq == 0 or kind != 'bootstrap', 'Expected delta/end')
-        if kind == 'history':
-            require(previous_kind in {'bootstrap', 'history'} and now == last, 'History out of place')
-        elif seq:
-            require(kind in {'quotes', 'end'}, 'Expected delta/end')
-        require(kind != 'end' or seq == len(batches) - 1, 'Data after end batch')
-        if kind == 'quotes':
-            integer(b['decode_ns'], MAX_DECODE_NS)
-            stamp = integer(b['received_unix_ms'])
-            require(UNIX_MS[0] <= stamp < UNIX_MS[1], 'Implausible local receipt clock')
-            if received is None:
-                received = previous_stamp = stamp
-            require(previous_stamp <= stamp <= received + MAX_SESSION_MS, 'Local receipt clock regression/span')
-            previous_stamp = stamp
-            require(b['replay_lateness_ms'] is None, 'Broker streams are not demo replays')
-        if SKIPPED in b:
-            skipped = b[SKIPPED]
-            require(kind in ('bootstrap', 'quotes') and isinstance(skipped, list) and skipped and
-                    all(issue in identities for issue in skipped) and skipped == sorted(set(skipped)), 'Invalid skipped issues')
-        if kind == 'end':
-            require(integer(b['frames']) >= seq - 1, 'End summary mismatch')
-            integer(b['quote_updates'])
-            measurement(b['replay_wall_ms'], MAX_SESSION_MS)
-        last, previous_kind = now, kind
-    require(batches[-1]['type'] == 'end', 'Recording has no clean end')
-    kinds = np.array([b['type'] for b in batches])
-    return kinds, np.array([b['source_time_us'] for b in batches], np.int64)
+KINDS = {'bootstrap': 0, 'quotes': 1, 'history': 2, 'end': 3}   # a batch's kind as a small integer
+
+
+def _batch_groups(directory):
+    """(day's midnight, a row group's table, its batches) for each row group of a recording's batches table: a
+    broker's session has a million batches or more, which as dicts take some 1.6 GB, so they are never all at once."""
+    source, midnight = pq.ParquetFile(Path(directory) / BATCHES), None
+    for g in range(source.num_row_groups):
+        table = source.read_row_group(g)
+        batches = _decode_batches(table, midnight)
+        if midnight is None:
+            midnight = midnight_ns(batches[0]['trading_date'])
+        yield midnight, table, batches
+
+
+class _BatchRules:
+    """The batch rules of schema._scan, for a broker's recording, applied to its batches (without their quotes and
+    trades) a row group at a time, `n` in all: add() each group's batches, then finish(), which gives each batch's
+    kind (KINDS) and clock, the skipped issues as issue << 32 | batch, and the first and last batch."""
+
+    def __init__(self, master, n):
+        require(0 < n <= BROKER_MAX_ROWS[BATCHES], 'Recording has no bootstrap')
+        self.identities, self.n, self.seq, self.last = {m['issue_id'] for m in master}, n, 0, 0
+        self.market_size = len(master)
+        self.kinds, self.clocks, self.skipped = np.zeros(n, np.int8), np.zeros(n, np.int64), []
+        self.received = self.previous_stamp = self.previous_kind = self.first = self.final = None
+
+    def add(self, batches):
+        for b in batches:
+            seq, kind = self.seq, b['type']
+            if seq == 0:
+                self._first(b)
+            require(seq < self.n, 'Sequence gap')
+            require(integer(b['seq']) == seq, 'Sequence gap')
+            now = integer(b['source_time_us'], 86_400_000_000 - 1)
+            require(now >= self.last, 'Market clock regression')
+            require(seq == 0 or kind != 'bootstrap', 'Expected delta/end')
+            if kind == 'history':
+                require(self.previous_kind in {'bootstrap', 'history'} and now == self.last, 'History out of place')
+            elif seq:
+                require(kind in {'quotes', 'end'}, 'Expected delta/end')
+            require(kind != 'end' or seq == self.n - 1, 'Data after end batch')
+            if kind == 'quotes':
+                integer(b['decode_ns'], MAX_DECODE_NS)
+                stamp = integer(b['received_unix_ms'])
+                require(UNIX_MS[0] <= stamp < UNIX_MS[1], 'Implausible local receipt clock')
+                if self.received is None:
+                    self.received = self.previous_stamp = stamp
+                require(self.previous_stamp <= stamp <= self.received + MAX_SESSION_MS, 'Local receipt clock regression/span')
+                self.previous_stamp = stamp
+                require(b['replay_lateness_ms'] is None, 'Broker streams are not demo replays')
+            if SKIPPED in b:
+                skipped = b[SKIPPED]
+                require(kind in ('bootstrap', 'quotes') and isinstance(skipped, list) and skipped and
+                        all(issue in self.identities for issue in skipped) and skipped == sorted(set(skipped)),
+                        'Invalid skipped issues')
+                self.skipped += (issue << 32 | seq for issue in skipped)
+            if kind == 'end':
+                require(integer(b['frames']) >= seq - 1, 'End summary mismatch')
+                integer(b['quote_updates'])
+                measurement(b['replay_wall_ms'], MAX_SESSION_MS)
+            self.kinds[seq], self.clocks[seq] = KINDS[kind], now
+            self.last, self.previous_kind, self.seq, self.final = now, kind, seq + 1, b
+
+    def _first(self, first):
+        require(first['type'] == 'bootstrap' and is_broker(first['source']), 'Unsupported bootstrap/source')
+        require(isinstance(first['trading_date'], str) and re.fullmatch(r'\d{8}', first['trading_date']), 'Invalid date')
+        dt.datetime.strptime(first['trading_date'], '%Y%m%d')
+        require(integer(first['market_issue_count']) >= self.market_size, 'Invalid market count')
+        require(first['input_transport'] in transports(first['source']), 'Invalid broker transport fields')
+        require(first['source_timestamp_origin'] == 'brisk_decoder_unverified', 'Invalid clock provenance')
+        require(first['exchange_delay_ms'] is None, 'Unverified exchange delay')
+        self.first = first
+
+    def finish(self):
+        require(self.seq == self.n and self.final['type'] == 'end', 'Recording has no clean end')
+        return self.kinds, self.clocks, np.array(sorted(self.skipped), np.int64), self.first, self.final
 
 
 def _monotonic(issues, values, carry):
@@ -1454,18 +1486,19 @@ def verify_broker(directory, manifest=None):
     if manifest is not None:
         validate_manifest(manifest)
     fmt = check(directory, broker=True, fmt=manifest and manifest['schema'])
-    batches = _decode_batches(pq.read_table(directory / BATCHES))
-    midnight = midnight_ns(batches[0]['trading_date'])
     master = _decode_equity(pq.read_table(directory / EQUITY))
     _check_master(master)
-    kinds, clocks = _check_batches(batches, master)
-    shell = Columns(None, None, None, master, batches, *_no_trades())
-    for name, expected in ((EQUITY, shell._equity(midnight)), (BATCHES, shell._batches(midnight))):
-        require(pq.read_table(directory / name).equals(as_format(expected, name, fmt)), f'Non-canonical {name}')
+    rules, midnight = _BatchRules(master, pq.ParquetFile(directory / BATCHES).metadata.num_rows), None
+    for midnight, table, batches in _batch_groups(directory):   # a row group of batches at a time
+        rules.add(batches)
+        expected = Columns(None, None, None, master, batches, *_no_trades())._batches(midnight)
+        require(table.equals(as_format(expected, BATCHES, fmt)), f'Non-canonical {BATCHES}')
+    kinds, clocks, skipped, first, final = rules.finish()
+    shell = Columns(None, None, None, master, [], *_no_trades())
+    require(pq.read_table(directory / EQUITY).equals(as_format(shell._equity(midnight), EQUITY, fmt)), f'Non-canonical {EQUITY}')
     ids = np.array([m['issue_id'] for m in master], np.int64)
     codes = np.array([m['code'] for m in master], dtype=object)
-    skipped = np.array(sorted(i << 32 | b['seq'] for b in batches for i in b.get(SKIPPED, ())), np.int64)
-    n = len(batches)
+    n = len(kinds)
     quotes, trades = np.zeros(n, np.int64), np.zeros(n, np.int64)
     quote_bytes = trade_bytes = 0
     last_key, frames, times = (-1, -1), {}, {}
@@ -1476,7 +1509,8 @@ def verify_broker(directory, manifest=None):
         require(not len(issues) or (codes[at] == row_codes).all(), 'Quote identity mismatch/duplicate')
 
     def batch_of(seqs, allowed, times_us, what):
-        require(not len(seqs) or (seqs.max() < n and np.isin(kinds[seqs], allowed).all()), f'{what} outside their batches')
+        require(not len(seqs) or (seqs.max() < n and np.isin(kinds[seqs], [KINDS[k] for k in allowed]).all()),
+                f'{what} outside their batches')
         require(not len(seqs) or (times_us <= clocks[seqs]).all(), f'{what} after their batch clock')
 
     source = pq.ParquetFile(directory / DEPTHS)
@@ -1513,7 +1547,7 @@ def verify_broker(directory, manifest=None):
     for g in range(source.num_row_groups):
         table = source.read_row_group(g)
         t, t_code = _decode_trades(table, midnight)
-        rows = Columns(None, None, None, master, batches, t, t_code)
+        rows = Columns(None, None, None, master, [], t, t_code)
         rows.trade_ids(carry)
         require(plain(table).equals(plain(as_format(rows._trades(midnight, slice(None)), TRADES, fmt))), f'Non-canonical {TRADES}')
         identity(t['issue_id'], t_code)
@@ -1527,14 +1561,17 @@ def verify_broker(directory, manifest=None):
         require((t['price10'] > 0).all() and (t['quantity'] > 0).all() and (t['frame'] < 2**32).all(), 'Invalid trade')
         trades += _per_batch(t['seq'], n)
         trade_bytes += int(trade_lengths(t, t_code).sum())
-    require(quotes[0] + len(batches[0].get(SKIPPED, ())) == len(master), 'Incomplete bootstrap')
-    history = kinds == 'history'
+    require(quotes[0] + len(first.get(SKIPPED, ())) == len(master), 'Incomplete bootstrap')
+    history = kinds == KINDS['history']
     require(((trades[history] > 0) & (trades[history] <= MAX_HISTORY)).all(), 'Invalid trades')
-    require(batches[-1]['quote_updates'] == _updates(batches, quotes), 'End summary mismatch')
-    summary = dict(source=batches[0]['source'], trading_date=batches[0]['trading_date'],
-                   first_source_time_us=batches[0]['source_time_us'], last_source_time_us=batches[-1]['source_time_us'],
-                   codes=sorted(m['code'] for m in master), batches=n, quote_updates=int(quotes.sum()),
-                   expanded_bytes=batch_lengths(batches, master, quotes, trades) + quote_bytes + trade_bytes)
+    require(final['quote_updates'] == int(quotes[kinds == KINDS['quotes']].sum()), 'End summary mismatch')
+    expanded, at = quote_bytes + trade_bytes, 0
+    for _, _, batches in _batch_groups(directory):   # their canonical sizes, a row group at a time again
+        expanded += batch_lengths(batches, master, quotes[at:at + len(batches)], trades[at:at + len(batches)])
+        at += len(batches)
+    summary = dict(source=first['source'], trading_date=first['trading_date'], first_source_time_us=first['source_time_us'],
+                   last_source_time_us=final['source_time_us'], codes=sorted(m['code'] for m in master), batches=n,
+                   quote_updates=int(quotes.sum()), expanded_bytes=expanded)
     require(manifest is None or summary == manifest['summary'], 'Summary mismatch')
     return summary
 
