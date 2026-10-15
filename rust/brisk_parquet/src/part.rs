@@ -643,7 +643,7 @@ fn book(book: &Book, order: &[u32], starts: &[usize]) -> Res<ArrayRef> {
         let i = i as usize;
         let n = book.counts[i] as usize;
         let at = starts[i] * 3;
-        for level in book.levels[at..at + n * 3].chunks_exact(3) {
+        for level in book.levels[at..at + n * 3].as_chunks::<3>().0 {
             require!(
                 level[0] >= 0 && level[1] >= 0 && level[2] >= 0,
                 "Invalid negative value"

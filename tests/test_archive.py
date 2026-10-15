@@ -1282,7 +1282,7 @@ def test_the_function_runs_a_static_arm64_build_of_brisk_parquet(monkeypatch):
 
     def build(cmd, check):
         calls.append(cmd)
-        target = Path(cmd[cmd.index('-v', cmd.index('-v') + 1) + 1].split(':')[0]) / 'release'
+        target = Path(cmd[cmd.index('-v', cmd.index('-v') + 1) + 1].rsplit(':/target', 1)[0]) / 'release'   # (a Windows path has a colon)
         target.mkdir()
         (target / 'brisk-parquet').write_bytes(b'built')
     monkeypatch.setattr(deploy.subprocess, 'run', build)

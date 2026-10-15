@@ -148,7 +148,8 @@ def test_the_batch_rules_hold_across_row_groups(tmp_path, broker, monkeypatch, s
 
 def test_a_recording_with_a_million_batches_is_verified_without_holding_them_all(tmp_path):
     """The batches as dicts take 1.6 GB a million: the archive's function has 3 GB. Rows are a row group at a time."""
-    import resource, subprocess, sys
+    import subprocess, sys
+    resource = pytest.importorskip('resource')   # not on Windows, where the function does not run either
     write = (f"import sys; sys.path.insert(0, 'tests')\nimport io, json\nfrom briskapi import _parquet, schema\n"
              f"from test_spool import session\nbase = session(frames=8)\nboot, n = base[0], 1_000_000\n"
              f"issue = boot['master'][0]['issue_id']\n"
