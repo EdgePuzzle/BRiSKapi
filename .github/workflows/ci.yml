@@ -46,8 +46,11 @@ jobs:
         working-directory: /tmp
         run: |
           python -m pip wheel --no-deps -w /tmp/dist "$GITHUB_WORKSPACE"
+          # With brisk-parquet inside, as the release's wheel has it.
+          python "$GITHUB_WORKSPACE/tools/platform_wheel.py" /tmp/dist/briskapi-*-py3-none-any.whl \
+            "$GITHUB_WORKSPACE/rust/brisk_parquet/target/release/brisk-parquet" manylinux2014_x86_64 --out /tmp/wheelhouse
           python -m venv /tmp/wheel-venv
-          /tmp/wheel-venv/bin/python -m pip install /tmp/dist/briskapi-*.whl
+          /tmp/wheel-venv/bin/python -m pip install /tmp/wheelhouse/briskapi-*.whl
           /tmp/wheel-venv/bin/python -I -c "import briskapi.cli as c, briskapi.schema as s; assert c.DECODER.exists() and 'historical_mock' in s.REFERENCES"
           /tmp/wheel-venv/bin/brisk live --site demo --cache /tmp/brisk-mock-cache --codes 7203 --speed 0 --limit-frames 3 --quotes > /tmp/live.jsonl
           /tmp/wheel-venv/bin/python -c "import json; rows = [json.loads(l) for l in open('/tmp/live.jsonl')]; assert rows and all(r['code'] == '7203' for r in rows)"

@@ -23,7 +23,9 @@ def binary() -> str:
     found = shutil.which(NAME)
     if found:
         return found
-    raise RuntimeError(f'{NAME} is not installed: reinstall briskapi, or build it with cargo build --release --manifest-path rust/brisk_parquet/Cargo.toml')
+    raise RuntimeError(f'{NAME} is not installed. briskapi\'s wheels hold it for Linux, macOS and Windows on 64-bit Intel and Arm; '
+                       'on another platform build it (cargo build --release in rust/brisk_parquet of '
+                       'https://github.com/honvl/BRiSKapi) and set BRISK_PARQUET to the program')
 
 
 def run(arguments, progress=None, lines=None) -> str:

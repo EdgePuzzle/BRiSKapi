@@ -1,6 +1,7 @@
 name: Release
 # A v* tag builds and tests everything, publishes the Python package to PyPI
-# (trusted publishing, `pypi` environment) and creates a GitHub Release with
+# (trusted publishing, `pypi` environment): its source and a wheel for each platform, which holds brisk-parquet, the Rust
+# program briskapi runs (tools/platform_wheel.py); and creates a GitHub Release with
 # prebuilt Rust tools. Run it manually for a dry run that publishes nothing.
 on:
   push:
@@ -26,20 +27,66 @@ jobs:
         run: |
           version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           test "v$version" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+      # The tests run brisk-parquet, so it is built first.
+      - run: cargo build --release --locked --manifest-path rust/brisk_parquet/Cargo.toml
       - run: python -m pip install build -r requirements-dev.txt -e .
       - run: python -m pytest tests -q
-      - run: python -m build
-      - name: Installed wheel works outside the repository
-        working-directory: /tmp
-        run: |
-          python -m venv /tmp/wheel-venv
-          /tmp/wheel-venv/bin/python -m pip install "$GITHUB_WORKSPACE"/dist/briskapi-*.whl
-          /tmp/wheel-venv/bin/brisk --help > /dev/null
-          /tmp/wheel-venv/bin/python -I -c "import briskapi.cli as c, briskapi.brisk as s; assert c.DECODER.exists() and s.DECODER.exists()"
+      - run: python -m build --sdist
       - uses: actions/upload-artifact@v4
         with:
-          name: python-dist
+          name: python-sdist
           path: dist/
+
+  # briskapi is pure Python, but runs brisk-parquet: a wheel for each platform holds the program built for it.
+  wheels:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, platform: manylinux2014_x86_64, musl: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, platform: manylinux2014_aarch64, musl: true }
+          - { os: macos-14, target: aarch64-apple-darwin, platform: macosx_11_0_arm64 }
+          - { os: macos-14, target: x86_64-apple-darwin, platform: macosx_10_13_x86_64, foreign: true }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, platform: win_amd64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build brisk-parquet (static on Linux, so it runs on any distribution)
+        shell: bash
+        run: |
+          # The C of zstd and mimalloc is built by musl's gcc for the static targets.
+          if [ "${{ matrix.musl }}" = true ]; then export "CC_$(echo '${{ matrix.target }}' | tr - _)=musl-gcc"; fi
+          cargo build --release --locked --manifest-path rust/brisk_parquet/Cargo.toml --target ${{ matrix.target }}
+      - run: python -m pip install build
+      - run: python -m build --wheel
+      - name: The platform wheel
+        shell: bash
+        run: |
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=".exe"
+          python tools/platform_wheel.py dist/briskapi-*-py3-none-any.whl "rust/brisk_parquet/target/${{ matrix.target }}/release/brisk-parquet$ext" ${{ matrix.platform }} --out wheelhouse
+      - name: Installed wheel works outside the repository
+        if: ${{ !matrix.foreign }}
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          python -m venv wheel-venv
+          if [ "$RUNNER_OS" = Windows ]; then bin=wheel-venv/Scripts; else bin=wheel-venv/bin; fi
+          $bin/python -m pip install "$GITHUB_WORKSPACE"/wheelhouse/briskapi-*.whl
+          $bin/brisk --help > /dev/null
+          $bin/python -I -c "import briskapi.cli as c, briskapi.brisk as s; assert c.DECODER.exists() and s.DECODER.exists()"
+          $bin/python -I -c "import tempfile; from briskapi import _native; _native.run(['schemas', tempfile.mkdtemp()]); print(_native.binary())"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: wheelhouse/*.whl
 
   rust:
     strategy:
@@ -73,7 +120,7 @@ jobs:
             brisk-tools-*.zip
 
   github-release:
-    needs: [python, rust]
+    needs: [python, wheels, rust]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -89,7 +136,7 @@ jobs:
         run: gh release create "$GITHUB_REF_NAME" artifacts/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
 
   pypi:
-    needs: [python, rust]
+    needs: [python, wheels, rust]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment: pypi
@@ -98,6 +145,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: python-dist
+          pattern: '{python-sdist,wheel-*}'
+          merge-multiple: true
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1

@@ -108,7 +108,8 @@ nothing. Examples that need a broker login or your own uploads carry written, il
 2. Set `version` in `pyproject.toml`, commit, then push a matching tag
    (`git tag v0.2.0 && git push origin v0.2.0`).
 
-`.github/workflows/release.yml` tests and builds the wheel and sdist, builds the
+`.github/workflows/release.yml` tests and builds the sdist and, for each platform, a wheel holding
+`brisk-parquet` built for it (`tools/platform_wheel.py`: briskapi is pure Python but runs that program), builds the
 Rust tools for Linux (x86-64, ARM64), macOS (Apple silicon) and Windows with
 their decoder host, creates the GitHub Release with checksums and publishes to
 PyPI. Running the workflow manually is a dry run that publishes nothing.
