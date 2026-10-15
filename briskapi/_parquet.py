@@ -25,6 +25,7 @@ from __future__ import annotations
 from array import array
 from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
+import gc
 import hashlib
 import io
 import json
@@ -72,7 +73,8 @@ SLICE_LINES = 16
 # A spool part's depths hold a row group per PART_ISSUES issue IDs; a piece is written PIECE_ROWS quote rows (about
 # 0.5 GB in memory) at a time, a range of issues from every part, so no day is ever whole in memory.
 PART_ISSUES = 32
-PIECE_ROWS = 400_000
+PIECE_ROWS = 500_000
+DECODE_ROWS = 50_000   # rows of Arrow decoded at a time into numpy, which takes a third of the memory
 _pool, _pool_lock = None, threading.Lock()
 
 
@@ -827,7 +829,12 @@ def write_part(columns, header, directory, carry=None):
             starts = np.flatnonzero(np.diff(issues // PART_ISSUES, prepend=-1)) if len(issues) else np.zeros(1, np.int64)
             for start, stop in zip(starts.tolist(), [*starts[1:].tolist(), len(issues)]):
                 writer.write_table(rows.take(np.arange(start, stop))._depths(midnight), row_group_size=ROW_GROUP)
-        pq.write_table(columns._trades(midnight, slice(None)), directory / TRADES, row_group_size=ROW_GROUP, **options(TRADES))
+        trades = columns._trades(midnight, slice(None))
+        owners = np.asarray(columns.t['issue_id'])
+        with pq.ParquetWriter(directory / TRADES, TRADE_SCHEMA, **options(TRADES)) as writer:
+            starts = np.flatnonzero(np.diff(owners // PART_ISSUES, prepend=-1)) if len(owners) else np.zeros(1, np.int64)
+            for start, stop in zip(starts.tolist(), [*starts[1:].tolist(), len(owners)]):
+                writer.write_table(trades.slice(start, stop - start), row_group_size=ROW_GROUP)
     except (TypeError, OverflowError) as error:
         raise ValueError(f'Invalid recording value: {error}') from None
 
@@ -1001,43 +1008,67 @@ def _join(pieces):
                    pieces[0].master, [], *_no_trades())
 
 
-class _DepthWriter:
-    """Writes sorted quote rows given a slice at a time in the row groups Columns.write makes: ROW_GROUP rows each,
-    the last shorter."""
+class _TableWriter:
+    """Writes tables given a range at a time in the row groups writing their rows at once would make: ROW_GROUP rows
+    each, the last shorter."""
 
-    def __init__(self, path, midnight):
-        self._writer, self._midnight, self._pending, self._count = pq.ParquetWriter(path, DEPTH_SCHEMA, **options(DEPTHS)), midnight, [], 0
+    def __init__(self, path, schema, name):
+        self._writer, self._pending = pq.ParquetWriter(path, schema, **options(name)), None
 
-    def add(self, rows):
-        if len(rows):
-            self._pending.append(rows)
-            self._count += len(rows)
-        while self._count >= ROW_GROUP:
-            self._flush(ROW_GROUP)
-
-    def _flush(self, count):
-        joined = _join(self._pending)
-        self._writer.write_table(_rows(joined, np.arange(count))._depths(self._midnight), row_group_size=ROW_GROUP)
-        self._pending = [_rows(joined, np.arange(count, len(joined)))] if count < len(joined) else []
-        self._count -= count
+    def add(self, table):
+        self._pending = table if self._pending is None else pa.concat_tables([self._pending, table])
+        while self._pending.num_rows >= ROW_GROUP:
+            self._writer.write_table(self._pending.slice(0, ROW_GROUP), row_group_size=ROW_GROUP)
+            self._pending = self._pending.slice(ROW_GROUP)
 
     def close(self):
-        if self._count:
-            self._flush(self._count)
+        if self._pending is not None and self._pending.num_rows:
+            self._writer.write_table(self._pending, row_group_size=ROW_GROUP)
         self._writer.close()
 
 
-def _ranges(parts):
-    """Issue ID ranges [low, high) to read the parts' quotes by, each about PIECE_ROWS rows across the parts (from
-    their depths row groups' statistics: write_part gives each PART_ISSUES issue IDs their own)."""
-    blocks = {}
+def _leaves(type_):
+    """How many columns of a Parquet file a field of this Arrow type takes (a list or struct takes its items')."""
+    if pa.types.is_list(type_):
+        return _leaves(type_.value_type)
+    if pa.types.is_struct(type_):
+        return sum(_leaves(type_.field(i).type) for i in range(type_.num_fields))
+    return 1
+
+
+def leaf_index(schema, name):
+    """The index of a top-level column among a file's columns (nested ones, such as the books, take several). Not
+    asked of the file: its schema's column(c).path keeps some 0.8 MB of memory for every call, and a piece reads
+    the footers of a thousand parts."""
+    index = 0
+    for field in schema:
+        if field.name == name:
+            return index
+        index += _leaves(field.type)
+    raise KeyError(name)
+
+
+def _layout(parts, name):
+    """Where each issue lies in a table of the parts: per part, the lowest and highest issue ID of each of its row
+    groups (write_part gives each PART_ISSUES issue IDs their own), and the rows each block of PART_ISSUES holds
+    across the parts."""
+    spans, blocks, column = [], {}, leaf_index(SCHEMAS[name], 'issue_id')
     for part in parts:
-        meta = pq.ParquetFile(Path(part) / DEPTHS).metadata
-        column = next(c for c in range(meta.num_columns) if meta.schema.column(c).path == 'issue_id') if meta.num_row_groups else None
+        meta = pq.read_metadata(Path(part) / name)
+        low, high = np.zeros(meta.num_row_groups, np.int64), np.full(meta.num_row_groups, 2**62, np.int64)
+        rows = np.zeros(meta.num_row_groups, np.int64)
         for g in range(meta.num_row_groups):
             stats = meta.row_group(g).column(column).statistics
-            block = stats.min // PART_ISSUES if stats is not None and stats.has_min_max else 0
-            blocks[block] = blocks.get(block, 0) + meta.row_group(g).num_rows
+            if stats is not None and stats.has_min_max:
+                low[g], high[g] = stats.min, stats.max
+            rows[g] = meta.row_group(g).num_rows
+            blocks[low[g] // PART_ISSUES] = blocks.get(low[g] // PART_ISSUES, 0) + rows[g]
+        spans.append((low, high, rows))
+    return spans, blocks
+
+
+def _ranges(blocks):
+    """Issue ID ranges [low, high) of about PIECE_ROWS rows each, from the rows of each block (see _layout)."""
     ranges, low, rows = [], 0, 0
     for block in sorted(blocks):
         rows += blocks[block]
@@ -1047,9 +1078,32 @@ def _ranges(parts):
     return [*ranges, (low, 2**63 - 1)]
 
 
+def _read_range(parts, spans, name, low, high, chunk=None):
+    """The tables of the parts' rows of `name` of issues in [low, high), the parts' one after another: only the
+    row groups whose issue IDs can match are read, each part's file opened once, and as many parts' at a time as hold
+    `chunk` rows (all of them by default)."""
+    tables, rows = [], 0
+    for part, (first, last, count) in zip(parts, spans):
+        groups = np.flatnonzero((last >= low) & (first < high))
+        if len(groups):
+            file = pq.ParquetFile(Path(part) / name)
+            try:
+                tables.append(file.read_row_groups(groups.tolist()))
+            finally:
+                file.close()
+                del file
+            rows += int(count[groups].sum())
+            if chunk is not None and rows >= chunk:
+                yield pa.concat_tables(tables)
+                tables, rows = [], 0
+    if tables:
+        yield pa.concat_tables(tables)
+
+
 def write_piece(equity, parts, directory, midnight, cut=None, bootstrap=None, end=None):
     """Write consecutive spooled parts as one recording in `directory`, a range of issues from every part at a
-    time, so that no day is ever whole in memory: the same tables as their Columns written at once (load_parts,
+    time, and its batches a row group at a time, so that no day is ever whole in memory (a piece of the day is some
+    60 million quote updates and a million batches): the same tables as their Columns written at once (load_parts,
     then `after` a cut, then their end, then Columns.write), which tests/test_spool.py checks.
 
     `cut` and `bootstrap` (the day's bootstrap row): a piece that starts after a cut (see after()). `end`: None for
@@ -1059,15 +1113,26 @@ def write_piece(equity, parts, directory, midnight, cut=None, bootstrap=None, en
     for name in FILES:
         (directory / name).parent.mkdir(parents=True, exist_ok=True)
     master = _decode_equity(pq.read_table(equity))
-    rows = [b for part in parts for b in _decode_batches(pq.read_table(Path(part) / BATCHES), midnight)]
-    require(rows, 'Recording has no bootstrap')
-    first_seq = rows[0]['seq']
-    counts = [np.zeros(len(rows), np.int64), np.zeros(len(rows), np.int64)]
+    # The batches' small tables, once, for what the whole needs: where it starts and ends, each batch's kind and
+    # the first and last local receipt time (an end repaired, or recounted, needs them).
+    first = last = None
+    kinds, received = [], [None, None]
+    for part in parts:
+        batches = _decode_batches(pq.read_table(Path(part) / BATCHES), midnight)
+        first, last = first or batches[0], batches[-1]
+        kinds.append(np.array([KINDS[b['type']] for b in batches], np.int8))
+        for b in batches:
+            if b['type'] == 'quotes' and b.get('received_unix_ms') is not None:
+                received[0] = b['received_unix_ms'] if received[0] is None else received[0]
+                received[1] = b['received_unix_ms']
+    require(first is not None, 'Recording has no bootstrap')
+    kinds, first_seq = np.concatenate(kinds), first['seq']
+    counts = [np.zeros(len(kinds), np.int64), np.zeros(len(kinds), np.int64)]
     for part in parts:
         for i, name in enumerate((DEPTHS, TRADES)):
             seqs = _numbers(pq.read_table(Path(part) / name, columns=['seq']).column('seq')) - first_seq
-            counts[i] += _per_batch(seqs, len(rows))
-    shift, head = 0, None
+            counts[i] += _per_batch(seqs, len(kinds))
+    shift, head, quoted = 0, None, set()
     if cut is not None:
         shift = first_seq - 1
         head = {k: v for k, v in bootstrap.items() if k != SKIPPED} | {'seq': 0, 'source_time_us': cut.clock}
@@ -1075,79 +1140,118 @@ def write_piece(equity, parts, directory, midnight, cut=None, bootstrap=None, en
         skipped = sorted(m['issue_id'] for m in master if m['issue_id'] not in quoted)
         if skipped:
             head[SKIPPED] = skipped
-        rows = [head, *(dict(b, seq=b['seq'] - shift) for b in rows)]
+        kinds = np.concatenate([[KINDS['bootstrap']], kinds]).astype(np.int8)
         counts = [np.concatenate([[len(quoted)], counts[0]]), np.concatenate([[0], counts[1]])]
     else:
-        require(rows[0]['type'] == 'bootstrap', 'Recording has no bootstrap')
-    repaired = False
-    if end == 'cut' or (end == 'repair' and rows[-1]['type'] != 'end'):
-        rows.append(_end(rows, counts[0]))
-        counts = [np.append(c, 0) for c in counts]
-        repaired = end == 'repair'
-    elif cut is not None and rows[-1]['type'] == 'end':
-        rows[-1] = dict(rows[-1], quote_updates=_updates(rows, counts[0]))
-    t, t_code = _no_trades()
-    shell = Columns(None, None, None, master, rows, t, t_code)
+        require(first['type'] == 'bootstrap', 'Recording has no bootstrap')
+    updates = int(counts[0][kinds == KINDS['quotes']].sum())
+    last = dict(last, seq=last['seq'] - shift)
+    tail, recount, repaired = None, False, False
+    if end == 'cut' or (end == 'repair' and last['type'] != 'end'):
+        tail = {'type': 'end', 'seq': last['seq'] + 1, 'source_time_us': last['source_time_us'], 'frames': last['seq'],
+                'quote_updates': updates,
+                'replay_wall_ms': float(received[1] - received[0]) if received[0] is not None else 0.0}
+        counts, repaired = [np.append(c, 0) for c in counts], end == 'repair'
+        kinds = np.append(kinds, KINDS['end']).astype(np.int8)
+    elif cut is not None and last['type'] == 'end':
+        recount, last = True, dict(last, quote_updates=updates)
+    final = tail or last
+    require(final['type'] == 'end', 'Recording has no clean end')
+    total = len(kinds)
+    from_parts = total - (head is not None) - (tail is not None)   # batches that come from the parts
+
+    def batch_rows():
+        """The piece's batches in order: its head, the parts' (numbered on from it), its end."""
+        at = 0
+        if head is not None:
+            yield head
+        for part in parts:
+            for b in _decode_batches(pq.read_table(Path(part) / BATCHES), midnight):
+                at += 1
+                b = dict(b, seq=b['seq'] - shift) if shift else b
+                yield dict(b, quote_updates=updates) if recount and at == from_parts else b
+        if tail is not None:
+            yield tail
+
+    shell = Columns(None, None, None, master, [], *_no_trades())
+    expanded, quote_rows, latest, quote_bytes, trade_bytes = 0, 0, [], 0, 0
     try:
         pq.write_table(shell._equity(midnight), directory / EQUITY, row_group_size=ROW_GROUP, **options(EQUITY))
-        pq.write_table(shell._batches(midnight), directory / BATCHES, row_group_size=ROW_GROUP, **options(BATCHES))
-        depths, latest, quote_bytes, quote_rows = _DepthWriter(directory / DEPTHS, midnight), [], 0, 0
-        for low, high in _ranges(parts):
+        batch_writer = _TableWriter(directory / BATCHES, BATCH_SCHEMA, BATCHES)
+        chunk, at, first_row = [], 0, None
+        for row in batch_rows():
+            first_row = first_row or row
+            chunk.append(row)
+            if len(chunk) == ROW_GROUP:
+                batch_writer.add(Columns(None, None, None, master, chunk, *_no_trades())._batches(midnight))
+                expanded += batch_lengths(chunk, master, counts[0][at:at + len(chunk)], counts[1][at:at + len(chunk)])
+                at, chunk = at + len(chunk), []
+        if chunk:
+            batch_writer.add(Columns(None, None, None, master, chunk, *_no_trades())._batches(midnight))
+            expanded += batch_lengths(chunk, master, counts[0][at:], counts[1][at:])
+        batch_writer.close()
+        depth_spans, blocks = _layout(parts, DEPTHS)
+        trade_spans, _ = _layout(parts, TRADES)
+        depths, trades = _TableWriter(directory / DEPTHS, DEPTH_SCHEMA, DEPTHS), _TableWriter(directory / TRADES, TRADE_SCHEMA, TRADES)
+        for low, high in _ranges(blocks):
             pieces = []
-            for part in parts:
-                source = pq.ParquetFile(Path(part) / DEPTHS)
-                meta = source.metadata
-                column = next((c for c in range(meta.num_columns) if meta.schema.column(c).path == 'issue_id'), None)
-                groups = [g for g in range(meta.num_row_groups)
-                          if not ((stats := meta.row_group(g).column(column).statistics) is not None and stats.has_min_max
-                                  and (stats.max < low or stats.min >= high))]
-                if groups:
-                    part_rows = _depth_rows(source.read_row_groups(groups), midnight, master)
-                    issue = part_rows.q['issue_id']
-                    part_rows = _rows(part_rows, np.flatnonzero((issue >= low) & (issue < high)))
-                    part_rows.q['seq'] = part_rows.q['seq'] - shift
-                    pieces.append(part_rows)
+            for raw in _read_range(parts, depth_spans, DEPTHS, low, high, DECODE_ROWS):
+                rows = _depth_rows(raw, midnight, master)   # decoded to numpy, a few parts at a time
+                del raw
+                issue = rows.q['issue_id']
+                if not ((issue >= low) & (issue < high)).all():
+                    rows = _rows(rows, np.flatnonzero((issue >= low) & (issue < high)))
+                rows.q['seq'] = rows.q['seq'] - shift
+                pieces.append(rows)
             if cut is not None and cut.latest is not None:
                 issue = cut.latest.q['issue_id']
                 state = _rows(cut.latest, np.flatnonzero((issue >= low) & (issue < high)))
                 state.q['seq'] = np.zeros(len(state), np.int64)
                 pieces.insert(0, state)
-            if not pieces:
-                continue
-            joined = Columns.concat([Columns(r.q, r.code, r.books, master, [], *_no_trades()) for r in pieces], master)
-            ordered = _rows(joined, joined.order)
-            if not len(ordered):
-                continue
-            depths.add(ordered)
-            quote_bytes += int(quote_lengths(ordered).sum())
-            quote_rows += len(ordered)
-            issues = ordered.q['issue_id']
-            last = np.ones(len(issues), bool)
-            last[:-1] = issues[1:] != issues[:-1]
-            latest.append(_rows(ordered, np.flatnonzero(last)))
+            if pieces:
+                joined = pieces[0] if len(pieces) == 1 else Columns.concat(
+                    [Columns(r.q, r.code, r.books, master, [], *_no_trades()) for r in pieces], master)
+                del pieces, rows
+                order = joined.order if joined.order is not None else np.lexsort((joined.q['seq'], joined.q['issue_id']))
+                issues = joined.q['issue_id'][order]
+                newest = np.ones(len(issues), bool)
+                newest[:-1] = issues[1:] != issues[:-1]
+                latest.append(_rows(joined, order[newest]))
+                for start in range(0, len(order), ROW_GROUP):   # written a row group at a time: never whole as Arrow
+                    ordered = _rows(joined, order[start:start + ROW_GROUP])
+                    depths.add(ordered._depths(midnight))
+                    quote_bytes += int(quote_lengths(ordered).sum())
+                    quote_rows += len(ordered)
+                del joined, order, issues
+            for raw in _read_range(parts, trade_spans, TRADES, low, high):
+                t, t_code = _decode_trades(raw, midnight)
+                del raw
+                keep = np.flatnonzero((t['issue_id'] >= low) & (t['issue_id'] < high))
+                t, t_code = {k: v[keep] for k, v in t.items()}, t_code[keep]
+                t['seq'] = t['seq'] - shift
+                order = np.lexsort((np.arange(len(t_code)), t['seq'], t['issue_id']))
+                rows = Columns(None, None, None, master, [], {k: v[order] for k, v in t.items()}, t_code[order])
+                if len(t_code):
+                    trades.add(rows._trades(midnight, slice(None)))
+                    trade_bytes += int(trade_lengths(rows.t, rows.t_code).sum())
+                del rows, t, t_code
+            # A footer or a table is a little Python object around a lot of C++ memory, so the collector, which
+            # counts objects, seldom runs: without this a piece took gigabytes more than it holds.
+            gc.collect()
+            pa.default_memory_pool().release_unused()   # and Arrow's allocator keeps what it freed, too
         depths.close()
-        trades = [_decode_trades(pq.read_table(Path(part) / TRADES), midnight) for part in parts]
-        t = {k: np.concatenate([x[0][k] for x in trades]) for k in TRADE_INTS} if trades else _no_trades()[0]
-        t_code = np.concatenate([x[1] for x in trades]) if trades else _no_trades()[1]
-        t['seq'] = t['seq'] - shift
-        order = np.lexsort((np.arange(len(t_code)), t['seq'], t['issue_id']))
-        trade_rows = Columns(None, None, None, master, rows, {k: v[order] for k, v in t.items()}, t_code[order])
-        with pq.ParquetWriter(directory / TRADES, TRADE_SCHEMA, **options(TRADES)) as writer:
-            for start in range(0, len(trade_rows.t_code), ROW_GROUP):
-                writer.write_table(trade_rows._trades(midnight, slice(start, start + ROW_GROUP)), row_group_size=ROW_GROUP)
+        trades.close()
     except (TypeError, OverflowError) as error:
         raise ValueError(f'Invalid recording value: {error}') from None
-    require(rows[-1]['type'] == 'end', 'Recording has no clean end')
-    expanded = (batch_lengths(rows, master, counts[0], counts[1]) + quote_bytes
-                + int(trade_lengths(trade_rows.t, trade_rows.t_code).sum()))
-    summary = dict(source=rows[0]['source'], trading_date=rows[0]['trading_date'], first_source_time_us=rows[0]['source_time_us'],
-                   last_source_time_us=rows[-1]['source_time_us'], codes=sorted(m['code'] for m in master),
-                   batches=len(rows), quote_updates=quote_rows, expanded_bytes=expanded)
+    first_row = first_row or head
+    summary = dict(source=first_row['source'], trading_date=first_row['trading_date'], first_source_time_us=first_row['source_time_us'],
+                   last_source_time_us=final['source_time_us'], codes=sorted(m['code'] for m in master),
+                   batches=total, quote_updates=quote_rows, expanded_bytes=expanded + quote_bytes + trade_bytes)
     state = None
     if latest:
         state = Columns.concat([Columns(r.q, r.code, r.books, master, [], *_no_trades()) for r in latest], master)
         state = _rows(state, state.order)
-    return summary, state, rows[-1]['source_time_us'], repaired
+    return summary, state, final['source_time_us'], repaired
 
 
 def state(directory, limit=None) -> dict[int, dict]:
@@ -1175,7 +1279,7 @@ def part_index(part, midnight):
     part = Path(part)
     batches = pq.read_table(part / BATCHES, columns=['kind', 'ts_event'])
     clocks = (_numbers(batches.column('ts_event')) - midnight) // 1000
-    return {'rows': pq.ParquetFile(part / DEPTHS).metadata.num_rows, 'end': batches.column('kind')[-1].as_py() == 'end',
+    return {'rows': pq.read_metadata(part / DEPTHS).num_rows, 'end': batches.column('kind')[-1].as_py() == 'end',
             'first': int(clocks[0]), 'last': int(clocks[-1])}
 
 

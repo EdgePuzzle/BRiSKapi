@@ -278,6 +278,7 @@ def test_a_day_ships_its_morning_once_a_part_closes_after_noon_and_its_afternoon
 def test_a_piece_written_a_range_of_issues_at_a_time_is_the_same_as_written_at_once(tmp_path, monkeypatch):
     monkeypatch.setattr(_parquet, 'PIECE_ROWS', 3)   # many ranges
     monkeypatch.setattr(_parquet, 'PART_ISSUES', 1)
+    monkeypatch.setattr(_parquet, 'DECODE_ROWS', 4)   # and each decoded a few parts at a time
     spool = spooled(tmp_path, session())
     spool.close_part(wait=True)
     parts, equity = spool.parts(), spool.path / _parquet.EQUITY
@@ -311,3 +312,15 @@ def test_a_crashed_spool_ships_what_is_left_from_where_it_was(tmp_path, monkeypa
         assert _parquet.inspect_package(directory, manifest) == manifest['summary']
     shipped = {k for d in [tmp_path / 'first', *(d for d, *_ in rest)] for k in _content(d)[0]}
     assert len(shipped) == sum(len(b.get('quotes', ())) for b in batches[1:])
+
+
+def test_the_issue_column_is_found_from_our_schema_as_the_file_says_it():
+    """A file's own schema is not asked (each call keeps some 0.8 MB): the position comes from the Arrow schema."""
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    spool = spooled(__import__('pathlib').Path(tmp), session())
+    spool.close_part(wait=True)
+    for name in (_parquet.DEPTHS, _parquet.TRADES):
+        meta = _parquet.pq.read_metadata(spool.parts()[0] / name)
+        found = next(c for c in range(meta.num_columns) if meta.schema.column(c).path == 'issue_id')
+        assert _parquet.leaf_index(_parquet.SCHEMAS[name], 'issue_id') == found
