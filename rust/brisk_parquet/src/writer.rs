@@ -44,6 +44,39 @@ pub fn properties(name: &str, row_group: usize) -> WriterProperties {
     builder.build()
 }
 
+/// How a spool part's tables are written: quickly (zstd level 1), with the statistics of the issue alone, as the part is read
+/// again for each range of issues and then thrown away.
+pub fn part_properties(name: &str, row_group: usize) -> WriterProperties {
+    let pairs: Vec<KeyValue> = {
+        let mut pairs: Vec<KeyValue> = schema::expected(name, false)
+            .metadata()
+            .iter()
+            .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+            .collect();
+        pairs.sort_by(|a, b| a.key.cmp(&b.key));
+        pairs
+    };
+    let mut builder = WriterProperties::builder()
+        .set_key_value_metadata(Some(pairs))
+        .set_compression(Compression::ZSTD(
+            ZstdLevel::try_new(1).expect("a valid zstd level"),
+        ))
+        .set_writer_version(WriterVersion::PARQUET_1_0)
+        .set_statistics_enabled(EnabledStatistics::None)
+        .set_dictionary_enabled(true)
+        .set_offset_index_disabled(true)
+        .set_max_row_group_row_count(Some(row_group));
+    builder = builder
+        .set_column_statistics_enabled(ColumnPath::from("issue_id"), EnabledStatistics::Chunk);
+    for column in schema::deltas(name) {
+        let path = ColumnPath::from(*column);
+        builder = builder
+            .set_column_encoding(path.clone(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_dictionary_enabled(path, false);
+    }
+    builder.build()
+}
+
 pub type TableWriter = ArrowWriter<BufWriter<File>>;
 
 /// A writer for the table `name` under `directory` (its folders made).

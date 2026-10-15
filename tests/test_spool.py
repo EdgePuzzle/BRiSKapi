@@ -67,23 +67,19 @@ def small_parts(monkeypatch):
     monkeypatch.setattr(_spool, 'PART_BYTES', _spool.PART_BYTES)
 
 
-def same_tables(left, right):
+def same_tables(left, right, names=_parquet.FILES):
     """Two recordings' tables hold the same rows (aggressor sides as the strings they stand for): the tables are written by
     brisk-parquet and by pyarrow, which do not write the same bytes."""
     plain = lambda table: table.set_column(2, 'aggressor_side', table.column(2).cast(pa.string()))  # noqa: E731
-    for name in _parquet.FILES:
+    for name in names:
         a, b = pq.read_table(left / name), pq.read_table(right / name)
         if name == _parquet.TRADES:
             a, b = plain(a), plain(b)
         assert a.equals(b), name
 
 
-@pytest.mark.parametrize('slices, gil', [(16, False), (1, False), (1, True)])
-def test_a_spooled_segment_packages_to_the_same_tables_as_its_batches_at_once(tmp_path, monkeypatch, slices, gil):
-    # Parts built in slices on threads (1: a slice from every line), or one at a time with the GIL; the package's
-    # summary is the columns' own, which must be the one the archive's checks give (cli.package's).
-    monkeypatch.setattr(_parquet, 'SLICE_LINES', slices)
-    monkeypatch.setattr(_parquet.sys, '_is_gil_enabled', lambda: gil)
+def test_a_spooled_segment_packages_to_the_same_tables_as_its_batches_at_once(tmp_path):
+    # The package's summary is counted as it is written, and must be the one the archive's checks give (cli.package's).
     batches = session()
     (tmp_path / 'events.jsonl').write_bytes(b''.join(lines(batches)))
     whole = cli.package(tmp_path / 'events.jsonl', tmp_path / 'whole')
@@ -190,7 +186,7 @@ def test_a_damaged_spool_is_left_for_a_look(tmp_path):
 
 
 def test_a_failed_part_write_stops_the_feed(tmp_path, monkeypatch):
-    monkeypatch.setattr(_parquet, 'write_part', lambda *a: 1 / 0)
+    monkeypatch.setattr(_spool._native, 'part', lambda *a, **k: 1 / 0)
     _spool.PART_BYTES, spool = 1, _spool.Spool(root=tmp_path / 'spool')
     batches = session()
     spool.add(batches[0], lines(batches)[0])

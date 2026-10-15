@@ -253,3 +253,45 @@ def test_a_piece_written_a_range_of_issues_at_a_time_is_the_same_as_written_at_o
     monkeypatch.setattr(reference_package, 'DECODE_ROWS', 4)
     result = two_ways(tmp_path, segment, segment.parts(), k=len(segment.parts()) // 2, range_rows=3)
     assert json.loads(_native.run(['verify', tmp_path / 'rust'])) == result['summary']
+
+
+# Parts: the decoder's JSON lines as the tables of a spool part
+
+from briskapi.schema import canonical_batches  # noqa: E402
+import io  # noqa: E402
+
+
+def python_part(tmp_path, lines_, header):
+    """The part Python writes from these lines (trade IDs counted within the part)."""
+    columns = reference_package.part_columns(lines_, header)()
+    reference_package.write_part(columns, header, tmp_path / 'python', None)
+    return tmp_path / 'python'
+
+
+def part_header(first_line):
+    header = {k: v for k, v in next(canonical_batches(io.BytesIO(first_line))).items() if k != schema.SKIPPED}
+    return header | {'master': [], 'quotes': [], 'trades': []}
+
+
+def test_a_part_is_the_same_tables_python_writes(tmp_path):
+    from test_spool import lines as as_lines
+    batches = session()
+    every = as_lines(batches)
+    header = part_header(every[0])
+    midnight = _parquet.midnight_ns(header['trading_date'])
+    for name, chunk in (('whole', every), ('later', every[5:20]), ('end', every[-4:]), ('one', every[:1])):
+        target = tmp_path / name
+        python = python_part(tmp_path / name, chunk, header)
+        counts = _native.part(chunk, target / 'rust', midnight)
+        same_tables(target / 'rust', python, (_parquet.BATCHES, _parquet.DEPTHS, _parquet.TRADES))
+        assert counts['batches'] == len(chunk)
+
+
+def test_a_line_that_is_not_a_batch_is_refused(tmp_path):
+    from test_spool import lines as as_lines
+    every = as_lines(session())
+    midnight = _parquet.midnight_ns('20260311')
+    for bad, message in ((b'{"type":"quotes"}\n', 'Unknown or missing batch fields'), (b'not json\n', 'Invalid batch'),
+                         (every[3].replace(b'"issue_id": 0', b'"issue_id": -1', 1), 'negative')):
+        with pytest.raises(ValueError, match=message):
+            _native.part([every[2], bad], tmp_path / 'bad', midnight)

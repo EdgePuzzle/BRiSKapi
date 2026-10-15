@@ -166,11 +166,12 @@ kept only for that is not packaged). The spool is the recording's own Parquet ta
 at a time, under `~/.local/share/brisk/spool/segment-ID/`: the equity table with the
 bootstrap, then `parts/NNNNNN/` with the depths, trades and batch tables of the batches since
 the last part. A part closes every `PART_SECONDS` (30), or after `PART_BYTES` (64 MiB) of decoder
-output, and at the segment's end. Its lines are parsed, made canonical as `package()` makes them
-(so no connection diagnostic reaches the disk) and turned into columns from the moment it closes
-(`part_columns`; without the GIL in slices, on up to `_parquet._THREADS` threads: a third of the
-cores, at most four, as the feed and its host come first); a writer thread of its own then writes the
-parts in order (`write_part`, which numbers trades on from the part before), fsyncs each and renames
+output, and at the segment's end. Its lines go to `brisk-parquet part`, which parses them into column
+buffers on a few threads (a third of the cores, at most six, as the feed and its host come first), makes them canonical as
+`package()` makes them (so no connection diagnostic reaches the disk), sorts the rows by issue and batch and writes the tables, a
+row group of depths to a block of `PART_ISSUES` issues, with the statistics of the issue alone (a day's thousand parts are
+read again for each range of issues): a part of 50,000 quote updates takes about 0.15 seconds, where Python took 1.5. A writer
+thread of its own writes the parts in order, fsyncs each and renames
 it into place, so a crash loses at most the part still open. A day's
 parts take about the disk of its recording; its decoded JSON, which the feed used to keep in a
 temporary file, takes some twenty times more. At the day's end the feed hands the spool to a
@@ -717,11 +718,9 @@ fill the memory when the reader falls that far behind. A worker's decoder holds 
 Parsing the host's lines is most of the Python feed's work (about 9 µs a quote update on one
 thread). Without the GIL (free-threaded Python 3.14) one thread reads the pipe a chunk at a
 time (up to 1 MB), `PARSERS` threads (up to four) parse the chunks, and the feed's thread
-applies the batches in order; the spool builds its Parquet parts on threads of its own (above). With
+applies the batches in order; the spool writes its Parquet parts in a program of its own (above). With
 the GIL, the lines are read and parsed one at a time, and the spool's thread takes turns with
-the reader. Threads that share a `set` take its lock on every use, so code run on several threads
-(`Columns.from_batches`) compares with copies of its own: with the shared key sets eight threads
-built columns 1.3 times as fast as one, with copies 2.7 times. On an M5 Pro, the demo's whole replay, served as fast as it is taken, goes through
+the reader. On an M5 Pro, the demo's whole replay, served as fast as it is taken, goes through
 it all (the host and its workers, the feed recording to disk and serving the gateway) at about
 61,000 quote updates a second without workers and 236,000 with 4 (more do not add); a live
 open sends some 130,000. Slower cores take fewer: there the opening can fall a few seconds

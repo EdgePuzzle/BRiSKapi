@@ -26,31 +26,60 @@ def binary() -> str:
     raise RuntimeError(f'{NAME} is not installed: reinstall briskapi, or build it with cargo build --release --manifest-path rust/brisk_parquet/Cargo.toml')
 
 
-def run(arguments, progress=None) -> str:
+def run(arguments, progress=None, lines=None) -> str:
     """Run `brisk-parquet` and return what it prints. `progress(label)` is told of each `progress: label` line as it
-    comes. A recording it refuses raises ValueError with its message; any other failure, RuntimeError."""
-    process = subprocess.Popen([binary(), *map(str, arguments)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    lines = []
+    comes; `lines` (an iterable of bytes) is what it reads. A recording it refuses raises ValueError with its message; any
+    other failure, RuntimeError."""
+    process = subprocess.Popen([binary(), *map(str, arguments)], stdin=subprocess.PIPE if lines is not None else None,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=lines is None)
+    messages = []
 
     def watch():
         for line in process.stderr:
+            line = line.decode(errors='replace') if isinstance(line, bytes) else line
             line = line.rstrip('\n')
             if line.startswith('progress: '):
                 if progress:
                     progress(line[len('progress: '):])
             else:
-                lines.append(line)
-    reader = threading.Thread(target=watch, daemon=True)
-    reader.start()
+                messages.append(line)
+
+    def feed():
+        try:
+            for line in lines:
+                process.stdin.write(line if line.endswith(b'\n') else line + b'\n')
+        except BrokenPipeError:
+            pass   # it stopped reading: its exit says why
+        finally:
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
+    readers = [threading.Thread(target=watch, daemon=True)]
+    if lines is not None:
+        readers.append(threading.Thread(target=feed, daemon=True))
+    for reader in readers:
+        reader.start()
     out = process.stdout.read()
     process.wait()
-    reader.join()
+    for reader in readers:
+        reader.join()
+    out = out.decode() if isinstance(out, bytes) else out
     if process.returncode == 0:
         return out
-    message = '\n'.join(lines)
+    message = '\n'.join(messages)
     if process.returncode == 2 and message.startswith('refused: '):
         raise ValueError(message[len('refused: '):])
     raise RuntimeError(message or f'{NAME} failed ({process.returncode})')
+
+
+def part(lines, out, midnight, threads=None):
+    """Write the decoder's JSON lines (bytes, each with its newline) as a spool part in the folder `out`: the depths, trades
+    and batch tables, rows sorted by issue and batch. `midnight` is the day's start in UTC nanoseconds. Returns the counts."""
+    arguments = ['part', '--out', out, '--midnight', midnight]
+    if threads:
+        arguments += ['--threads', threads]
+    return json.loads(run(arguments, lines=lines))
 
 
 def package(spool, parts, out, midnight, *, day_start=None, cut=None, end='parts', state_out=None, threads=None, range_rows=None):

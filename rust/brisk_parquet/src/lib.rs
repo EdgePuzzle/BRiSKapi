@@ -8,6 +8,7 @@ pub mod error;
 pub mod files;
 pub mod master;
 pub mod package;
+pub mod part;
 pub mod parts;
 pub mod rows;
 pub mod schema;

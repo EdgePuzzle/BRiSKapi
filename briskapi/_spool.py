@@ -85,6 +85,7 @@ class Spool:
         self.intent = intent
         (self.path / 'owner.json').write_text(json.dumps({'pid': os.getpid(), 'started': time.time(), 'intent': intent}))
         self.header = None        # the bootstrap without quotes and trades
+        self._midnight = None     # its day's start, UTC nanoseconds
         self.master = None
         self.ended = False
         self.count = 0            # lines so far
@@ -92,7 +93,6 @@ class Spool:
         self._lines, self._size, self._opened = [], 0, time.monotonic()
         self._pending = []        # [(first line, lines)] handed to the writer, not yet closed
         self._parts = []          # [(folder, first line, end line)] closed
-        self._carry = {}          # trade IDs across parts
         self._writer = ThreadPoolExecutor(1, thread_name_prefix='brisk-spool')
         self._error = None
         self._readers, self._removed = 0, False
@@ -105,11 +105,11 @@ class Spool:
         """A spool a stopped process left: its closed parts, to package or keep."""
         spool = cls.__new__(cls)
         spool.path, spool.intent, spool.header, spool.master, spool.ended, spool.count = Path(folder), intent, None, None, False, 0
-        spool._lock, spool._lines, spool._size, spool._pending, spool._carry = threading.Lock(), [], 0, [], {}
+        spool._lock, spool._lines, spool._size, spool._pending = threading.Lock(), [], 0, []
         parts = sorted(p for p in (spool.path / 'parts').glob('[0-9]*') if p.is_dir()) if (spool.path / 'parts').is_dir() else []
         spool._parts = [(part, 0, 0) for part in parts]
         spool._writer, spool._error, spool._readers, spool._removed = ThreadPoolExecutor(1), None, 0, False
-        spool._opened = time.monotonic()
+        spool._opened, spool._midnight = time.monotonic(), None
         spool._on_part, spool._cut, spool._cut_at, spool._index, spool.last_parts, spool._last_piece = None, None, 0, {}, [], None
         try:
             spool._shipped = min(int(json.loads((spool.path / 'shipped.json').read_text())['parts']), len(parts))
@@ -127,6 +127,7 @@ class Spool:
             # As a recording keeps it: fixed transport provenance only, never connection diagnostics.
             batch = next(canonical_batches(io.BytesIO(line)))
             self.header = {k: v for k, v in batch.items() if k != SKIPPED} | {'master': [], 'quotes': [], 'trades': []}
+            self._midnight = _parquet.midnight_ns(batch['trading_date'])
             self.master = batch['master']
             equity = self.path / _parquet.EQUITY
             equity.parent.mkdir(parents=True, exist_ok=True)
@@ -149,14 +150,13 @@ class Spool:
                 self._pending.append((first, lines))
                 number = len(self._parts) + len(self._pending)
         if lines:
-            # Built from now on (on threads, without the GIL), while earlier parts are written in order.
-            self._writer.submit(self._write, number, first, lines, _parquet.part_columns(lines, self.header))
+            self._writer.submit(self._write, number, first, lines)
         if wait:
             self._writer.submit(lambda: None).result()
             if self._error:
                 raise self._error
 
-    def _write(self, number, first, lines, columns):
+    def _write(self, number, first, lines):
         if self._error:
             return
         try:
@@ -164,7 +164,7 @@ class Spool:
             staging = folder.with_name(f'.{folder.name}')
             shutil.rmtree(staging, ignore_errors=True)
             # Canonical, as package() makes them: nothing of the connection's diagnostics reaches the disk.
-            _parquet.write_part(columns(), self.header, staging, self._carry)
+            _native.part(lines, staging, self._midnight, threads=_native.threads())
             for name in (_parquet.BATCHES, _parquet.DEPTHS, _parquet.TRADES):
                 _fsync(staging / name)
             os.replace(staging, folder)

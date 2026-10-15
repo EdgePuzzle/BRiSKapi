@@ -25,6 +25,7 @@ arrow-select = "59"
 mimalloc = { version = "0.1", default-features = false }
 parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
 rayon = "1.11"
+serde = "1"
 serde_json = "1"
 
 [profile.release]

@@ -139,6 +139,7 @@ dependencies = [
  "mimalloc",
  "parquet",
  "rayon",
+ "serde",
  "serde_json",
 ]
 

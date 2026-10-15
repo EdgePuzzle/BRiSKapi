@@ -13,6 +13,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_writer::{ArrowColumnChunk, ArrowRowGroupWriterFactory, compute_leaves};
 use parquet::column::writer::ColumnCloseResult;
 use parquet::data_type::{ByteArray, FixedLenByteArray};
+use parquet::file::properties::WriterProperties;
 use parquet::file::statistics::{Statistics, ValueStatistics};
 use parquet::file::writer::SerializedFileWriter;
 
@@ -69,18 +70,32 @@ impl Sink {
         pool: Arc<rayon::ThreadPool>,
         stage: Stage,
     ) -> Res<Sink> {
+        Sink::create_with(
+            directory,
+            name,
+            writer::properties(name, row_group),
+            row_group,
+            pool,
+            stage,
+        )
+    }
+
+    /// A sink with its own writer properties (`row_group` rows to a row group, unless rows are given by `push_group`).
+    pub fn create_with(
+        directory: &Path,
+        name: &str,
+        properties: WriterProperties,
+        row_group: usize,
+        pool: Arc<rayon::ThreadPool>,
+        stage: Stage,
+    ) -> Res<Sink> {
         let path = directory.join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let schema: SchemaRef = Arc::new(schema::expected(name, false));
         let file = BufWriter::with_capacity(1 << 20, File::create(path)?);
-        let writer = ArrowWriter::try_new(
-            file,
-            schema.clone(),
-            Some(writer::properties(name, row_group)),
-        )
-        .map_err(fault)?;
+        let writer = ArrowWriter::try_new(file, schema.clone(), Some(properties)).map_err(fault)?;
         let (file, factory) = writer.into_serialized_writer().map_err(fault)?;
         // Each job in flight holds its rows twice (the pieces it was cut from, and its own copy): as many as there are threads.
         let limit = pool.current_num_threads().max(2);
@@ -126,6 +141,15 @@ impl Sink {
             }
             self.carried -= self.row_group;
             self.submit(slices)?;
+        }
+        Ok(())
+    }
+
+    /// These rows as a row group of their own, whatever their number.
+    pub fn push_group(&mut self, batch: RecordBatch) -> Res<()> {
+        if batch.num_rows() > 0 {
+            self.rows += batch.num_rows() as u64;
+            self.submit(vec![batch])?;
         }
         Ok(())
     }

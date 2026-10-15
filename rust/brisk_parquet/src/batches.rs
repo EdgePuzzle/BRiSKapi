@@ -47,7 +47,7 @@ pub fn is_broker(source: &str) -> bool {
 }
 
 /// The transport provenance a broker's recording of this source may have.
-fn transports(source: &str) -> Vec<Value> {
+pub fn transports(source: &str) -> Vec<Value> {
     let site = |i: usize| json!({"kind": SITES[i].0, "origin": SITES[i].1});
     if let Some((_, i)) = LEGACY.iter().find(|(s, _)| *s == source) {
         return vec![site(*i)];

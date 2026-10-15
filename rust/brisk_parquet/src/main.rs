@@ -4,6 +4,7 @@
 //!     brisk-parquet package --spool DIR --midnight NS --out DIR [--day-start PART] [--cut-state FILE --cut-clock US]
 //!                           [--end parts|cut|repair] [--state-out FILE] [--threads N] [--range-rows N] PART...
 //!     brisk-parquet state --spool DIR --midnight NS --state-out FILE [--cut-state FILE --cut-clock US] [--day-start PART] PART...
+//!     brisk-parquet part --out DIR --midnight NS [--threads N]    (the decoder's JSON lines on stdin)
 //!     brisk-parquet schemas DIRECTORY
 //!
 //! Each prints a JSON result on stdout, and `progress: ...` lines on stderr. A recording that breaks a rule exits 2 with
@@ -14,6 +15,7 @@ use std::process::ExitCode;
 
 use brisk_parquet::error::{Failure, Res};
 use brisk_parquet::package::{Config, Cut, End, package};
+use brisk_parquet::part::{PartConfig, write_part};
 use brisk_parquet::verify::{Options, verify_broker};
 use serde_json::json;
 
@@ -26,6 +28,7 @@ const USAGE: &str = "usage: brisk-parquet verify DIRECTORY [--row-group ROWS] [-
     brisk-parquet package --spool DIR --midnight NS --out DIR [--day-start PART] [--cut-state FILE --cut-clock US] \
     [--end parts|cut|repair] [--state-out FILE] [--threads N] [--range-rows N] PART...\n       \
     brisk-parquet state --spool DIR --midnight NS --state-out FILE [--cut-state FILE --cut-clock US] [--day-start PART] PART...\n       \
+    brisk-parquet part --out DIR --midnight NS [--threads N] < LINES\n       \
     brisk-parquet schemas DIRECTORY";
 
 /// Arguments: `--flag value` pairs and the positional words.
@@ -146,6 +149,30 @@ fn main() -> ExitCode {
             finish(package(&config).map(|outcome| {
                 json!({"summary": outcome.summary, "clock": outcome.clock, "repaired": outcome.repaired})
             }))
+        }
+        Some("part") => {
+            let (Some(out), Ok(Some(midnight)), Ok(threads_flag)) = (
+                args.path("out"),
+                args.number::<i64>("midnight").ok_or(()),
+                args.number::<usize>("threads").ok_or(()),
+            ) else {
+                return usage();
+            };
+            let mut input = Vec::new();
+            if let Err(error) = std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut input)
+            {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
+            let config = PartConfig {
+                out,
+                midnight,
+                threads: threads_flag.unwrap_or_else(threads),
+            };
+            finish(
+                write_part(&input, &config)
+                    .map(|s| json!({"batches": s.batches, "quotes": s.quotes, "trades": s.trades})),
+            )
         }
         Some("schemas") => match args.words.first() {
             Some(directory) => {

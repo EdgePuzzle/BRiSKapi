@@ -2,8 +2,13 @@
 
 These were the recorder's: a range of issues at a time, decoded to numpy, re-encoded with pyarrow. They take minutes for a day,
 so only tests run them (tests/test_native.py)."""
+from concurrent.futures import ThreadPoolExecutor
 import gc
+import io
+import os
 from pathlib import Path
+import sys
+import threading
 from typing import NamedTuple
 
 import numpy as np
@@ -14,7 +19,7 @@ from briskapi._parquet import (BATCH_SCHEMA, BATCHES, BOOKS, DEPTH_SCHEMA, DEPTH
                                ROW_GROUP, SCHEMAS, TRADE_SCHEMA, TRADES, Columns, _decode_batches, _decode_equity, _decode_trades,
                                _depth_rows, _no_trades, _numbers, _part_columns, _rows, batch_lengths,
                                midnight_ns, options, quote_lengths, trade_lengths)
-from briskapi.schema import SKIPPED, require
+from briskapi.schema import SKIPPED, canonical_batches, require
 
 class Cut(NamedTuple):
     """Where shipped pieces left the day: each issue's last quote (Columns) and the last batch's clock."""
@@ -29,6 +34,79 @@ def _per_batch(seqs, n):
 def _updates(batches, quotes):
     """The quote updates of the 'quotes' batches (`quotes`: each batch's quote count), as an end counts them."""
     return int(sum(n for b, n in zip(batches, quotes.tolist()) if b['type'] == 'quotes'))
+
+
+def part_columns(lines, header):
+    """Start building the Columns of consecutive decoder lines, canonical (canonical_batches): the same as
+    Columns.from_batches of them. Returns a function that gives them. Without the GIL they are parsed and built
+    from now on, in slices of at least SLICE_LINES lines on threads; with it, by the function, here.
+    `header` (the segment's bootstrap without quotes and trades) stands in for the bootstrap of a slice that
+    starts later."""
+    def build(piece):
+        batches = list(canonical_batches(io.BytesIO(b''.join(piece))))
+        first = batches[0]['type'] == 'bootstrap'
+        columns = Columns.from_batches(batches if first else [header, *batches])
+        if not first:
+            columns.batches = columns.batches[1:]
+        return columns
+    pool = _threads()
+    if pool is None:
+        return lambda: build(lines)
+    count = max(1, min(_THREADS, len(lines) // SLICE_LINES))
+    step = -(-len(lines) // count)
+    pieces = [pool.submit(build, lines[i:i + step]) for i in range(0, len(lines), step)]
+
+    def columns():
+        built = [piece.result() for piece in pieces]
+        return built[0] if len(built) == 1 else Columns.concat(built, built[0].master)
+    return columns
+
+
+def write_part(columns, header, directory, carry=None):
+    """A spool part (see briskapi._spool): the depths, trades and batch tables of consecutive decoder lines'
+    Columns (part_columns).
+
+    `header` is the segment's bootstrap without quotes and trades; it stands in for the master when the part
+    starts later. `carry` continues trade IDs from the parts before. Equity is written once, by the spool.
+    """
+    midnight = midnight_ns(header['trading_date'])
+    columns.trade_ids(carry)
+    directory = Path(directory)
+    (directory / BATCHES).parent.mkdir(parents=True, exist_ok=True)
+    try:
+        pq.write_table(columns._batches(midnight), directory / BATCHES, row_group_size=ROW_GROUP, **options(BATCHES))
+        rows = columns.sorted()
+        issues = rows.q['issue_id']
+        with pq.ParquetWriter(directory / DEPTHS, DEPTH_SCHEMA, **options(DEPTHS)) as writer:
+            # A row group per PART_ISSUES issue IDs, so that a piece of the day is read a range of issues at a time.
+            starts = np.flatnonzero(np.diff(issues // PART_ISSUES, prepend=-1)) if len(issues) else np.zeros(1, np.int64)
+            for start, stop in zip(starts.tolist(), [*starts[1:].tolist(), len(issues)]):
+                writer.write_table(rows.take(np.arange(start, stop))._depths(midnight), row_group_size=ROW_GROUP)
+        trades = columns._trades(midnight, slice(None))
+        owners = np.asarray(columns.t['issue_id'])
+        with pq.ParquetWriter(directory / TRADES, TRADE_SCHEMA, **options(TRADES)) as writer:
+            starts = np.flatnonzero(np.diff(owners // PART_ISSUES, prepend=-1)) if len(owners) else np.zeros(1, np.int64)
+            for start, stop in zip(starts.tolist(), [*starts[1:].tolist(), len(owners)]):
+                writer.write_table(trades.slice(start, stop - start), row_group_size=ROW_GROUP)
+    except (TypeError, OverflowError) as error:
+        raise ValueError(f'Invalid recording value: {error}') from None
+
+
+# Building columns is Python for every row; without the GIL (free-threaded Python) it was spread over _THREADS threads, a
+# spool part in slices of at least SLICE_LINES lines.
+_THREADS = min(4, max(1, (os.cpu_count() or 1) // 3))
+SLICE_LINES = 16
+_pool, _pool_lock = None, threading.Lock()
+
+
+def _threads():
+    """The shared pool, or None with the GIL on."""
+    global _pool
+    if getattr(sys, '_is_gil_enabled', lambda: True)():
+        return None
+    with _pool_lock:
+        _pool = _pool or ThreadPoolExecutor(_THREADS, thread_name_prefix='brisk-parquet')
+    return _pool
 
 
 PIECE_ROWS = 500_000
