@@ -80,7 +80,7 @@ Recording isn't a third API. The live calls record as they run, and `brisk live`
 
 | Command line | Python | Records | Kept on disk | Uploaded |
 | --- | --- | --- | --- | --- |
-| `brisk live --site sbi` (or `e-shiten`, `matsui`, `monex`, `smbcnikko`) | `briskapi.connect(site="sbi")` | Your broker's live feed until you stop it, each trading day as two recordings (its sessions) | Each recording, with `--output DIR` (`output=`) | Each recording as it is made, unless you opt out |
+| `brisk live --site sbi` (or `e-shiten`, `matsui`, `monex`, `smbcnikko`) | `briskapi.connect(site="sbi")` | Your broker's live feed until you stop it, normally two recordings per trading day (its sessions) | Each recording, with `--output DIR` (`output=`) | Each recording as it is made, unless you opt out |
 | `brisk live --site demo` | `briskapi.connect(site="demo")` | The demo replay, printed as JSON lines | With `--output DIR` | If the replay completes |
 | `brisk record --output DIR` | `briskapi.record(DIR)` | The demo replay | Always, in `DIR` | If the replay completes |
 
@@ -98,9 +98,10 @@ While it runs, `brisk live` also serves its feed to `briskapi.Live()` on this co
 
 While a day runs, it is written to disk as it arrives: Parquet files in a spool folder
 (`~/.local/share/brisk/spool`), about as large as the finished recording, so a crash loses at
-most its last half-minute. A broker's day becomes two recordings as it runs: the morning
+most its last half-minute. A broker's day normally becomes two recordings as it runs: the morning
 session's, kept and uploaded once the lunch break begins, and the afternoon's at the day's end,
-starting from a snapshot of the book where the morning's ended. The demo's replay is one recording.
+starting from a snapshot of the book where the morning's ended. A busy session is split again when a
+completed part brings its recording to 80 million quote rows. The demo's replay is one recording.
 
 - **Without `--output`**, each recording goes to your [archive](#your-private-archive) and
   its local copy is removed. With uploads off as well (`--no-upload`, or
@@ -273,9 +274,10 @@ toyota.quote()                              # same calls as any feed
 # upload_market_data=False uploads no market recordings, upload=False nothing; output="days" keeps each day
 ```
 
-A broker feed records continuously and keeps running across days. It packages and uploads each
+A broker feed records continuously and keeps running across days. It normally packages and uploads each
 day in two recordings, the morning session's once the lunch break begins and the afternoon's (starting
-from a snapshot of the book where the morning's ended) at the day's end; in the cloud API they read as one day. When the site's
+from a snapshot of the book where the morning's ended) at the day's end; a busy session is split again at
+80 million quote rows, at the next completed spool part. In the cloud API they read as one day. When the site's
 session is done or it starts serving the next trading date (checked every 10 minutes), or the server
 closes the stream after the market, the day ends: its last recording is packaged and uploaded, with
 the day's timing summary (unless you opt out), while the feed waits for the next session and records
@@ -520,8 +522,9 @@ Each command is the command-line form of a Python call:
 | `brisk enroll`, `login`, `forget` | `briskapi.passkey.enroll()`, `.login()`, `.forget()` |
 | `brisk export`, `brisk identity` | Command line only |
 
-`brisk live --site sbi` (or another broker's site) runs until you stop it, recording each trading
-day as two recordings, its morning and afternoon sessions; started after the close or on a holiday, it says so and waits for the next trading day. Unless you opt out, it uploads its market recordings as they are made, and each day's timing summary,
+`brisk live --site sbi` (or another broker's site) runs until you stop it, normally keeping each trading
+day's morning and afternoon sessions as separate recordings, with extra splits at 80 million quote rows.
+Started after the close or on a holiday, it says so and waits for the next trading day. Unless you opt out, it uploads its market recordings as they are made, and each day's timing summary,
 without asking; `--no-upload-market-data` stops uploading the recordings and `--no-upload` both
 (add `--output DIR` to keep them on disk). `brisk list --source brisk_live` (every broker's) lists
 your broker recordings. Every `brisk live` also serves its feed to `briskapi.Live()` on this computer

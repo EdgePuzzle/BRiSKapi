@@ -53,9 +53,10 @@ clean and complete session is uploaded to your private archive without further p
 `briskapi.connect()`, `briskapi.record()`), and broker sessions (SBI, Tachibana e-shiten, Matsui,
 Monex or SMBC Nikko: `brisk live --site sbi` or another broker's site, `briskapi.connect(site=...)`), which upload a timing
 summary and their decoded market recording. A broker session records one trading day after
-another until you stop it, and uploads each day in two recordings, the morning session's once the
+another until you stop it, and normally uploads each day in two recordings, the morning session's once the
 lunch break begins and the afternoon's when the day ends (when the site serves
-the next trading date, or the server closes the stream). If the connection to your broker's BRiSK
+the next trading date, or the server closes the stream). A session reaching 80 million quote rows is split
+again at a completed spool part; each piece follows the same upload choice. If the connection to your broker's BRiSK
 drops during a day, the session reconnects by itself: what it recorded before the drop is a
 complete recording of its own, uploaded like the others, and the rest of the day is recorded
 from a fresh snapshot. Stopping a broker session (Ctrl-C, `kill`, shutting the computer down,
@@ -159,11 +160,12 @@ Monex and `smbcnikko` for SMBC Nikko) uses session cookies from your own browser
   add, which has no data client, are kept in an owner-only file under `~/.config/brisk/cookies/`. The Chrome profile used for sign-in is
   temporary and deleted afterwards (one left by a force-killed run is removed at the next start),
   and only the BRiSK host's cookies are taken from it.
-- With uploads on, a broker session's decoded market recording is uploaded in two pieces a trading
+- With uploads on, a broker session's decoded market recording is normally uploaded in two pieces a trading
   day: the morning session's once the lunch break begins, and the afternoon's (starting from a snapshot
-  of the book, which repeats the latest quote of every security) when the day ends, the part of a day
-  before a lost connection once the session reconnects, and what is left of the day when you stop the
-  session, or when it crashes or is killed (repaired, as above). `--no-upload-market-data` or
+  of the book, which repeats the latest quote of every security) when the day ends, with extra splits at
+  80 million quote rows. The part of a day before a lost connection is uploaded once the session reconnects;
+  what is left of the day is uploaded when you stop the session, or when it crashes or is killed (repaired,
+  as above). `--no-upload-market-data` or
   `briskapi.connect(site=..., upload_market_data=False)` keeps it local.
 - With uploads on, a broker session uploads one **timing summary** per
   trading day (per part of a day, when a lost connection or a stop splits it) to your private

@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 import stat
 import sys
+import threading
 import time
 import urllib.error
 import zlib
@@ -620,6 +621,36 @@ def test_a_broker_day_ships_a_piece_at_a_time_each_a_recording_the_archive_accep
     trades = [t['frame'] for d in sorted((tmp_path / 'days').iterdir()) for t in briskapi.Market(briskapi.Recording(d)).trades()]
     assert len(trades) == sum(len(b.get('trades', ())) for b in day) and len(list((tmp_path / 'days').iterdir())) == len(sent)
     assert [r['timing_uploaded'] for r in feed.recordings] == [None] * (len(sent) - 1) + [{'status': 'stored'}]
+    assert not any(_spool.spool_root().glob('segment-*'))
+
+
+@pytest.mark.parametrize('limit', [60, 80])
+def test_a_broker_kept_without_uploads_splits_before_lunch_or_the_streams_end(tmp_path, monkeypatch, limit):
+    # Scale the row threshold down; the host cannot end until a completed part has actually been kept.
+    # The report's --no-upload/--output run must split while recording, not only when wait() finishes it.
+    monkeypatch.setattr(_spool, 'MAX_PIECE_ROWS', limit)
+    monkeypatch.setattr(_spool, 'PART_BYTES', 3000)
+    batches = sbi_session(frames=100)
+    script = tmp_path / 'still_recording.py'
+    script.write_text(f'import json, sys\n'
+                      f'for batch in {batches[:-1]!r}: print(json.dumps(batch), flush=True)\n'
+                      f'sys.stdin.readline()\n'
+                      f'print(json.dumps({batches[-1]!r}), flush=True)\n')
+    kept = threading.Event()
+    feed = _live.Feed(command=[sys.executable, '-u', str(script)], upload=False, output=tmp_path / 'days',
+                      on_day=lambda result: kept.set())
+    try:
+        feed.ready(timeout=10)
+        assert kept.wait(15), 'the size cutoff must save a piece while the host is still running'
+        assert feed._process.poll() is None and not feed._day_over
+        first, = feed.recordings
+        assert first['path'] and first['error'] is None and first['uploaded'] is None
+        m = json.loads((Path(first['path']) / 'manifest.json').read_text())
+        assert _parquet.inspect_package(first['path'], m) == m['summary']
+        assert m['summary']['last_source_time_us'] < _spool.LUNCH_US
+    finally:
+        feed.close()
+    assert len(feed.recordings) == 2 and all(r['path'] and r['error'] is None for r in feed.recordings)
     assert not any(_spool.spool_root().glob('segment-*'))
 
 

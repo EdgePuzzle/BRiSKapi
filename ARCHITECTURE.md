@@ -189,11 +189,12 @@ the spool. Packaging (`brisk-parquet package`) reads the parts back, joins their
 minutes 35 seconds and would take a day most of an hour: the archive runs them on every upload, and
 an upload it rejects is kept like a failed one.
 
-A broker's day is shipped as it runs, in two pieces (`Spool.ship`): a whole-market day has 100 million
+A broker's day is shipped as it runs, normally in two pieces (`Spool.ship`): a whole-market day has 100 million
 quote updates or more, more than a computer should package, or the archive check, at once. The morning
 session's piece ships as soon as a part closes after noon (`LUNCH_US`, the lunch break), the afternoon's
-at the day's end; no piece holds more than `MAX_PIECE_ROWS` (60 million: a morning session can pass it, a tester's
-reached 41 million by 10:13 and some 65 million by 11:30, and then comes in two pieces). After each part is written
+at the day's end; a completed part reaching `MAX_PIECE_ROWS` (80 million) starts an extra piece. A tester's
+morning held 63 million updates and afternoon 41 million, so both fit their own session recording, with room
+below the archive's 100-million-depth-row limit for the last complete part and a cut's opening book. After each part is written
 the spool tells the feed's worker, which decides from the parts' small columns (`_parquet.part_index`).
 Each piece is a recording of its own: the afternoon's (`brisk-parquet package` with a cut) starts with a
 bootstrap like the day's, at the clock of the batch before it, holding each issue's last quote so far
@@ -204,7 +205,8 @@ them. A piece is written by `brisk-parquet package` a range of issues at a time 
 `PART_ISSUES` issue IDs, and a range of about a million rows gathers the issues' rows from every part), in the row
 groups writing it at once would make, so the tables are the same and no session is ever whole in memory: the
 row groups are encoded on a few threads (a third of the cores, so that the feed keeps up) and appended in order. A 60-million-update
-piece takes about 80 seconds and at most 5.5 GB; the book the next piece starts from is a Parquet file of the last quote
+piece takes about 80 seconds and at most 5.5 GB. The [80-million-update synthetic check](docs/benchmarks/package-80m.md)
+also covers two packaging processes together, without trades or live feeds. The book the next piece starts from is a Parquet file of the last quote
 of each issue, written with the piece (`cut/`). Its zip is written and hashed on disk (`pack_to`). The worker keeps and uploads each piece as it would a
 day. `shipped.json` counts the parts shipped, so a crashed session's spool is finished from there; where
 the morning left the book is rebuilt from its parts (`brisk-parquet state`). A demo's replay is one recording,
