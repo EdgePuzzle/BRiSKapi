@@ -7,14 +7,15 @@
 //!     brisk-parquet part --out DIR --midnight NS [--threads N]    (the decoder's JSON lines on stdin)
 //!     brisk-parquet schemas DIRECTORY
 //!
-//! Each prints a JSON result on stdout, and `progress: ...` lines on stderr. A recording that breaks a rule exits 2 with
-//! `refused: MESSAGE` on stderr; any other failure exits 1.
+//! Each prints a JSON result on stdout, and `progress: ...` lines on stderr (`verify`: the table it checks; `package`: its stage,
+//! `package: preparing|finalizing`, and the rows written of a table, `package: batches|quotes|trades DONE/TOTAL`). A recording
+//! that breaks a rule exits 2 with `refused: MESSAGE` on stderr; any other failure exits 1.
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use brisk_parquet::error::{Failure, Res};
-use brisk_parquet::package::{Config, Cut, End, package};
+use brisk_parquet::package::{Config, Cut, End, package_with};
 use brisk_parquet::part::{PartConfig, write_part};
 use brisk_parquet::verify::{Options, verify_broker};
 use serde_json::json;
@@ -146,7 +147,8 @@ fn main() -> ExitCode {
             let Some(config) = configuration(&args, kind == "package") else {
                 return usage();
             };
-            finish(package(&config).map(|outcome| {
+            let progress = |label: &str| eprintln!("progress: {label}");
+            finish(package_with(&config, &progress).map(|outcome| {
                 json!({"summary": outcome.summary, "clock": outcome.clock, "repaired": outcome.repaired})
             }))
         }

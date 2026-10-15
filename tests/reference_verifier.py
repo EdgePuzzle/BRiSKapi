@@ -13,8 +13,8 @@ import pyarrow.parquet as pq
 from briskapi._parquet import (BATCHES, DEPTHS, EQUITY, KINDS, TRADES, BROKER_MAX_ROWS, Columns, _decode_batches,
                                _decode_equity, _decode_trades, _depth_rows, _no_trades, as_format, batch_lengths,
                                check, midnight_ns, quote_lengths, trade_lengths)
-from briskapi.schema import (LEVELS, MASTER_KEYS, MAX_DECODE_NS, MAX_HISTORY, MAX_SESSION_MS, SKIPPED, UNIX_MS, code, integer, measurement,
-                             require, transports, validate_manifest)
+from briskapi.schema import (LEVELS, MASTER_KEYS, MAX_DECODE_NS, MAX_HISTORY, MAX_SESSION_MS, SKIPPED, UNIX_MS, code, integer,
+                             measurement, require, transports, validate_manifest)
 from briskapi.schema import broker as is_broker
 from reference_package import _per_batch
 
@@ -59,7 +59,8 @@ class _BatchRules:
         self.identities, self.n, self.seq, self.last = {m['issue_id'] for m in master}, n, 0, 0
         self.market_size = len(master)
         self.kinds, self.clocks, self.skipped = np.zeros(n, np.int8), np.zeros(n, np.int64), []
-        self.received = self.previous_stamp = self.previous_kind = self.first = self.final = None
+        self.received = self.previous_kind = self.first = self.final = None
+        self.deltas = 0
 
     def add(self, batches):
         for b in batches:
@@ -81,9 +82,9 @@ class _BatchRules:
                 stamp = integer(b['received_unix_ms'])
                 require(UNIX_MS[0] <= stamp < UNIX_MS[1], 'Implausible local receipt clock')
                 if self.received is None:
-                    self.received = self.previous_stamp = stamp
-                require(self.previous_stamp <= stamp <= self.received + MAX_SESSION_MS, 'Local receipt clock regression/span')
-                self.previous_stamp = stamp
+                    self.received = stamp
+                require(abs(stamp - self.received) <= MAX_SESSION_MS, 'Local receipt clock span')
+                self.deltas += 1
                 require(b['replay_lateness_ms'] is None, 'Broker streams are not demo replays')
             if SKIPPED in b:
                 skipped = b[SKIPPED]
@@ -92,7 +93,7 @@ class _BatchRules:
                         'Invalid skipped issues')
                 self.skipped += (issue << 32 | seq for issue in skipped)
             if kind == 'end':
-                require(integer(b['frames']) >= seq - 1, 'End summary mismatch')
+                require(integer(b['frames']) >= self.deltas, 'End summary mismatch')
                 integer(b['quote_updates'])
                 measurement(b['replay_wall_ms'], MAX_SESSION_MS)
             self.kinds[seq], self.clocks[seq] = KINDS[kind], now

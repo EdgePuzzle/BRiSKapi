@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Consume BRiSK auction data live, record it, upload it to your private archive and use that archive."""
 import argparse
+import contextlib
 import datetime as dt
 import io
 import json
@@ -198,19 +199,19 @@ def package(events, output):
     """Encode decoder JSONL as a package: the recording's tables plus a manifest of their zip."""
     return _package(output, lambda: save_recording(events, output))
 
-def package_parts(equity, parts, output, repair=False, piece=None):
+def package_parts(equity, parts, output, repair=False, piece=None, progress=None):
     """A spooled segment (briskapi._spool) as a package: the same tables and manifest as package() of its batches, written by
     brisk-parquet a range of issues at a time (`equity` is the segment's master table, in its folder's data/). With `repair`, a
     segment cut short first gets the end its host never wrote. `piece` ({midnight, day_start, cut, state_out, end}: Spool.ship's)
     makes a piece of a day instead, and gets back where it leaves the day ({clock}, and the book in the file `state_out`) and
-    whether it was repaired."""
+    whether it was repaired. `progress(label)` is told how brisk-parquet goes (see _native.package)."""
     piece = {} if piece is None else piece
 
     def write():
         midnight = piece.get('midnight') or _parquet.midnight_ns(_parquet.bootstrap_row(parts[0])['trading_date'])
         result = _native.package(Path(equity).parent.parent, parts, output, midnight, day_start=piece.get('day_start'),
                                  cut=piece.get('cut'), end=piece.get('end') or ('repair' if repair else 'parts'),
-                                 state_out=piece.get('state_out'), threads=_native.threads())
+                                 state_out=piece.get('state_out'), threads=_native.threads(), progress=progress)
         piece['clock'], piece['repaired'] = result['clock'], result['repaired']
         return result['summary']   # not checked here: the archive checks every upload, and a day took minutes
     return _package(output, write)
@@ -262,10 +263,11 @@ def api(api_url, action, **fields):
 class _Body(io.RawIOBase):
     """An upload's multipart body: its head, a file read as it is sent, and its tail."""
 
-    def __init__(self, head, path, tail):
+    def __init__(self, head, path, tail, progress=None):
         super().__init__()
         self._parts = [io.BytesIO(head), open(path, 'rb'), io.BytesIO(tail)]
         self.size = len(head) + Path(path).stat().st_size + len(tail)
+        self._progress, self._sent = progress, 0   # progress(sent, size) as the body is read
 
     def readable(self):
         return True
@@ -274,6 +276,9 @@ class _Body(io.RawIOBase):
         while self._parts:
             count = self._parts[0].readinto(buffer)
             if count:
+                self._sent += count
+                if self._progress:
+                    self._progress(self._sent, self.size)
                 return count
             self._parts.pop(0).close()
         return 0
@@ -285,15 +290,20 @@ class _Body(io.RawIOBase):
         super().close()
 
 
-def upload(directory, api_url, timeout=1500, verify=True, out=None, market=None):
+def upload(directory, api_url, timeout=1500, verify=True, out=None, market=None, progress=None):
     """Upload a package to your private archive and wait for its validation (a broker's trading session takes
     the archive some minutes).
 
     A demo (or synthetic) replay's market data is the same for everyone and the archive keeps it once,
     so such a package sends only its timing table once the archive holds that copy; `market=True`
     sends the whole recording anyway.
+
+    `progress(stage, done=None, total=None)` is told of 'preparing' (the zip it sends), 'uploading' with the bytes sent of the
+    total, and 'validating' at each check of the archive's.
     """
+    progress = progress or (lambda *told: None)
     m = json.loads((directory / 'manifest.json').read_text())
+    progress('preparing')
     if verify:
         _parquet.inspect_package(directory, m)
     with tempfile.TemporaryDirectory() as tmp:
@@ -319,7 +329,8 @@ def upload(directory, api_url, timeout=1500, verify=True, out=None, market=None)
                         for key, value in ticket['upload']['fields'].items())
         head += (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="recording.zip"\r\n'
                  'Content-Type: application/zip\r\n\r\n').encode()
-        with _Body(head, zipped, f'\r\n--{boundary}--\r\n'.encode()) as body:
+        with _Body(head, zipped, f'\r\n--{boundary}--\r\n'.encode(), lambda sent, size: progress('uploading', sent, size)) as body:
+            progress('uploading', 0, body.size)
             request = urllib.request.Request(ticket['upload']['url'], data=body, method='POST',
                                              headers={'Content-Type': f'multipart/form-data; boundary={boundary}',
                                                       'Content-Length': str(body.size)})
@@ -329,6 +340,7 @@ def upload(directory, api_url, timeout=1500, verify=True, out=None, market=None)
     print(json.dumps({'ticket': ticket['ticket'], 'status_url': status_url}), file=out, flush=True)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        progress('validating')
         status = request_json(status_url)
         if status['status'] == 'stored':
             return status
@@ -484,6 +496,37 @@ def record_events(events, cache=None, codes=None, limit_frames=None, speed=1, bi
 def live(args):
     """Record the feed, reporting how it goes on stderr (with --quotes, print each quote update as one JSON line),
     and serve it to briskapi.Live on this computer (unless --no-gateway); a complete session is uploaded per consent."""
+    global SAVE_EVERY
+    SAVE_EVERY = SAVE_SECONDS[sys.stderr.isatty()]
+    try:
+        with _warnings_on_stderr():
+            _live(args)
+    finally:
+        SAVE_EVERY = None
+
+
+@contextlib.contextmanager
+def _warnings_on_stderr():
+    """Show each warning the moment it is raised, on any thread, as its message: `brisk live` runs for days, and a warning held
+    until connect() returns (which waits for the next trading day when no session is running), or recorded in a context that has
+    ended, reaches no one (a feed's threads keep the context they were started in)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('always', UserWarning)
+        shown = warnings.showwarning
+
+        def show(message, category, filename, lineno, file=None, line=None):
+            if issubclass(category, UserWarning):
+                print(message, file=sys.stderr, flush=True)
+            else:
+                shown(message, category, filename, lineno, file, line)
+        warnings.showwarning = show
+        try:
+            yield
+        finally:
+            warnings.showwarning = shown   # catch_warnings does not, where warnings are kept per context (free-threaded 3.14)
+
+
+def _live(args):
     from briskapi import connect, login  # The API package builds on this module.
     codes = args.codes.split(',') if args.codes else None
     if args.site != 'demo':
@@ -492,20 +535,16 @@ def live(args):
     # `kill` and a shutdown stop it as Ctrl-C does: the running day ends where it is, and is kept and uploaded.
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, _interrupt)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
-        report = lambda day: print(json.dumps({'day': day}), file=sys.stderr, flush=True)  # noqa: E731
-        source = (dict(cache=args.cache, speed=args.speed, limit_frames=args.limit_frames) if args.site == 'demo' else
-                  dict(trace_protocol=args.trace_protocol, upload_market_data=args.upload_market_data))
-        try:
-            # With no session to join (after the close, on a holiday), a broker feed waits here for the next one's.
-            feed = connect(site=args.site, codes=codes, upload=args.upload, output=args.output, on_day=report,
-                           gateway=args.gateway, **source)
-        except KeyboardInterrupt:  # connect() has stopped the feed: no day had begun
-            print('Stopped before a trading day began', file=sys.stderr)
-            return
-    for warning in caught:
-        print(warning.message, file=sys.stderr)
+    report = lambda day: print(json.dumps({'day': day}), file=sys.stderr, flush=True)  # noqa: E731
+    source = (dict(cache=args.cache, speed=args.speed, limit_frames=args.limit_frames) if args.site == 'demo' else
+              dict(trace_protocol=args.trace_protocol, upload_market_data=args.upload_market_data))
+    try:
+        # With no session to join (after the close, on a holiday), a broker feed waits here for the next one's.
+        feed = connect(site=args.site, codes=codes, upload=args.upload, output=args.output, on_day=report,
+                       gateway=args.gateway, **source)
+    except KeyboardInterrupt:  # connect() has stopped the feed: no day had begun
+        print('Stopped before a trading day began', file=sys.stderr)
+        return
     if feed.gateway:
         print(f'Serving {feed.gateway.dataset} to briskapi.Live() on this computer only '
               f'(127.0.0.1:{feed.gateway.port}; --no-gateway turns this off)', file=sys.stderr, flush=True)
@@ -527,6 +566,9 @@ def live(args):
 
 # How often `brisk live` reports on the recording: on a terminal, and when its stderr goes to a file or a log.
 PROGRESS_SECONDS = {True: 10, False: 60}
+# The same for a recording being saved (see Saving). SAVE_EVERY is set while `brisk live` runs: a feed of the API saves quietly.
+SAVE_SECONDS = {True: 5, False: 30}
+SAVE_EVERY = None
 
 
 def _progress(feed, every):
@@ -548,6 +590,123 @@ def _progress(feed, every):
         print(f'[brisk] {date[:4]}-{date[4:6]}-{date[6:]}: recording for {recorded // 3600}:{recorded // 60 % 60:02d}:{recorded % 60:02d}, '
               f'{now["updates"]:,} updates, {rate:,.0f} a second{at}', file=sys.stderr, flush=True)
         last = now
+
+
+def _duration(seconds):
+    seconds = int(seconds)
+    hours, minutes, seconds = seconds // 3600, seconds // 60 % 60, seconds % 60
+    return f'{hours}h{minutes:02d}m{seconds:02d}s' if hours else f'{minutes}m{seconds:02d}s' if minutes else f'{seconds}s'
+
+
+def _of(done, total, unit=lambda n: f'{n:,}'):
+    """`done of total`, and its percentage: only a total that is known has one."""
+    return f'{unit(done)} of {unit(total)} ({done * 100 // total}%)' if total else unit(done)
+
+
+def _mib(size):
+    return f'{size / 2**20:,.1f} MiB'
+
+
+class Saving:
+    """What `brisk live` tells on stderr of one recording it saves: its site and session (`label`: a string, or a function
+    giving it once there is something to say), the stage it is in (preparing, writing batches, quotes and trades,
+    finalizing) with the rows done of their total, then where it is saved and how long it took, or why it is not. Its
+    upload is told apart: the bytes sent, then the archive's checks. Each stage's first line and each result come at once,
+    the rest at most every `every` seconds; with `every` None nothing is said. Telling never fails the save."""
+
+    def __init__(self, label, every=None, out=None, clock=time.monotonic):
+        self._label, self._every, self._out, self._clock = label, every, out, clock
+        self._began, self._upload_began, self._last, self._said = clock(), None, None, set()
+        self._rows, self._lock = {}, threading.Lock()
+
+    def _say(self, text, stage=None, final=False, since=None):
+        if self._every is None:
+            return
+        with self._lock:
+            now = self._clock()
+            first = stage not in self._said
+            self._said.add(stage)
+            if not (first or final or now - self._last >= self._every):
+                return
+            self._last = now
+            try:
+                if callable(self._label):
+                    self._label = self._label()
+            except Exception:  # noqa: BLE001 - a label that cannot be made must not lose the line
+                self._label = 'recording'
+            began = self._began if since is None else since
+            ending = '' if final else f', {_duration(now - began)} elapsed'
+            try:
+                print(f'[brisk] {self._label}: {text}{ending}', file=self._out or sys.stderr, flush=True)
+            except (OSError, ValueError):   # a stderr that is closed or full is not the recording's trouble
+                pass
+
+    def packaging(self, label):
+        """brisk-parquet's `progress: label` lines (see _native.package)."""
+        told = _native.parse_progress(label)
+        if told is None:
+            return
+        table, done, total = told
+        if done is None:
+            self._say('preparing to save' if table == 'preparing' else 'finalizing', stage=table)
+            return
+        self._rows[table] = (done, total)
+        if table == 'batches':
+            self._say(f'writing batches {_of(done, total)}', stage='batches')
+        else:
+            tables = [f'{name} {_of(*self._rows[name])}' for name in ('quotes', 'trades') if name in self._rows]
+            self._say('writing ' + ', '.join(tables), stage='tables')
+
+    def stage(self, text):
+        """A stage that has no rows to count (Python's own packaging)."""
+        self._say(text, stage=text)
+
+    def saved(self, path, hint=None):
+        """The recording is on disk at `path`: only now is it saved."""
+        self._say(f'saved to {path} in {_duration(self._clock() - self._began)}' + (f'; {hint}' if hint else ''), final=True)
+
+    def keeping(self, where):
+        """A save that failed is being kept in `where` instead: told afresh, timed from here."""
+        self._began, self._last, self._said, self._rows = self._clock(), None, set(), {}
+        self._say(f'keeping what was recorded in {where}', stage='keeping')
+
+    def uploading(self, stage, done=None, total=None):
+        """`upload`'s progress(stage, done, total): its own lines, timed from its own start."""
+        if self._upload_began is None:
+            self._upload_began = self._clock()
+        since = self._upload_began
+        if stage == 'uploading':
+            self._say(f'uploading {_of(done, total, _mib)}' if total else 'uploading', stage='uploading', since=since)
+        elif stage == 'validating':
+            self._say('sent; waiting for the archive to check it', stage='validating', since=since)
+        else:
+            self._say('preparing to upload', stage='preparing upload', since=since)
+
+    def uploaded(self):
+        self._say(f'uploaded; the archive stored it ({_duration(self._clock() - (self._upload_began or self._began))})', final=True)
+
+    def failed(self, step, error):
+        self._say(f'{step} failed after {_duration(self._clock() - self._began)}: {error}', final=True)
+
+
+def saving(label):
+    """The report of a recording being saved: spoken while `brisk live` runs, else quiet."""
+    return Saving(label, SAVE_EVERY)
+
+
+def _telling(label):
+    """The report of a command that packages or uploads (`brisk record`, `package`, `upload`): always spoken, on stderr."""
+    return Saving(label, SAVE_SECONDS[sys.stderr.isatty()])
+
+
+def _packaged(events, output):
+    """`package(events, output)` as a command line says it: its stage, then `saved to` once it is. Returns the manifest and
+    the report, which goes on to tell the upload."""
+    save = _telling(output.resolve().name)
+    save.stage('packaging')
+    m = package(events, output)
+    save.saved(output)
+    return m, save
 
 
 def brisk_sites():
@@ -720,18 +879,23 @@ def _main(argv):
                     why = 'partial replays stay local' if partial else f'uploads are off (`{parser.prog} consent`)'
                     print(f'Saved {args.output}; not uploaded: {why}.', file=sys.stderr)
                     return
-                m = package(events, args.output)
+                m, save = _packaged(events, args.output)
         else:
-            m = package(args.events, args.output)
+            m, save = _packaged(args.events, args.output)
         print(json.dumps(m))
         if uploading and args.upload is not False and os.environ.get('BRISK_UPLOAD') != '0':
-            print(json.dumps(upload(args.output, config['api_url'], verify=False)))
+            stored = upload(args.output, config['api_url'], verify=False, progress=save.uploading)
+            save.uploaded()
+            print(json.dumps(stored))
     elif args.command == 'live':
         live(args)
     elif args.command in {'sites', 'enroll', 'login', 'forget'}:
         passkey_command(args)
     elif args.command == 'upload':
-        print(json.dumps(upload(args.directory, config['api_url'])))
+        save = _telling(args.directory.resolve().name)
+        stored = upload(args.directory, config['api_url'], progress=save.uploading)
+        save.uploaded()
+        print(json.dumps(stored))
     elif args.command == 'list' and args.deleted:
         for item in deleted(config['api_url'], args.date):
             print(json.dumps(item))

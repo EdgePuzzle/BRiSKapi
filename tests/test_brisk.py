@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import urllib.error
+import warnings
 import zlib
 
 from briskapi.timing import TimingStats
@@ -277,6 +278,125 @@ def test_cli_live_sbi(fake_host, monkeypatch, capsys):
     assert lines[-1]['last_price'] == 10160.0 and 'timing summary' in out.err and 'decoded market recording' in out.err
     assert cli.load_consent()['enabled'] and sent[0]['source'] == 'brisk_live' and len(market) == 1
     assert not {'quotes', 'master', 'code', 'price'} & set(json.dumps(sent[0]).replace('"', ' ').split())
+
+
+def test_cli_live_says_what_it_saves_and_says_saved_only_once_it_is(fake_host, monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
+    monkeypatch.setattr(cli, 'SAVE_SECONDS', {True: 0, False: 0})
+    briskapi.consent(accept=True)
+    monkeypatch.setattr(cli, 'upload_timing', lambda report, url: {'status': 'stored'})
+
+    def publish(directory, url, progress=None, **options):
+        progress('preparing'); progress('uploading', 0, 4); progress('uploading', 4, 4); progress('validating')
+        return {'status': 'stored'}
+    monkeypatch.setattr(cli, 'upload', publish)
+    saved = cli.Saving.saved
+
+    def checked(self, path):
+        assert (Path(path) / 'manifest.json').exists(), 'said saved before the recording was'
+        saved(self, path)
+    monkeypatch.setattr(cli.Saving, 'saved', checked)
+    cli.main(['live', '--site', 'sbi', '--no-gateway', '--quotes', '--output', str(tmp_path / 'days')])
+    out = capsys.readouterr()
+    assert all(json.loads(line) for line in out.out.splitlines()), 'stdout stays the quotes, as JSON lines'
+    told = [line.removeprefix('[brisk] sbi 2026-03-11 from 09:00:00: ') for line in out.err.splitlines()
+            if line.startswith('[brisk] sbi 2026-03-11 from 09:00:00: ')]
+    kept = tmp_path / 'days' / 'sbi_20260311_090000-090016'
+    position = -1
+    for fragment in ['preparing to save', 'writing batches', 'writing quotes', 'finalizing', f'saved to {kept} in ',
+                     'preparing to upload', 'uploading ', 'sent; waiting for the archive', 'uploaded; the archive stored it']:
+        position = next((i for i, line in enumerate(told) if i > position and fragment in line), None)   # in this order
+        assert position is not None, (fragment, told)
+    assert 'is recorded' not in out.err
+
+
+def told_of_the_day(err):
+    return [line.removeprefix('[brisk] sbi 2026-03-11 from 09:00:00: ') for line in err.splitlines()
+            if line.startswith('[brisk] sbi 2026-03-11 from 09:00:00: ')]
+
+
+def test_cli_live_says_a_save_failed_and_says_saved_only_where_it_kept_it_instead(fake_host, monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
+    monkeypatch.setattr(cli, 'package_parts', lambda *a, **k: 1 / 0)
+    cli.main(['live', '--site', 'sbi', '--no-gateway', '--no-upload', '--output', str(tmp_path / 'days')])
+    err = capsys.readouterr().err   # the feed's warning of it may not reach a terminal: these lines do
+    told = told_of_the_day(err)
+    kept = _spool.kept_dir() / 'sbi_20260311_090000-090016'
+    assert re.fullmatch(r'Packaging failed after \d+s: division by zero', told[0]), told
+    # The feed's own warning of it, raised on its worker thread long after connect() returned, is shown too.
+    assert re.search(r'^Packaging failed: division by zero; the recording is kept in .*sbi_20260311_090000-090016$', err, re.M), err
+    # What was recorded is then kept apart, with the progress of packaging it again, and only then is it saved: there.
+    assert told[1].startswith(f'keeping what was recorded in {_spool.kept_dir()}') and told[2].startswith('preparing to save')
+    assert re.fullmatch(rf'saved to {kept} in \d+s', told[-1]) and (kept / _parquet.DEPTHS).exists() and not (tmp_path / 'days').exists()
+    assert not any('saved to' in line for line in told[:-1])
+
+
+def test_cli_live_says_an_upload_failed_and_how_to_retry_it_from_where_the_package_is_kept(fake_host, monkeypatch, capsys):
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
+    briskapi.consent(accept=True)
+    monkeypatch.setattr(cli, 'upload_timing', lambda report, url: {'status': 'stored'})
+
+    def refuse(directory, url, progress=None, **options):
+        progress('preparing'); progress('validating')
+        raise ValueError('Automatic validation rejected recording: bad')
+    monkeypatch.setattr(cli, 'upload', refuse)
+    cli.main(['live', '--site', 'sbi', '--no-gateway'])
+    told = told_of_the_day(capsys.readouterr().err)
+    kept = _spool.kept_dir() / 'sbi_20260311_090000-090016'
+    in_order = iter(told)
+    for fragment in ('preparing to save', 'finalizing', 'preparing to upload', 'sent; waiting for the archive',
+                     'Automatic upload failed after', f'keeping what was recorded in {_spool.kept_dir()}',
+                     f'saved to {kept} in '):
+        assert any(fragment in line for line in in_order), (fragment, told)
+    assert told[-1].endswith(f'; `brisk upload {kept}` retries the upload') and not any('stored' in line for line in told)
+
+
+@pytest.mark.parametrize('keep,why', [(lambda self, root, progress=None: 1 // 0, r'(integer )?division( or modulo)? by zero'),
+                                      (lambda self, root, progress=None: None, 'there is nothing of it to keep')])
+def test_cli_live_says_when_even_keeping_a_failed_save_failed(fake_host, monkeypatch, capsys, tmp_path, keep, why):
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
+    monkeypatch.setattr(cli, 'package_parts', lambda *a, **k: 1 / 0)
+    monkeypatch.setattr(_spool.Spool, 'keep', keep)
+    cli.main(['live', '--site', 'sbi', '--no-gateway', '--no-upload', '--output', str(tmp_path / 'days')])
+    told = told_of_the_day(capsys.readouterr().err)
+    assert re.fullmatch(rf'Keeping the recording failed after \d+s: {why}', told[-1]), told
+    assert not any('saved to' in line for line in told)
+
+
+def test_a_feed_of_the_api_saves_quietly(fake_host, tmp_path, capsys):
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    feed = briskapi.connect(site='sbi', upload=False, output=tmp_path / 'days').wait()
+    assert feed.recordings[-1]['path'] and '[brisk]' not in capsys.readouterr().err
+
+
+def test_cli_live_shows_a_warning_as_it_is_raised_not_when_connect_returns(monkeypatch, capsys):
+    # connect() waits for the next trading day when no session is running; what the feed's threads warn meanwhile (a spool
+    # a stopped process left, recovered) must not wait for the day, nor be lost if the feed is stopped first.
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
+    seen = []
+
+    def waiting(**options):
+        thread = threading.Thread(target=lambda: warnings.warn('A feed that stopped unexpectedly left segment-x behind: kept'))
+        thread.start(); thread.join()
+        seen.append(capsys.readouterr().err)   # connect() has not returned
+        raise KeyboardInterrupt
+    monkeypatch.setattr(briskapi, 'connect', waiting)
+    cli.main(['live', '--site', 'sbi', '--no-upload'])
+    assert seen == ['A feed that stopped unexpectedly left segment-x behind: kept\n']
+    assert capsys.readouterr().err.strip() == 'Stopped before a trading day began'
+
+
+def test_brisk_live_puts_the_warnings_handler_back_and_leaves_other_warnings_to_it(monkeypatch, capsys):
+    handled = []
+    original = lambda message, category, filename, lineno, file=None, line=None: handled.append((str(message), category))  # noqa: E731
+    monkeypatch.setattr(warnings, 'showwarning', original)
+    with cli._warnings_on_stderr():
+        warnings.warn('for the person at the terminal')
+        warnings.warn('for the library to say', FutureWarning)
+        assert warnings.showwarning is not original
+    assert warnings.showwarning is original, 'catch_warnings does not restore it where warnings are kept per context'
+    assert capsys.readouterr().err == 'for the person at the terminal\n'
+    assert handled == [('for the library to say', FutureWarning)]
 
 
 def test_cli_live_stopped_while_waiting_for_a_session_says_so_without_a_traceback(monkeypatch, capsys):

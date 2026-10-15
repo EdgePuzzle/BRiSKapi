@@ -5,6 +5,7 @@ pieces. It reads and writes the same tables `briskapi._parquet` defines.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -90,18 +91,33 @@ def part(lines, out, midnight, threads=None):
     return json.loads(run(arguments, lines=lines))
 
 
-def package(spool, parts, out, midnight, *, day_start=None, cut=None, end='parts', state_out=None, threads=None, range_rows=None):
+def package(spool, parts, out, midnight, *, day_start=None, cut=None, end='parts', state_out=None, threads=None, range_rows=None,
+            progress=None):
     """Write consecutive parts of a spooled segment (`spool`: its folder) as a recording in `out`, a range of issues at a
     time. After a piece, `cut` is (the file `state_out` gave then, the clock it ended at) and `day_start` the day's first
     part. `end`: 'parts' for the parts' own, 'cut' for an end to a piece that stops early, 'repair' for one if they have none.
-    Returns {'summary', 'clock' (the last batch's), 'repaired'}; `state_out` gets each issue's last quote."""
+    Returns {'summary', 'clock' (the last batch's), 'repaired'}; `state_out` gets each issue's last quote. `progress(label)` is
+    told how it goes: 'package: preparing', then 'package: batches|quotes|trades DONE/TOTAL' (see parse_progress), then
+    'package: finalizing'."""
     arguments = ['package', '--spool', spool, '--midnight', midnight, '--out', out, '--end', end]
     for flag, value in (('--day-start', day_start), ('--state-out', state_out), ('--threads', threads), ('--range-rows', range_rows)):
         if value is not None:
             arguments += [flag, value]
     if cut:
         arguments += ['--cut-state', cut[0], '--cut-clock', cut[1]]
-    return json.loads(run([*arguments, *parts]))
+    return json.loads(run([*arguments, *parts], progress))
+
+
+_PACKAGE_PROGRESS = re.compile(r'package: (?:(preparing|finalizing)|(batches|quotes|trades) (\d+)/(\d+))')
+
+
+def parse_progress(label):
+    """What a `package` progress label says: ('preparing' | 'finalizing', None, None), or (table, done, total) for the rows of
+    'batches', 'quotes' or 'trades'; None for any other label."""
+    found = _PACKAGE_PROGRESS.fullmatch(label)
+    if not found:
+        return None
+    return (found[1], None, None) if found[1] else (found[2], int(found[3]), int(found[4]))
 
 
 def state(spool, parts, midnight, state_out, *, day_start=None, cut=None, threads=None):

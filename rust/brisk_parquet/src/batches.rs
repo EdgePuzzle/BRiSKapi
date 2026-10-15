@@ -81,8 +81,10 @@ struct Rules<'a> {
     n: usize,
     seq: usize,
     last: i64,
+    /// The first quote batch's receipt clock: the others are stamped within MAX_SESSION_MS of it, before or after.
     received: Option<u64>,
-    previous_stamp: u64,
+    /// How many quote batches there have been: the least an end's `frames` can be.
+    deltas: u64,
     previous_kind: Option<u8>,
     midnight: i64,
     transport: Value,
@@ -248,16 +250,12 @@ impl<'a> Rules<'a> {
                     UNIX_MS.0 <= stamp && stamp < UNIX_MS.1,
                     "Implausible local receipt clock"
                 );
-                if self.received.is_none() {
-                    self.received = Some(stamp);
-                    self.previous_stamp = stamp;
-                }
-                let base = self.received.unwrap_or(stamp);
+                let base = *self.received.get_or_insert(stamp);
                 require!(
-                    self.previous_stamp <= stamp && stamp <= base + MAX_SESSION_MS,
-                    "Local receipt clock regression/span"
+                    stamp.abs_diff(base) <= MAX_SESSION_MS,
+                    "Local receipt clock span"
                 );
-                self.previous_stamp = stamp;
+                self.deltas += 1;
                 require!(lateness.is_null(i), "Broker streams are not demo replays");
             }
             if !skipped.is_null(i) {
@@ -288,7 +286,7 @@ impl<'a> Rules<'a> {
                 require!(
                     !frames.is_null(i)
                         && frames.value(i) < TWO_53
-                        && frames.value(i) + 1 >= seq as u64,
+                        && frames.value(i) >= self.deltas,
                     "End summary mismatch"
                 );
                 require!(
@@ -391,7 +389,7 @@ pub fn verify(directory: &Path, table: &Table, master: &[Master], legacy: bool) 
         seq: 0,
         last: 0,
         received: None,
-        previous_stamp: 0,
+        deltas: 0,
         previous_kind: None,
         midnight: 0,
         transport: Value::Null,

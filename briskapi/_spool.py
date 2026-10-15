@@ -198,20 +198,20 @@ class Spool:
     def parts(self):
         return [folder for folder, _, _ in self._parts]
 
-    def package(self, output, repair=False):
+    def package(self, output, repair=False, progress=None):
         """What is left of the segment, in one piece, as a package in `output` (see briskapi.cli.package_parts);
         with `repair`, one cut short gets the end its host never wrote."""
         self.close_part(wait=True)
-        shipped = self._package(self.parts()[self._shipped:], Path(output), last=True, repair=repair)
+        shipped = self._package(self.parts()[self._shipped:], Path(output), last=True, repair=repair, progress=progress)
         return shipped and shipped[0]
 
-    def ship(self, output, final=False, repair=False):
+    def ship(self, output, final=False, repair=False, progress=None):
         """Package the next piece of the segment not shipped yet into `output`, as a recording of its own: once a
         part that closed after noon ends the morning (LUNCH_US), or its parts hold MAX_PIECE_ROWS quote updates;
         with `final` (the segment over, its parts all closed) also what is left, ending as the segment did (or,
         with `repair`, with the end its host never wrote). Returns (manifest, repaired), or None when no piece is
         ready. The parts count as shipped once tried, packaged or not (last_parts names them), so a piece is never
-        shipped twice."""
+        shipped twice. `progress(label)` is told how its packaging goes (see briskapi._native.package)."""
         if final:
             self.close_part(wait=True)
         parts = self.parts()[self._shipped:]
@@ -223,10 +223,10 @@ class Spool:
                     break   # the segment's end goes with the rest
                 rows += info['rows']
                 if (began < LUNCH_US <= info['last'] or rows >= MAX_PIECE_ROWS) and (count < len(parts) or not final):
-                    return self._package(parts[:count], Path(output), last=False)
-        return self._package(parts, Path(output), last=True, repair=repair) if final and parts else None
+                    return self._package(parts[:count], Path(output), last=False, progress=progress)
+        return self._package(parts, Path(output), last=True, repair=repair, progress=progress) if final and parts else None
 
-    def _package(self, parts, output, last, repair=False):
+    def _package(self, parts, output, last, repair=False, progress=None):
         from briskapi import cli
         self.last_parts = parts
         if not parts:
@@ -239,12 +239,19 @@ class Spool:
                  'end': 'cut' if not last else 'repair' if repair else None}
         self._last_piece = piece
         try:
-            manifest = cli.package_parts(self.path / _parquet.EQUITY, parts, output, piece=piece)
+            manifest = cli.package_parts(self.path / _parquet.EQUITY, parts, output, piece=piece, progress=progress)
             if 'clock' in piece:
                 self._cut, self._cut_at = _Cut(piece['state_out'], piece['clock']), self._shipped + len(parts)
         finally:
             self._mark(len(parts))
         return manifest, piece.get('repaired', False)
+
+    @property
+    def piece_start(self):
+        """Where the piece last tried begins, in microseconds after JST midnight: where the piece before it ended, or the
+        bootstrap's clock; None before a piece was tried."""
+        piece = self._last_piece
+        return piece and (piece['cut'][1] if piece['cut'] else piece['bootstrap']['source_time_us'])
 
     def _info(self, part):
         if part not in self._index:
@@ -278,9 +285,10 @@ class Spool:
         """How many of the parts are shipped (or were tried)."""
         return self._shipped
 
-    def keep(self, root):
+    def keep(self, root, progress=None):
         """The piece last tried, or else (nothing shipped yet) the segment so far, as a recording (tables, no
-        manifest) in a folder of `root` named after it; None when there is nothing to keep."""
+        manifest) in a folder of `root` named after it; None when there is nothing to keep. `progress(label)` is told how
+        packaging it goes (see briskapi._native.package)."""
         self.close_part(wait=True)
         if self.last_parts:
             piece, parts = self._last_piece, self.last_parts
@@ -293,7 +301,7 @@ class Spool:
             return None
         staging = Path(tempfile.mkdtemp(dir=self.path))
         summary = _native.package(self.path, parts, staging, piece['midnight'], day_start=piece['day_start'], cut=piece['cut'],
-                                  end=piece['end'] or 'repair', threads=_native.threads())['summary']
+                                  end=piece['end'] or 'repair', threads=_native.threads(), progress=progress)['summary']
         name = local_name(summary, piece['bootstrap'].get('input_transport'))
         target = Path(root) / name
         for n in range(2, 100):

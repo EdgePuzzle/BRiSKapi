@@ -489,8 +489,8 @@ brisk live --site sbi --codes 7203          # SBI証券の BRiSK。Cookie は BR
 brisk live --site e-shiten --codes 7203     # 立花証券 e支店の BRiSK Next。Cookie は BRISK_ESHITEN_COOKIES（JSON）または `brisk login` が保存したもの
 brisk live --site matsui --codes 7203       # 松井証券（または --site monex、--site smbcnikko）。Cookie は BRISK_MATSUI_COOKIES（JSON）または `brisk login` が保存したもの。まだ口座で未検証
 brisk live --site sbi --output days         # 日をまたいで動き続け、記録ごとに days/ に残し（例: sbi_20261013_085800-113000）、stderr に {"day": {...}} を1行出力
-brisk live --site sbi                       # 記録・アップロードし、briskapi.Live() に配信（--no-gateway で配信しない）。10秒ごと（ログでは1分ごと）に stderr に1行: その日、記録した時間、更新数とその速さ
-brisk record --output recordings/s1         # デモを記録（オプトアウトしない限りアップロード）
+brisk live --site sbi                       # 記録・アップロードし、briskapi.Live() に配信（--no-gateway で配信しない）。10秒ごと（ログでは1分ごと）に stderr に1行: その日、記録した時間、更新数とその速さ。記録の保存中は、その進み具合も
+brisk record --output recordings/s1         # デモを記録（オプトアウトしない限りアップロード）。stderr にパッケージ化と保存の完了、アップロードの様子を表示
 brisk list --date 20210927 --source historical_mock   # 自分の記録（--timing で自分のタイミングレポート、--deleted で過去30日間に削除したもの）
 brisk pull PREFIX --output recordings/downloaded   # brisk list が返した prefix を使う
 brisk delete PREFIX                         # 自分のアップロードを自分のアーカイブから削除（30日間は復元可能）
@@ -499,7 +499,7 @@ brisk prune recordings/s1                   # ディスクを空ける: アー�
 brisk export recordings/s1 --nautilus catalog      # NautilusTrader v2 のカタログを銘柄ごとに書き出し（または --jsonl FILE。記録全体をメモリに読むので、証券会社の前場・後場では数十 GB）
 brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13   # クラウド API：CSV を標準出力へ（--encoding json|parquet、--output FILE、--end、--limit）
 brisk consent [--accept | --revoke]         # 自動アップロードの設定の表示・変更（--no-upload: 今回だけ）
-brisk upload recordings/s1                  # 記録のアップロードを再試行
+brisk upload recordings/s1                  # 記録のアップロードを再試行（stderr: 送ったバイト数、アーカイブの確認、保存完了）
 brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元コード、別のコンピューターで使う
 ```
 
@@ -528,6 +528,16 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 （ディスクに残すには `--output DIR`）。`brisk list --source brisk_live`（どの証券会社のものも）で自分の証券会社の記録を
 一覧できます。どの `brisk live` も、`--no-gateway` を指定しない限り、このコンピューターの
 `briskapi.Live()` にフィードを配信します（[ライブのレコード](#ライブのレコードdatabento-風)）。
+
+記録の保存には数分かかるので、その様子を表示します。セッションが終わると、記録の保存が続いている間に、そう表示します
+（`session ended; waiting for the next trading day`）。保存の様子は stderr に出ます
+（端末では5秒ごと、ログでは30秒ごと。`--quotes` の標準出力は気配のままです）: どの記録か（`sbi 2026-10-13 from 09:00:00`）、
+段階（準備、バッチ・気配・約定の書き込み、仕上げ）と書き込んだ行数と全体の行数、ディスクに書き終えて初めて
+`saved to PATH in 2m35s`、失敗したときは `Packaging failed after ...` とその理由です。アップロードには別の行があります:
+送ったバイト数、アーカイブの確認、`uploaded; the archive stored it`。
+保存に失敗したものは `~/.local/share/brisk/recordings` に残り、同じ形で表示されます（`keeping what was recorded in ...`、
+続いて `saved to ...`。アップロードの失敗なら `brisk upload PATH` で再試行できます）。`brisk record`、`package`、`upload` も
+パッケージ化とアップロードの様子を同様に stderr に出し、JSON の結果は標準出力のままです。
 
 ## 自分専用のアーカイブ
 

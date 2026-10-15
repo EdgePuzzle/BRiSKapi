@@ -1,4 +1,5 @@
 """The spool: a recording kept on disk, in Parquet parts, while it is made (briskapi._spool)."""
+import io
 import json
 import os
 import subprocess
@@ -11,7 +12,7 @@ import pytest
 import briskapi
 import briskapi.cli as cli
 import briskapi.schema as schema
-from briskapi import _parquet, _spool
+from briskapi import _live, _parquet, _spool
 
 OPEN_US = 9 * 3600 * 10**6
 
@@ -176,6 +177,25 @@ def test_leftovers_are_crashed_broker_spools_with_their_sessions_choices_and_a_d
     assert len(briskapi.Market(recording).trades()) == 1 + 4 * 8   # the history's, and batches 3, 6, ... 24
 
 
+def test_a_recovered_spool_is_named_and_reports_its_packaging_like_a_running_one(tmp_path):
+    # A reopened spool has no header in memory: its site, day and the piece's start come from its first part.
+    root = tmp_path / 'spool'
+    _spool.PART_BYTES, spool = 1500, _spool.Spool(root=root, intent={'upload': False, 'output': str(tmp_path / 'days')})
+    for b, line in zip(session()[:25], lines(session()[:25])):
+        spool.add(b, line)
+    spool.close_part(wait=True)
+    spool._writer.shutdown()
+    (spool.path / 'owner.json').write_text(json.dumps({**json.loads((spool.path / 'owner.json').read_text()), 'pid': dead_pid()}))
+    found, = _spool.leftovers(root)
+    assert found.header is None and found.piece_start is None
+    out = io.StringIO()
+    saving = cli.Saving(lambda: _live._saving_label(found), 0, out)
+    found.package(tmp_path / 'package', repair=True, progress=saving.packaging)
+    told = [line.split(': ', 1)[1] for line in out.getvalue().splitlines()]
+    assert out.getvalue().startswith('[brisk] sbi 2026-03-11 from 09:00:00: preparing to save') and told[-1].startswith('finalizing')
+    assert any(line.startswith('writing quotes') for line in told)
+
+
 @pytest.mark.parametrize('cut', [1, 2, 10, 25, 41])
 def test_a_repaired_end_is_one_the_archive_accepts(tmp_path, cut):
     batches = session()[:cut]
@@ -293,11 +313,13 @@ def test_a_day_ships_its_morning_once_a_part_closes_after_noon_and_its_afternoon
     spool.close_part(wait=True)
     morning = spool.ship(tmp_path / 'morning')
     assert morning and morning[0]['summary']['last_source_time_us'] >= _spool.LUNCH_US > morning[0]['summary']['first_source_time_us']
+    assert spool.piece_start == morning[0]['summary']['first_source_time_us']
     assert spool.ship(tmp_path / 'again') is None, 'the afternoon waits for the day\'s end'
     for b, line in zip(batches[24:], lines(batches[24:])):
         spool.add(b, line)
     afternoon = spool.ship(tmp_path / 'afternoon', final=True)
     assert afternoon and afternoon[0]['summary']['first_source_time_us'] == morning[0]['summary']['last_source_time_us']
+    assert spool.piece_start == afternoon[0]['summary']['first_source_time_us'], 'a piece is named for where it begins'
     for directory, (manifest, _) in ((tmp_path / 'morning', morning), (tmp_path / 'afternoon', afternoon)):
         assert _parquet.inspect_package(directory, manifest) == manifest['summary']
     assert spool.ship(tmp_path / 'more', final=True) is None

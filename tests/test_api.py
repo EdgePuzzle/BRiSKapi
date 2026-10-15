@@ -486,11 +486,11 @@ def test_feed_uploads_complete_sessions(gated_decoder, tmp_path, monkeypatch):
     gate.touch()
     packaged = []
 
-    def package_parts(equity, parts, output, repair=False, piece=None):
+    def package_parts(equity, parts, output, repair=False, piece=None, progress=None):
         packaged.append([b['seq'] for b in reference_package.load_parts(Path(equity), parts).iter_batches()])
 
     monkeypatch.setattr(cli, 'package_parts', package_parts)
-    monkeypatch.setattr(cli, 'upload', lambda directory, url, verify, out: {'status': 'stored', 'verify': verify})
+    monkeypatch.setattr(cli, 'upload', lambda directory, url, verify, out, progress: {'status': 'stored', 'verify': verify})
     with pytest.warns(UserWarning, match='by default'):
         feed = brisk.connect(site='demo', cache=tmp_path).wait()
     assert feed.uploaded == {'status': 'stored', 'verify': False}

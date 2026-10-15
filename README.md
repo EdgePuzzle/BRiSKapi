@@ -491,8 +491,8 @@ brisk live --site sbi --codes 7203          # BRiSK at SBI Securities; cookies f
 brisk live --site e-shiten --codes 7203     # Tachibana e-shiten BRiSK Next; cookies from BRISK_ESHITEN_COOKIES (JSON) or `brisk login`
 brisk live --site matsui --codes 7203       # Matsui (or --site monex, --site smbcnikko); cookies from BRISK_MATSUI_COOKIES (JSON) or `brisk login`; not yet tried live
 brisk live --site sbi --output days         # runs day after day; keeps each recording in days/ (e.g. sbi_20261013_085800-113000) and prints a {"day": {...}} line for it on stderr
-brisk live --site sbi                       # records, uploads and serves briskapi.Live() (--no-gateway: serves nothing), with a line on stderr every 10 s (a minute in a log): the day, how long it has recorded, its updates and their rate
-brisk record --output recordings/s1         # record the demo (uploaded unless you opt out)
+brisk live --site sbi                       # records, uploads and serves briskapi.Live() (--no-gateway: serves nothing), with a line on stderr every 10 s (a minute in a log): the day, how long it has recorded, its updates and their rate; and, while it saves a recording, how far that has got
+brisk record --output recordings/s1         # record the demo (uploaded unless you opt out); stderr says when it is packaged and saved, and how the upload goes
 brisk list --date 20210927 --source historical_mock   # your recordings (--timing: your timing reports; --deleted: what you deleted in the last 30 days)
 brisk pull PREFIX --output recordings/downloaded   # use a prefix returned by brisk list
 brisk delete PREFIX                         # remove one of your uploads from your archive (restorable for 30 days)
@@ -501,7 +501,7 @@ brisk prune recordings/s1                   # free disk: remove a local recordin
 brisk export recordings/s1 --nautilus catalog      # a NautilusTrader v2 catalog, an instrument at a time (or --jsonl FILE, which holds the recording in memory: tens of GB for a broker's session)
 brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13   # the cloud API: CSV to stdout (--encoding json|parquet, --output FILE, --end, --limit)
 brisk consent [--accept | --revoke]         # show or change automatic uploads (--no-upload: this run only)
-brisk upload recordings/s1                  # retry uploading a recording
+brisk upload recordings/s1                  # retry uploading a recording (stderr: bytes sent, the archive's checks, then stored)
 brisk identity [--recovery-code | --recover CODE]  # your owner ID; its recovery code; use it on another computer
 ```
 
@@ -529,6 +529,16 @@ without asking; `--no-upload-market-data` stops uploading the recordings and `--
 (add `--output DIR` to keep them on disk). `brisk list --source brisk_live` (every broker's) lists
 your broker recordings. Every `brisk live` also serves its feed to `briskapi.Live()` on this computer
 ([Live records](#live-records-databento-style)) unless you pass `--no-gateway`.
+
+Saving a recording takes minutes, and shows. When a session ends, `brisk live` says so
+(`session ended; waiting for the next trading day`) while the recording is still being saved. Saving
+reports on stderr (every 5 s on a terminal, 30 s in a log; stdout stays the quotes of `--quotes`): which recording
+(`sbi 2026-10-13 from 09:00:00`), its stage (preparing, writing batches, quotes and trades, finalizing) with the rows
+written of the total, then `saved to PATH in 2m35s` only once it is on disk, or `Packaging failed after ...` and why. The upload
+has lines of its own: bytes sent, the archive's checks, and `uploaded; the archive stored it`. A save that fails is kept in
+`~/.local/share/brisk/recordings` and says so the same way (`keeping what was recorded in ...`, then `saved to ...`, with
+`brisk upload PATH` to retry an upload that failed). `brisk record`, `package` and `upload` tell their packaging and upload on
+stderr likewise, and their JSON results stay on stdout.
 
 ## Your private archive
 

@@ -203,6 +203,16 @@ test('started with no session running (after the close), the host says so once a
     + 'waiting for the next trading day']);
 });
 
+test('a day whose session is over is said to have ended, never to be recorded: Python has still to save it', async () => {
+  const { fetchImpl } = server({}, { '/api/app/boot': () => JSON.stringify({ date: '2021-09-27', series: 0,
+    session_status: 'done', time: 1000, next_date: 1120 }) });
+  const batches = [], logged = [];
+  await assert.rejects(live({ cookies: { s: 'v' }, fetchImpl, after: '2021-09-27', emit: async b => batches.push(b),
+    log: line => logged.push(line), sleep: async () => { throw new Error('stopped waiting'); } }), /stopped waiting/);
+  assert.deepEqual(logged, ['[brisk] SBI BRiSK: 2021-09-27 session ended; waiting for the next trading day']);
+  assert.deepEqual(batches, [{ type: 'waiting', date: '2021-09-27', session_status: 'done' }]);
+});
+
 test('a day ends when the site\'s session is done, and the next starts with the next session',
   { skip: !cache }, async () => {
   const { files, chunks } = demo();

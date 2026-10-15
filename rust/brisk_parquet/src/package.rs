@@ -1,7 +1,7 @@
 //! Spooled parts, packaged: consecutive parts of a session (and the book where a previous piece left it) written as one
 //! recording, a range of issues at a time, so that no day is ever whole in memory. It is `write_piece` of
 //! `briskapi/_parquet.py`, and writes the same tables: tests/test_native.py compares them.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -327,7 +327,47 @@ fn trace(label: &str, since: &std::time::Instant) {
     }
 }
 
+/// The least time between two row counts of a table.
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// What a caller is told while a recording is written, as `package: STAGE` (preparing, finalizing) and `package: TABLE
+/// DONE/TOTAL` for the rows of a table (batches, quotes, trades). A table's count comes at most every PROGRESS_EVERY, and
+/// its last always, once. Only a package that writes tables says anything: the book alone (`state`) is not a recording.
+struct Pace<'a> {
+    tell: Option<&'a (dyn Fn(&str) + Sync)>,
+    /// When each table's count was last told, and what it was.
+    last: HashMap<&'static str, (std::time::Instant, u64)>,
+}
+
+impl Pace<'_> {
+    fn stage(&self, name: &str) {
+        if let Some(tell) = self.tell {
+            tell(&format!("package: {name}"));
+        }
+    }
+
+    fn rows(&mut self, table: &'static str, done: u64, total: u64) {
+        let Some(tell) = self.tell else { return };
+        let told = self.last.get(table);
+        let due = told.is_none_or(|(at, _)| at.elapsed() >= PROGRESS_EVERY) || done >= total;
+        if total > 0 && due && told.is_none_or(|(_, was)| *was != done) {
+            self.last.insert(table, (std::time::Instant::now(), done));
+            tell(&format!("package: {table} {done}/{total}"));
+        }
+    }
+}
+
 pub fn package(config: &Config) -> Res<Outcome> {
+    package_with(config, &|_| {})
+}
+
+/// `package`, telling `progress` how it goes (see Pace).
+pub fn package_with(config: &Config, progress: &(dyn Fn(&str) + Sync)) -> Res<Outcome> {
+    let mut pace = Pace {
+        tell: config.out.as_ref().map(|_| progress),
+        last: HashMap::new(),
+    };
+    pace.stage("preparing");
     let started = std::time::Instant::now();
     let pool = Arc::new(
         rayon::ThreadPoolBuilder::new()
@@ -647,6 +687,9 @@ pub fn package(config: &Config) -> Res<Outcome> {
                 line_bytes += measure(&batch, at);
                 at += batch.num_rows();
                 sink.push(batch)?;
+                if at < total {
+                    pace.rows("batches", at as u64, total as u64);
+                }
             }
         }
         if let Some(row) = &tail {
@@ -655,6 +698,7 @@ pub fn package(config: &Config) -> Res<Outcome> {
             at += 1;
         }
         require!(at == total, "Quotes or trades outside their batches");
+        pace.rows("batches", at as u64, total as u64);
     }
 
     trace("batches written", &started);
@@ -668,6 +712,11 @@ pub fn package(config: &Config) -> Res<Outcome> {
         }
     }
     trace("counted", &started);
+    // The rows to write, for the progress lines: the book before the piece goes into the first ranges' quotes.
+    let quotes_total =
+        counts.values().sum::<u64>() + state_batch.as_ref().map_or(0, |b| b.num_rows() as u64);
+    let trades_total: u64 = trades.iter().sum();
+    let (mut quotes_done, mut trades_done) = (0u64, 0u64);
     let mut latest: Vec<RecordBatch> = Vec::new();
     let mut read_time = std::time::Duration::ZERO;
     for (low, high) in ranges(&counts, config.range_rows.unwrap_or(PIECE_ROWS)) {
@@ -733,9 +782,11 @@ pub fn package(config: &Config) -> Res<Outcome> {
                 last_of.push(rows.slice(rows.num_rows() - 1, 1));
             }
             if let Some(sink) = depths_sink.as_mut() {
+                quotes_done += rows.num_rows() as u64;
                 sink.push(rows)?;
             }
         }
+        pace.rows("quotes", quotes_done, quotes_total);
         if !last_of.is_empty() {
             let schema = last_of[0].schema();
             latest.push(
@@ -764,13 +815,16 @@ pub fn package(config: &Config) -> Res<Outcome> {
             let seqs: Vec<u64> = u64s(&merged, "seq")?.iter().map(|&s| s - shift).collect();
             let merged = replace(&merged, "seq", Arc::new(UInt64Array::from(seqs)))?;
             let ids = trade_ids(&merged)?;
+            trades_done += merged.num_rows() as u64;
             sink.push(replace(&merged, "trade_id", ids)?)?;
         }
+        pace.rows("trades", trades_done, trades_total);
     }
     trace(
         &format!("ranges done (reading {:.1}s)", read_time.as_secs_f64()),
         &started,
     );
+    pace.stage("finalizing");
     let mut summary = None;
     if let (Some(depths), Some(trades), Some(batches)) = (depths_sink, trades_sink, batches_sink) {
         let (quote_rows, quote_total) = depths.finish()?;

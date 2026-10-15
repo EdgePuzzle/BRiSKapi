@@ -74,8 +74,9 @@ def site_of(transport):
     """The broker site whose transport provenance this is, or None."""
     return next((site for site, fixed in BROKER_TRANSPORTS.items() if transport == fixed), None)
 REFERENCE_DIR = Path(__file__).resolve().parent / 'references'
-# Local measurements are client reported. Plausible ranges and microsecond
-# precision keep them useful as timing data and useless as a payload carrier.
+# Local measurements are client reported, and checked for plausibility only: a range, a span, a precision where one is stated.
+# They are timing data, not a promise of any order (a computer's clock adjusting itself sets the receipt clock back), and these
+# checks do not stop other data being carried in them: decode_ns takes any value up to MAX_DECODE_NS, in any order.
 MAX_DECODE_NS = 10 * 10**9
 UNIX_MS = (1_600_000_000_000, 4_102_444_800_000)
 MAX_SESSION_MS = 86_400_000
@@ -193,8 +194,8 @@ def _scan(entries):
     """
     identities, clocks, executed, offsets, executions, restored = {}, {}, {}, {}, {}, {}
     fingerprint = Fingerprint()
-    seq = last = count = expanded = updates = market = 0
-    first = source = date = paced = received = previous_stamp = previous_kind = None
+    seq = last = count = expanded = updates = deltas = market = 0
+    first = source = date = paced = received = previous_kind = None
     ended = False
     for b, line in entries:
         require(isinstance(b, dict), 'Invalid batch')
@@ -247,9 +248,8 @@ def _scan(entries):
             stamp = integer(b['received_unix_ms'])
             require(UNIX_MS[0] <= stamp < UNIX_MS[1], 'Implausible local receipt clock')
             if received is None:
-                received = previous_stamp = stamp
-            require(previous_stamp <= stamp <= received + MAX_SESSION_MS, 'Local receipt clock regression/span')
-            previous_stamp = stamp
+                received = stamp
+            require(abs(stamp - received) <= MAX_SESSION_MS, 'Local receipt clock span')
             lateness = b['replay_lateness_ms']
             if broker(source):
                 require(lateness is None, 'Broker streams are not demo replays')
@@ -311,12 +311,15 @@ def _scan(entries):
             require(len(quotes) + len(skipped) == len(identities), 'Incomplete bootstrap')
         if kind == 'end':
             frames = integer(b['frames'])
-            require((frames >= seq - 1 if broker(source) else frames == seq)
+            # A broker's frames are the ones received, before the bootstrap too, one for each quote batch: history batches
+            # (the trades a mid-session start restores) are not frames.
+            require((frames >= deltas if broker(source) else frames == seq)
                     and integer(b['quote_updates']) == updates, 'End summary mismatch')
             measurement(b['replay_wall_ms'], MAX_SESSION_MS)
             ended = True
         elif kind == 'quotes':
             updates += len(quotes)
+            deltas += 1
         seq += 1
         last, count, previous_kind = now, count + len(quotes), kind
     require(ended, 'Recording has no clean end')

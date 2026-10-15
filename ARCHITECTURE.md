@@ -205,12 +205,33 @@ them. A piece is written by `brisk-parquet package` a range of issues at a time 
 `PART_ISSUES` issue IDs, and a range of about a million rows gathers the issues' rows from every part), in the row
 groups writing it at once would make, so the tables are the same and no session is ever whole in memory: the
 row groups are encoded on a few threads (a third of the cores, so that the feed keeps up) and appended in order. A 60-million-update
-piece takes about 80 seconds and at most 5.5 GB. The [80-million-update synthetic check](docs/benchmarks/package-80m.md)
-also covers two packaging processes together, without trades or live feeds. The book the next piece starts from is a Parquet file of the last quote
+piece takes about 80 seconds and at most 5.5 GB on five threads; on the recorder's default three, a tester's 24 GB M4 took 112 seconds and 5.6 GB for
+real sessions. The [80-million-update synthetic check](docs/benchmarks/package-80m.md)
+also covers two packaging processes together, without trades or live feeds, and records the tester's four real sessions. The book the next piece starts from is a Parquet file of the last quote
 of each issue, written with the piece (`cut/`). Its zip is written and hashed on disk (`pack_to`). The worker keeps and uploads each piece as it would a
 day. `shipped.json` counts the parts shipped, so a crashed session's spool is finished from there; where
 the morning left the book is rebuilt from its parts (`brisk-parquet state`). A demo's replay is one recording,
 as its reference requires.
+
+A save takes minutes, so `brisk live` says how it goes (`cli.Saving`, on stderr, so that `--quotes` keeps stdout to the quotes).
+`brisk-parquet package` tells `progress: package: preparing`, then `package: batches|quotes|trades DONE/TOTAL` (the totals known
+from the plan: the quotes include the book a later piece opens with; each table's count at most twice a second and its last
+once) and `package: finalizing`; the book alone (`state`) says nothing. `_native.run` hands each label to the callback
+(`parse_progress` reads them), which `Spool.ship` and `cli.package_parts` pass down from `Feed._ship`. The report
+names the recording from its spool (site, trading date and where the piece begins, as a day is saved in pieces), prints each
+stage's first line at once and the rest every `SAVE_SECONDS` (5 s on a terminal, 30 s when stderr is redirected; plain
+lines, no redrawing), and says `saved to PATH` only after the package is copied to `output`, and `Packaging failed after ...`
+or `Automatic upload failed after ...` when it is not. The upload (`cli.upload(progress=)`) reports apart: the zip it
+prepares, the bytes sent of the total, the archive's checks, and `uploaded; the archive stored it` once the archive has. Telling
+never fails a save (a closed stderr is ignored), and a feed of the API stays quiet: `SAVE_EVERY` is set only while `brisk live`
+runs. The host, which knows only that a session is over, never says a day is recorded (`session ended; waiting for the next
+trading day`): Python says `saved`. Crash recovery (`_recover`) goes through the same `_ship`, so it reports too. A piece that
+failed is rescued into `kept_dir()` by `Feed._rescue` and told afresh (`Saving.keeping`: `keeping what was recorded in ...`; its
+packaging again, if its tables are all there is, reports through `Spool.keep(progress=)`; `saved to` only once the copy exists,
+with the `brisk upload PATH` hint when an upload failed; `Keeping the recording failed ...` if even that does). `brisk record`,
+`package` and `upload` report through `Saving` too (`cli._telling`, always on stderr): Python writes their packages, so
+`packaging` has no rows to count, and `saved to` follows only the finished package. The API (`Archive.upload`, `briskapi.record`)
+stays quiet: a progress callback there would be public API.
 
 A packaging or upload failure is a warning (`Packaging failed: ...` or `Automatic upload failed: ...`; with uploads off, `uploaded` stays null) and a result that
 says so, never a failed feed, and the day is then kept in `~/.local/share/brisk/recordings`
@@ -781,7 +802,7 @@ close it is `done` and the boot has no `ws_url` (the host used to resolve the mi
 `/undefined` and fail). As the app reloads a minute after `next_date` (both it and the boot's
 `time` in unix seconds, so the wait is on the server's clock), the boot is asked again then, or
 in ten minutes if that is sooner; once it is due, every minute (`STREAM_CHECK_MS`). The
-host says so once per wait, on stderr and to Python as an out-of-band line
+host says so once per wait, on stderr (`DATE session ended` after a day it has just seen, `no session is running (...)` otherwise: never that the day is recorded, which only Python's `saved` says) and to Python as an out-of-band line
 `{"type": "waiting", "date", "session_status"}` (no `seq`): the feed keeps it nowhere (not in
 the spool, a recording or the gateway), shows it as `feed.waiting`, and until the first
 bootstrap has the status `waiting`, during which `ready()` and `connect()` wait past their
@@ -1111,11 +1132,18 @@ nothing could make trustworthy:
 - **Exact fields.** Batches, master entries and quotes must have exactly the
   fields defined in `briskapi/schema.py`. Account, session or unknown fields are
   rejected. Local timing values must be plausible: decode ≤ 10 s, receipt clock
-  monotonic within 24 h, millisecond values with at most microsecond precision,
-  and pacing consistent throughout. End-of-stream counts must match.
+  within 24 h either side of the first quote batch's (it is timing, for `ts_recv` and the
+  timing reports, not a promise of any order: a computer's clock adjusting itself sets it
+  back, as a tester's did by 47 to 90 ms, and no rule refuses that), millisecond values
+  with at most microsecond precision, and pacing consistent throughout. These checks are
+  plausibility, not a defence against other data being carried in the fields: `decode_ns`
+  takes any value up to 10 s, in any order. End-of-stream counts must match.
   Broker quotes use null
-  replay lateness. Its end frame count includes pre-bootstrap catch-up frames,
-  so it can exceed the number of emitted quote batches. Broker packaging removes
+  replay lateness. Its end frame count is the frames the host received, including
+  pre-bootstrap catch-up frames, so it can exceed the number of emitted quote batches;
+  it must be at least that number. History batches (the trades a mid-session start
+  restores) take a sequence number but are no frames, so it can be fewer than the
+  batches before the end. Broker packaging removes
   connection/decoder diagnostics and keeps only the site's fixed transport metadata,
   `{"kind":"sbi_websocket","origin":"https://sbi.brisk.jp/"}` for SBI
   (`eshiten_websocket` and `https://next.e-shiten.brisk.jp/` for e-shiten, and so on: `BROKER_TRANSPORTS`, any of which a `brisk_live` recording may have).

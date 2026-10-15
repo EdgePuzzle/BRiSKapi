@@ -4,6 +4,7 @@ import urllib.request
 import pytest
 
 import briskapi.cli as cli
+from briskapi import _native
 
 
 @pytest.fixture(autouse=True)
@@ -35,3 +36,15 @@ def offline(monkeypatch):
 def untold(monkeypatch):
     """Each test starts in a fresh process's state: the upload-by-default notice not yet shown."""
     monkeypatch.setattr(cli, '_told', False)
+
+
+def pytest_sessionstart(session):
+    """The tests run brisk-parquet. Without it a feed turns the missing program into a "Packaging failed" warning and dozens of
+    tests fail on what that leaves out, so say what is wrong once, with the way to mend it."""
+    try:
+        _native.binary()
+    except RuntimeError as error:
+        pytest.exit(f'{error}\n\nFrom a source checkout, build it first (CONTRIBUTING.md):\n'
+                    '    cargo build --release --locked --manifest-path rust/brisk_parquet/Cargo.toml\n'
+                    'or set BRISK_PARQUET to a program built elsewhere (an installed wheel holds one in briskapi/_bin).',
+                    returncode=3)

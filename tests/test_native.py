@@ -235,6 +235,53 @@ def test_a_piece_after_a_cut_is_packaged_as_python_does(tmp_path, segment, k):
     assert json.loads(_native.run(['verify', tmp_path / 'first'])) is not None
 
 
+def told(spool, parts, out, **options):
+    seen = []
+    midnight = _parquet.midnight_ns(_parquet.bootstrap_row(spool.parts()[0])['trading_date'])
+    result = _native.package(spool.path, parts, out, midnight, progress=seen.append, **options)
+    return result, [_native.parse_progress(label) for label in seen], seen
+
+
+def test_packaging_tells_its_stages_and_the_rows_it_has_written(tmp_path, segment):
+    result, seen, labels = told(segment, segment.parts(), tmp_path / 'out', range_rows=3)
+    assert None not in seen and len(set(labels)) == len(labels), labels   # nothing but package labels, none told twice
+    assert seen[0] == ('preparing', None, None) and seen[-1] == ('finalizing', None, None)
+    # The rows of each table count up to its total, the last count always told (the rest at most twice a second).
+    rows = {table: [(done, total) for name, done, total in seen if name == table] for table in ('batches', 'quotes', 'trades')}
+    for table, name in (('batches', _parquet.BATCHES), ('quotes', _parquet.DEPTHS), ('trades', _parquet.TRADES)):
+        written = pq.read_metadata(tmp_path / 'out' / name).num_rows
+        assert written and rows[table][-1] == (written, written), table
+        assert [done for done, _ in rows[table]] == sorted(done for done, _ in rows[table])
+    assert rows['batches'][-1][1] == result['summary']['batches'] and rows['quotes'][-1][1] == result['summary']['quote_updates']
+    # Batches, then the quotes and trades by range of issues, between the stages.
+    names = [name for name, *_ in seen]
+    assert names.index('batches') < names.index('quotes') < names.index('trades') < names.index('finalizing')
+
+
+def test_a_piece_after_a_cut_counts_the_book_it_opens_with_among_its_quotes(tmp_path, segment):
+    parts = segment.parts()
+    midnight = _parquet.midnight_ns(_parquet.bootstrap_row(parts[0])['trading_date'])
+    first = _native.package(segment.path, parts[:2], tmp_path / 'first', midnight, end='cut', state_out=tmp_path / 'state.parquet')
+    _, seen, _ = told(segment, parts[2:], tmp_path / 'second', day_start=parts[0], cut=(tmp_path / 'state.parquet', first['clock']))
+    written = pq.read_metadata(tmp_path / 'second' / _parquet.DEPTHS).num_rows
+    assert [(done, total) for name, done, total in seen if name == 'quotes'][-1] == (written, written)
+
+
+def test_the_book_alone_is_not_a_recording_and_tells_nothing(tmp_path, segment):
+    seen = []
+    midnight = _parquet.midnight_ns(_parquet.bootstrap_row(segment.parts()[0])['trading_date'])
+    _native.run(['state', '--spool', segment.path, '--midnight', midnight, '--state-out', tmp_path / 'state.parquet',
+                 *segment.parts()], seen.append)
+    assert seen == []
+
+
+def test_only_a_packages_own_labels_are_read():
+    assert _native.parse_progress('package: preparing') == ('preparing', None, None)
+    assert _native.parse_progress('package: quotes 12/340') == ('quotes', 12, 340)
+    for other in ('verify: batches', 'package: sorting', 'package: quotes 12', 'package: quotes 1/2 more', ''):
+        assert _native.parse_progress(other) is None
+
+
 def test_a_piece_that_stops_early_gets_an_end(tmp_path, segment):
     result = two_ways(tmp_path, segment, segment.parts()[:3], end='cut')
     assert json.loads(_native.run(['verify', tmp_path / 'rust'])) == result['summary'] and not result['repaired']

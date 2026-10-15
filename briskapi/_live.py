@@ -41,6 +41,16 @@ def _stored(result):
     return bool(result['uploaded']) and result['uploaded'].get('status') == 'stored'
 
 
+def _saving_label(spool):
+    """Which recording a spool is saving, for `brisk live`'s lines: its site (or source), its trading date and where its piece
+    begins (a day is saved in pieces)."""
+    header = spool.header or _parquet.bootstrap_row(spool.parts()[0])
+    site = schema.site_of(header.get('input_transport')) or header['source']
+    date, start = header['trading_date'], spool.piece_start
+    return (f'{site} {date[:4]}-{date[4:6]}-{date[6:]}'
+            + ('' if start is None else f' from {start // 3_600_000_000:02d}:{start // 60_000_000 % 60:02d}:{start // 1_000_000 % 60:02d}'))
+
+
 def _stop(process):
     if process.poll() is None:
         process.kill()
@@ -610,9 +620,10 @@ class Feed:
         """Package the spool's next piece (Spool.ship), keep it in `output` and upload it, as chosen. Returns its
         result, or None when no piece is ready."""
         result, package, step = self._result(), spool.path / 'package', 'Packaging'
+        save = cli.saving(lambda: _saving_label(spool))   # says nothing until a piece is being packaged
         shutil.rmtree(package, ignore_errors=True)
         try:
-            shipped = spool.ship(package, final=final, repair=repair)
+            shipped = spool.ship(package, final=final, repair=repair, progress=save.packaging)
             if shipped is None:
                 return None
             m, result['repaired'] = shipped
@@ -628,15 +639,19 @@ class Feed:
                     output.mkdir(parents=True, exist_ok=True)
                     shutil.copytree(package, target)
                     result['path'] = str(target)
+                    save.saved(target)
             if upload:
                 step = 'Automatic upload'
-                result['uploaded'] = cli.upload(package, cli.settings()['api_url'], verify=False, out=sys.stderr)
+                result['uploaded'] = cli.upload(package, cli.settings()['api_url'], verify=False, out=sys.stderr,
+                                                progress=save.uploading)
+                save.uploaded()
         except Exception as error:  # noqa: BLE001 - market data was delivered; report, do not fail
+            save.failed(step, error)
             # What failed, the packaging or the upload: a recording not uploaded (uploads off) never says it was.
             result['error'] = f'{step} failed: {error}'
             if upload:
                 result['uploaded'] = {'status': 'failed', 'error': str(error)}
-            kept = None if result['path'] else self._rescue(spool, package, result['name'])
+            kept = None if result['path'] else self._rescue(spool, package, result['name'], save, retry=bool(upload))
             result['path'] = result['path'] or (kept and str(kept))
             warnings.warn(f'{step} failed: {error}' +
                           (f'; the recording is kept in {kept}' + (f' (`brisk upload {kept}` retries)' if
@@ -655,17 +670,25 @@ class Feed:
             except Exception as error:  # noqa: BLE001 - a reporting callback must not stop the recording
                 warnings.warn(f'on_day callback failed: {error}')
 
-    def _rescue(self, spool, package, name):
+    def _rescue(self, spool, package, name, save, retry=False):
         """Keep a piece whose packaging or upload failed in briskapi._spool.kept_dir(): its package if it has one
-        (an upload can be retried), else its tables (Spool.keep); None if even that fails."""
+        (an upload can be retried), else its tables (Spool.keep); None if even that fails. `save` tells how it goes."""
         try:
+            save.keeping(_spool.kept_dir())
             if name and (package / 'manifest.json').exists():
                 target = _spool.kept_dir() / name
                 if not target.exists():
                     shutil.copytree(package, target)
+                    save.saved(target, f'`brisk upload {target}` retries the upload' if retry else None)
                     return target
-            return spool.keep(_spool.kept_dir())
+            kept = spool.keep(_spool.kept_dir(), progress=save.packaging)
+            if kept is None:
+                save.failed('Keeping the recording', 'there is nothing of it to keep')
+            else:
+                save.saved(kept)
+            return kept
         except Exception as error:  # noqa: BLE001 - reported with the upload's failure
+            save.failed('Keeping the recording', error)
             warnings.warn(f'Could not keep the day in {_spool.kept_dir()}: {error}')
             return None
 

@@ -9,6 +9,7 @@ import briskapi.cli as cli
 import briskapi.schema as schema
 from briskapi import _parquet
 
+import reference_verifier
 from test_spool import lines, session
 
 
@@ -74,6 +75,8 @@ def test_quotes_and_trades_that_are_not_well_formed_are_refused(tmp_path, broker
     (lambda b: b[0].__setitem__('input_transport', {**b[0]['input_transport'], 'ws_host': 'stream.example'}), 'transport'),
     (lambda b: b[-1].__setitem__('quote_updates', 1), 'End summary mismatch'),
     (lambda b: b[5].__setitem__('received_unix_ms', 1), 'Implausible local receipt clock'),
+    (lambda b: b[9].__setitem__('received_unix_ms', b[2]['received_unix_ms'] + schema.MAX_SESSION_MS + 1), 'receipt clock span'),
+    (lambda b: b[-1].__setitem__('frames', sum(x['type'] == 'quotes' for x in b) - 1), 'End summary mismatch'),
     (lambda b: b[5].__setitem__('replay_lateness_ms', 1.0), 'not demo replays'),
     (lambda b: b.pop(), 'no clean end'),
     (lambda b: b[7].__setitem__(schema.SKIPPED, [0]), 'Invalid skipped issues'),
@@ -84,6 +87,61 @@ def test_batches_that_break_the_archives_rules_are_refused(tmp_path, broker, spo
     spoil(columns.batches)
     with pytest.raises(ValueError, match=message):
         _parquet.verify_broker(spoiled(tmp_path, columns))
+
+
+def three_verdicts(tmp_path, columns, name):
+    """What Python's full rules (schema), brisk-parquet and the reference verifier say of the same recording: its summary, or the
+    refusal's message."""
+    written = None
+
+    def verdict(check):
+        nonlocal written
+        try:
+            return check()
+        except ValueError as error:
+            return str(error)
+    python = verdict(lambda: schema.validate_batches(columns.iter_batches()))
+    written = spoiled(tmp_path, columns, name)
+    return python, verdict(lambda: _parquet.verify_broker(written)), verdict(lambda: reference_verifier.verify_broker(written))
+
+
+def test_history_batches_are_not_frames_so_an_end_may_count_fewer_frames_than_batches(tmp_path, broker):
+    # A host that joins mid-session restores the day's trades as history batches, which take a sequence number each but are no
+    # frames; its end counts the frames it received (a quote batch each, and any before the bootstrap).
+    m, columns = broker
+    quote_batches = sum(b['type'] == 'quotes' for b in columns.batches)
+    assert sum(b['type'] == 'history' for b in columns.batches) >= 1
+    columns.batches[-1]['frames'] = quote_batches
+    assert quote_batches < columns.batches[-1]['seq'] - 1, 'fewer frames than there are batches before the end'
+    python, rust, reference = three_verdicts(tmp_path, columns, 'host')
+    assert isinstance(python, dict) and python['batches'] == rust['batches'] == reference['batches']
+    assert python == rust == reference
+    # Fewer than one for each quote batch cannot be.
+    columns.batches[-1]['frames'] = quote_batches - 1
+    assert three_verdicts(tmp_path, columns, 'short') == ('End summary mismatch',) * 3
+
+
+def test_the_receipt_clock_is_timing_not_order_so_it_may_go_back_and_is_bound_only_by_its_span(tmp_path, broker):
+    # A computer adjusting its clock sets received_unix_ms back for a few batches (a tester's, by 47 to 90 ms, in two feeds at
+    # once). It is a local measurement for timing (ts_recv, the timing reports): no rule orders it, however far it goes back.
+    m, columns = broker
+    quotes = [b for b in columns.batches if b['type'] == 'quotes']
+    first = quotes[0]['received_unix_ms']
+    for k, b in enumerate(quotes[9:19]):
+        b['received_unix_ms'] -= 90 - k * 5
+    python, rust, reference = three_verdicts(tmp_path, columns, 'adjusted')
+    assert isinstance(python, dict) and python == rust == reference
+    quotes[9]['received_unix_ms'] -= 5_000            # seconds back
+    quotes[12]['received_unix_ms'] = first - 3_600_000   # an hour before the first
+    python, rust, reference = three_verdicts(tmp_path, columns, 'back')
+    assert isinstance(python, dict) and python == rust == reference
+    # What it is bound by: a day either side of the first quote batch's (and the range of a plausible date, tested above).
+    quotes[12]['received_unix_ms'] = first - schema.MAX_SESSION_MS
+    assert isinstance(three_verdicts(tmp_path, columns, 'edge')[1], dict)
+    quotes[12]['received_unix_ms'] = first - schema.MAX_SESSION_MS - 1
+    assert three_verdicts(tmp_path, columns, 'before') == ('Local receipt clock span',) * 3
+    quotes[12]['received_unix_ms'] = first + schema.MAX_SESSION_MS + 1
+    assert three_verdicts(tmp_path, columns, 'after') == ('Local receipt clock span',) * 3
 
 
 def test_a_bootstrap_without_every_issue_is_refused(tmp_path, broker):
@@ -131,7 +189,7 @@ def test_quotes_out_of_order_across_row_groups_are_refused(tmp_path, broker, mon
     (lambda b: b[4].__setitem__('source_time_us', b[3]['source_time_us'] - 1), 'Market clock regression'),
     (lambda b: b[8].__setitem__('seq', 7), 'Sequence gap'),
     (lambda b: b[4].__setitem__('received_unix_ms', 1), 'Implausible local receipt clock'),
-    (lambda b: b[9].__setitem__('received_unix_ms', b[8]['received_unix_ms'] - 1), 'receipt clock regression'),
+    (lambda b: b[9].__setitem__('received_unix_ms', b[2]['received_unix_ms'] + schema.MAX_SESSION_MS + 1), 'receipt clock span'),
     (lambda b: b[9].__setitem__('replay_lateness_ms', 1.0), 'not demo replays'),
 ])
 def test_the_batch_rules_hold_across_row_groups(tmp_path, broker, monkeypatch, spoil, message):

@@ -564,7 +564,9 @@ def paced(n=4):
     (lambda b: None, True),
     (lambda b: [x.update(replay_lateness_ms=None) for x in b[1:-1]], True),
     (lambda b: b[2].update(replay_lateness_ms=None), False),
-    (lambda b: b[2].update(received_unix_ms=b[1]['received_unix_ms'] - 1), False),
+    (lambda b: b[2].update(received_unix_ms=b[1]['received_unix_ms'] - 90), True),   # a clock adjusting itself
+    (lambda b: b[2].update(received_unix_ms=b[1]['received_unix_ms'] - 3_600_000), True),
+    (lambda b: b[2].update(received_unix_ms=b[1]['received_unix_ms'] - schema.MAX_SESSION_MS - 1), False),
     (lambda b: b[3].update(received_unix_ms=b[1]['received_unix_ms'] + schema.MAX_SESSION_MS + 1), False),
 ])
 def test_local_clock_rules(change, valid):
@@ -1036,6 +1038,25 @@ def test_upload_sends_the_whole_replay_until_the_archive_holds_its_market_data(p
     with pytest.raises(urllib.error.HTTPError):
         cli.upload(directory, API, verify=False)
 
+def test_upload_tells_how_far_it_is_and_when_the_archive_is_checking(packaged, monkeypatch):
+    directory, m = packaged
+    told, bodies = [], []
+    polls = [{'status': 'validating'}, {'status': 'stored'}]
+    def request_json(url, data=None, secret=None):
+        if data is None:
+            return polls.pop(0)
+        return {'ticket': str(uuid.uuid4()), 'upload': {'url': 'https://example.test', 'fields': {'key': 'k'}}}
+    monkeypatch.setattr(cli, 'request_json', request_json)
+    monkeypatch.setattr(cli.urllib.request, 'urlopen', lambda request, **k: bodies.append(request.data.read()) or HTTP())
+    monkeypatch.setattr(cli.time, 'sleep', lambda *a: None)
+    assert cli.upload(directory, API, verify=False, market=True, progress=lambda *what: told.append(what))['status'] == 'stored'
+    size = len(bodies[0])
+    sent = [what[1] for what in told if what[0] == 'uploading']
+    # The zip is prepared, then sent from nothing to all of it in order, then the archive's checks are polled.
+    assert told[0] == ('preparing',) and told[1] == ('uploading', 0, size) and told[-2:] == [('validating',)] * 2
+    assert sent[0] == 0 and sent[-1] == size and sent == sorted(sent) and len(sent) > 2
+    assert {what[2] for what in told if what[0] == 'uploading'} == {size}
+
 def test_https_verifies_against_the_systems_certificates_where_python_has_none(monkeypatch, tmp_path):
     # As Python from python.org on macOS before its "Install Certificates" step: no CA certificate loaded.
     from briskapi import _https
@@ -1126,6 +1147,66 @@ def test_cli(command, packaged, tmp_path, monkeypatch, capsys, harness):
     else: args += ['archive/p', '--output', str(tmp_path / 'out')]
     harness(*args)
     assert capsys.readouterr().out
+
+def told_by(stderr, label):
+    return [line.removeprefix(f'[brisk] {label}: ') for line in stderr.splitlines() if line.startswith(f'[brisk] {label}: ')]
+
+def in_order(told, fragments):
+    position = -1
+    for fragment in fragments:
+        position = next((i for i, line in enumerate(told) if i > position and fragment in line), None)
+        assert position is not None, (fragment, told)
+
+@pytest.fixture
+def publishing(monkeypatch):
+    """The archive as `upload` tells its progress to whoever asks: prepared, sent in two halves, then checked."""
+    def publish(directory, url, progress=None, **options):
+        progress('preparing'); progress('uploading', 0, 2 * 2**20); progress('uploading', 2**21, 2**21); progress('validating')
+        return {'status': 'stored'}
+    monkeypatch.setattr(cli, 'upload', publish)
+    monkeypatch.setattr(cli, 'SAVE_SECONDS', {True: 0, False: 0})   # every line, not one every 30 s
+
+@pytest.mark.parametrize('command', ['package', 'record'])
+def test_a_command_that_packages_and_uploads_says_so_and_says_saved_only_once_it_is(command, tmp_path, monkeypatch, harness, publishing, capsys):
+    cli.save_consent(True)
+    saved = cli.Saving.saved
+    def checked(self, path, hint=None):
+        assert (Path(path) / 'manifest.json').exists(), 'said saved before the package was'
+        saved(self, path, hint)
+    monkeypatch.setattr(cli.Saving, 'saved', checked)
+    out = tmp_path / 'out'
+    harness(command, '--output', str(out), '--upload',
+            *(['--events', str(tmp_path / 'source.jsonl')] if command == 'package' else ['--codes', '0000', '--speed', '0']))
+    captured = capsys.readouterr()
+    in_order(told_by(captured.err, 'out'), ['packaging', f'saved to {out} in ', 'preparing to upload', 'uploading 0.0 MiB of 2.0 MiB (0%)',
+                                          'uploading 2.0 MiB of 2.0 MiB (100%)', 'sent; waiting for the archive', 'uploaded; the archive stored it'])
+    # stdout stays the two JSON results: the manifest, then the archive's answer.
+    assert [json.loads(line) for line in captured.out.splitlines()][-1] == {'status': 'stored'} and len(captured.out.splitlines()) == 2
+
+def test_a_package_that_fails_is_never_said_to_be_saved(tmp_path, harness, capsys):
+    (tmp_path / 'source.jsonl').write_bytes(raw(batches()[:-1]))
+    with pytest.raises(ValueError, match='clean end'):
+        harness('package', '--events', str(tmp_path / 'source.jsonl'), '--output', str(tmp_path / 'out'))
+    err = capsys.readouterr().err
+    assert told_by(err, 'out') == ['packaging, 0s elapsed']
+
+def test_upload_says_how_far_it_is(packaged, harness, publishing, capsys):
+    directory, m = packaged
+    harness('upload', str(directory))
+    captured = capsys.readouterr()
+    in_order(told_by(captured.err, directory.name), ['preparing to upload', 'uploading 0.0 MiB of 2.0 MiB', 'uploading 2.0 MiB of 2.0 MiB (100%)',
+                                                    'sent; waiting for the archive', 'uploaded; the archive stored it'])
+    assert json.loads(captured.out) == {'status': 'stored'}
+
+def test_an_upload_the_archive_refuses_is_not_said_to_be_stored(packaged, monkeypatch, harness, capsys):
+    directory, m = packaged
+    def refuse(directory, url, progress=None, **options):
+        progress('preparing'); progress('validating')
+        raise ValueError('Automatic validation rejected recording: bad')
+    monkeypatch.setattr(cli, 'upload', refuse)
+    with pytest.raises(ValueError, match='rejected'):
+        harness('upload', str(directory))
+    assert not any('stored' in line for line in told_by(capsys.readouterr().err, directory.name))
 
 def test_identity(tmp_path, monkeypatch, harness, capsys):
     from briskapi import identity

@@ -236,15 +236,16 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   let frontend = await session.get('/api/frontend/boot');
   session.token = frontend.api_token;
   let app = await session.get('/api/app/boot');
-  // Wait for a session to join. After a recorded day the site serves that day until the next one. The vendor
+  // Wait for a session to join. After a day's session the site serves that day until the next one. The vendor
   // app opens the stream only while session_status is "running"; after the close it is "done" (and the boot has
   // no ws_url), and the app reloads a minute after next_date, which the boot gives with its own time (unix
   // seconds), so the wait is taken from the server's clock. Python is told once, outside the days' records.
+  // The day is said to have "ended", never to be "recorded": Python saves it minutes later, and says "saved" then.
   let waiting = false;
   for (;;) {
     const sameDay = after !== null && String(app.date) <= after;
     if (!sameDay && app.ws_url && (app.session_status ?? 'running') === 'running') break;
-    const why = sameDay ? `${app.date} is recorded` : `no session is running (${app.date}, status ${app.session_status ?? 'none'})`;
+    const why = sameDay ? `${app.date} session ended` : `no session is running (${app.date}, status ${app.session_status ?? 'none'})`;
     trace?.(`boot: ${why}; waiting for the next trading day`);
     if (!waiting) {
       waiting = true;
