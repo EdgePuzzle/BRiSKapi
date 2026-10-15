@@ -327,7 +327,7 @@ def test_cli_live_says_a_save_failed_and_says_saved_only_where_it_kept_it_instea
     assert re.search(r'^Packaging failed: division by zero; the recording is kept in .*sbi_20260311_090000-090016$', err, re.M), err
     # What was recorded is then kept apart, with the progress of packaging it again, and only then is it saved: there.
     assert told[1].startswith(f'keeping what was recorded in {_spool.kept_dir()}') and told[2].startswith('preparing to save')
-    assert re.fullmatch(rf'saved to {kept} in \d+s', told[-1]) and (kept / _parquet.DEPTHS).exists() and not (tmp_path / 'days').exists()
+    assert re.fullmatch(rf'saved to {re.escape(str(kept))} in \d+s', told[-1]) and (kept / _parquet.DEPTHS).exists() and not (tmp_path / 'days').exists()
     assert not any('saved to' in line for line in told[:-1])
 
 
