@@ -26,7 +26,7 @@ def timed(owner, name, label=None):
 
 
 if os.environ.get('BENCH_PROFILE'):
-    for owner, name in ((Live, '_take'), (Live, '_project'), (Live, '_deliver'), (_parquet, 'stream_tables'),
+    for owner, name in ((Live, '_take'), (Live, '_subscribed'), (Live, '_new_day'), (_gateway._Day, '__init__'), (_parquet, 'equity_table'), (Live, '_project'), (Live, '_deliver'), (_parquet, 'stream_tables'),
                         (records, 'project'), (_gateway.Live, '_rows'), (_gateway, '_only'), (_gateway, '_ordered'), (_gateway, '_bar_table')):
         timed(owner, name)
     real_loads = json.loads

@@ -194,6 +194,14 @@ def options(name):
             'column_encoding': {c: 'DELTA_BINARY_PACKED' for c in deltas}}
 
 
+def warm():
+    """pyarrow imports pandas, if it is installed, at its first conversion of Python objects to or from Arrow: over half a
+    second, once in a process, which a program that is about to receive a market's frames should not spend on the first of
+    them (a Live session's first records came that much late). Call it before they start."""
+    pa.array(['x'], pa.string())
+    pa.scalar(0, TIME).as_py()
+
+
 def midnight_ns(date: str) -> int:
     """UTC nanoseconds at JST midnight on a YYYYMMDD trading date."""
     require(isinstance(date, str) and re.fullmatch(r'\d{8}', date), 'Invalid date')

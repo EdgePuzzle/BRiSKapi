@@ -665,3 +665,14 @@ def test_the_tenths_of_a_yen_arrow_rounds_down_are_those_the_records_say():
     values = list(range(0, 400_000)) + [10**9 + n for n in range(1000)] + [2**53 - 1]
     arrow = pc.cast(_parquet._decimal(np.array(values, dtype=np.int64), 1), pa.float64()).to_pylist()
     assert [_gateway._yen(v) for v in values] == arrow
+
+
+def test_pyarrows_first_conversion_of_python_objects_is_made_before_a_session_needs_it():
+    """It imports pandas (over half a second, once): a Live session's first records were that late for it (_parquet.warm)."""
+    import subprocess
+    import sys
+    code = ("import sys, time; import pyarrow as pa; from briskapi import _parquet; _parquet.warm(); "
+            "began = time.perf_counter(); pa.array(['x', 'y'], pa.string()); pa.scalar(0, _parquet.TIME).as_py(); "
+            "print(time.perf_counter() - began)")
+    after = float(subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, check=True).stdout)
+    assert after < 0.2, 'the first conversion after warm() is cheap (cold, it imports pandas: over half a second)'

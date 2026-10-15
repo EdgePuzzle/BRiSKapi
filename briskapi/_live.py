@@ -154,6 +154,7 @@ class Feed:
         # or a crash cuts short, and for a gateway's replays.
         self._spooling, self._broker = bool(self._package or self._output or gateway), command is not None
         self._worker = ThreadPoolExecutor(1, thread_name_prefix='brisk-day')
+        threading.Thread(target=_parquet.warm, name='brisk-warm', daemon=True).start()   # before the day's bootstrap needs it
         if self._spooling:
             self._worker.submit(self._recover)
         # A broker host serving a gateway has a fast lane (see brisk.cjs): it is told on stdin which symbols for.

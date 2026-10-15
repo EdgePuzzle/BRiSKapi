@@ -758,6 +758,7 @@ class Live:
             raise BriskError('This session has started; a Live streams once')
         if not self._subscriptions:
             raise BriskError('Subscribe to something first')
+        _parquet.warm()   # not on the first batch's time
         try:
             self._sock = socket.create_connection((self._host, self._port), timeout=10)
             self._sock.sendall(_line({'version': VERSION, 'key': self._key, 'dataset': self.dataset}))

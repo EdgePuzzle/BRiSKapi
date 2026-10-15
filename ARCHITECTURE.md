@@ -319,7 +319,9 @@ to the broker; a session needs the gateway's key and nothing else.
   projected record by record (`Live._rows`, 0.06 ms): the same records, which `tests/test_gateway.py`
   compares with the Arrow projection on random batches (Arrow converts five tenths of a yen, 0.1 to
   0.4 and 1.8, one digit below the true quotient, and so does `_yen`). Replays, snapshots, bars,
-  `brisk-quotes` and mixed sessions use the Arrow path. `ts_recv` is the batch's `received_unix_ms` for
+  `brisk-quotes` and mixed sessions use the Arrow path. pyarrow imports pandas, if it is installed, at its
+  first conversion of Python objects (0.6 s, once a process), which the first batch of a session would have waited
+  for: `_parquet.warm()` makes that conversion first, at `Live.start` and where the feed begins. `ts_recv` is the batch's `received_unix_ms` for
   `XTKS.BRISK` and `ts_event` for the demo, as in the cloud. Trade IDs (`FRAME-PLACE`) carry
   each issue's last frame and place across batches (`Columns.trade_ids(carry)`), so a replay
   from the day's start numbers them as the stored recording does. A session that named
