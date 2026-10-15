@@ -31,7 +31,8 @@ def platform_wheel(wheel: Path, program: Path, platform: str, out: Path) -> Path
             if not info.is_dir():
                 entries[info.filename] = (source.read(info), info.external_attr >> 16 or 0o644)
     dist_info = next(p.split('/')[0] for p in entries if p.split('/')[0].endswith('.dist-info'))
-    entries[f'briskapi/_bin/brisk-parquet{exe}'] = (program.read_bytes(), 0o755)
+    # A regular file, executable: pip sets the execute bit only for a mode that says it is a file (S_IFREG).
+    entries[f'briskapi/_bin/brisk-parquet{exe}'] = (program.read_bytes(), 0o100755)
     wheel_file, _ = entries[f'{dist_info}/WHEEL']
     lines = []
     for line in wheel_file.decode().splitlines():

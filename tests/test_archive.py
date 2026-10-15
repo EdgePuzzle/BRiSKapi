@@ -1263,7 +1263,7 @@ def test_lambda_package_is_self_contained(tmp_path):
     # The function that checks uploads also holds brisk-parquet, executable.
     with zipfile.ZipFile(io.BytesIO(deploy.package(b'\x7fELF'))) as z:
         entry = z.getinfo('briskapi/_bin/brisk-parquet')
-        assert entry.external_attr >> 16 == 0o755 and z.read(entry) == b'\x7fELF'
+        assert entry.external_attr >> 16 == 0o100755 and z.read(entry) == b'\x7fELF'
         z.extractall(tmp_path)
     check = ("import archive_service, query_service, briskapi, briskapi.schema as s, sys; "
              f"assert briskapi.__file__.startswith({str(tmp_path)!r}); "

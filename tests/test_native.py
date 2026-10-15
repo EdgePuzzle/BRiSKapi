@@ -295,3 +295,15 @@ def test_a_line_that_is_not_a_batch_is_refused(tmp_path):
                          (every[3].replace(b'"issue_id": 0', b'"issue_id": -1', 1), 'negative')):
         with pytest.raises(ValueError, match=message):
             _native.part([every[2], bad], tmp_path / 'bad', midnight)
+
+
+def test_a_program_an_installer_left_without_its_execute_bit_is_made_executable(tmp_path, monkeypatch):
+    import os
+    import stat
+    program = tmp_path / 'brisk-parquet'
+    program.write_bytes(b'#!/bin/sh\n')
+    program.chmod(0o644)
+    monkeypatch.setenv('BRISK_PARQUET', str(program))
+    assert _native.binary() == str(program)
+    if os.name != 'nt':
+        assert program.stat().st_mode & stat.S_IXUSR

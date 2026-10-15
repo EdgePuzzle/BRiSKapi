@@ -16,9 +16,15 @@ _HERE = Path(__file__).resolve().parent
 
 def binary() -> str:
     """The program: BRISK_PARQUET if set, else the one shipped with briskapi, else a build in the source tree, else on the PATH."""
-    candidates = [os.environ.get('BRISK_PARQUET'), _HERE / '_bin' / NAME, _HERE.parent / 'rust' / 'brisk_parquet' / 'target' / 'release' / NAME]
+    name = NAME + ('.exe' if os.name == 'nt' else '')
+    candidates = [os.environ.get('BRISK_PARQUET'), _HERE / '_bin' / name, _HERE.parent / 'rust' / 'brisk_parquet' / 'target' / 'release' / name]
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
+            if not os.access(candidate, os.X_OK):
+                try:   # an installer that dropped the program's execute bit
+                    os.chmod(candidate, 0o755)
+                except OSError:
+                    pass
             return str(candidate)
     found = shutil.which(NAME)
     if found:

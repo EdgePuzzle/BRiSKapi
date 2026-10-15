@@ -39,7 +39,7 @@ def test_the_program_goes_into_the_wheel_which_is_tagged_for_its_platform(tmp_pa
     assert built.name == f'briskapi-9.9-py3-none-{platform}.whl'
     with zipfile.ZipFile(built) as z:
         info = z.getinfo(f'briskapi/_bin/{name}')
-        assert z.read(info) == b'\x7fELF program' and info.external_attr >> 16 == 0o755
+        assert z.read(info) == b'\x7fELF program' and info.external_attr >> 16 == 0o100755
         wheel = z.read('briskapi-9.9.dist-info/WHEEL').decode()
         assert f'Tag: py3-none-{platform}' in wheel and 'Root-Is-Purelib: false' in wheel and 'py3-none-any' not in wheel
         # RECORD names every file with its hash and size.

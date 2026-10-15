@@ -57,7 +57,7 @@ def package(program=None):
             z.write(ROOT/'briskapi'/name,f'briskapi/{name}')
         if program:
             entry=zipfile.ZipInfo('briskapi/_bin/brisk-parquet',date_time=(1980,1,1,0,0,0))
-            entry.compress_type,entry.external_attr=zipfile.ZIP_DEFLATED,0o755<<16
+            entry.compress_type,entry.external_attr=zipfile.ZIP_DEFLATED,0o100755<<16
             z.writestr(entry,program)
         # Reference fingerprints verify demo/synthetic content; broker recordings are structurally checked.
         for path in sorted((ROOT/'briskapi/references').glob('*.json')):

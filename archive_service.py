@@ -416,10 +416,13 @@ class _Laps:
         self.then = time.monotonic()
 
     def __call__(self, label):
-        import resource
+        try:
+            import resource
+            peak = f', peak {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024} MB'
+        except ImportError:   # Windows, where the tests also run: the function itself is Linux
+            peak = ''
         now = time.monotonic()
-        print(f'ingest {label}: {now - self.then:.1f}s, peak {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024} MB',
-              file=sys.stderr)
+        print(f'ingest {label}: {now - self.then:.1f}s{peak}', file=sys.stderr)
         self.then = now
 
 def ingest(record, s3, db):
