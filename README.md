@@ -637,7 +637,13 @@ client.metadata.get_dataset_condition("XTKS.BRISK", start_date="2026-10-01")   #
 ```
 
 `get_range(dataset, start, end=None, symbols='ALL_SYMBOLS', schema='trades', limit=None,
-path=None)` returns a store; `path` also writes its Parquet file. `client.metadata` has
+path=None, ts_filter='ts_event', skew=10.0)` returns a store; `path` also writes its Parquet file.
+The server cuts on BRiSK's stamp (`ts_event`); a live feed's records reach your computer a little
+later (`ts_recv`). For a test that must not look ahead, `ts_filter='ts_recv'` cuts and sorts on
+the receipt time (it asks for `skew` seconds either side and says if the stamps ran further ahead
+than that allows), and `get_snapshot(dataset, at, symbols='ALL_SYMBOLS', schema='brisk-quotes',
+since=None)` returns each security's latest record as of `at` (by receipt time unless
+`ts_filter='ts_event'`), one row per security. `client.metadata` has
 `list_datasets()`, `list_schemas(dataset)`, `list_fields(schema)`, `list_publishers()`,
 `get_dataset_range(dataset)`, `get_dataset_condition(dataset, start_date, end_date)` (each date
 available or missing, and the clock windows your recordings cover, in JST),

@@ -473,7 +473,9 @@ def get_range(bucket, owner, req: Request) -> pa.Table:
         if len(parts) > 1:
             key = {'trades': ['instrument_id', 'trade_id'], 'definition': ['instrument_id', 'ts_event'],
                    'imbalance': ['instrument_id', 'sequence', 'auction_type']}.get(req.schema, ['instrument_id', 'sequence'])
-            table = _dedupe(table, key)
+            # A record several captures hold keeps its EARLIEST receipt: the first moment a program on any of them could
+            # have known it (a stable sort, so equal receipts keep the captures' order).
+            table = _dedupe(table.sort_by('ts_recv') if 'ts_recv' in table.column_names else table, key)
         order = [('ts_event', 'ascending'), ('instrument_id', 'ascending')] + \
             ([('sequence', 'ascending')] if 'sequence' in table.column_names else [])
         table = table.sort_by(order)

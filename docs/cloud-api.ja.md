@@ -139,6 +139,8 @@ Databento のユーザーが期待する列が並びます。バー以外のス�
   同じ日の重なった記録どうしは BRiSK のタイムスタンプが一致し、受信時刻だけが異なるので、同じ範囲を
   指定すれば、どの記録に含まれていても同じ行が返ります。同時刻のものは `instrument_id`、次に
   `sequence` の順に並べます。
+- 複数の記録に含まれるレコードは、その受信時刻のうち最も早いものを持ちます。どの記録のプログラムでも、
+  それを知り得た最初の時点です。
 - `start` と `end` は ISO 8601 形式の日付・日時、または整数です。日付は、その日本時間の取引日の0時を
   表します（つまり、`end` に日付を指定するとその日は含まれません）。タイムゾーンのない時刻は日本時間で、
   `Z` やオフセットがあればそれに従います。10桁以上の整数は UTC のナノ秒です。`end` は含まず、省略すると
@@ -273,6 +275,28 @@ client.timeseries.get_range(dataset="XTKS.BRISKDEMO", symbols=["7203"], schema="
 `to_parquet()`、`to_file()`、`replay()`、反復、`len()` を備えたストアを返します。`to_df()` では
 `price_type`、`pretty_ts`、`map_symbols`、`tz`、`count` が使えます。通信には Parquet を使うので、新しい
 依存パッケージは要りません。ゲートウェイは `archive.json` の `query_url` から取得します。
+
+Databento のパラメーターに2つ加えています。先読みをしてはならないテストのためのもので、クライアント側の
+機能です（エンドポイントは増えません）。サーバーは `ts_event` で絞り込みますが、ライブフィードのレコードは、
+記録するコンピューターに少し遅れて届きます（`ts_recv`）。
+
+```python
+client.timeseries.get_range(dataset="XTKS.BRISK", schema="brisk-quotes", start="2026-10-13T08:55",
+                            end="2026-10-13T08:59:58", ts_filter="ts_recv")      # 08:59:58 までに受信したもの
+client.timeseries.get_snapshot("XTKS.BRISK", at="2026-10-13T08:59:58", schema="brisk-quotes")   # その時点の各銘柄の最新レコード
+```
+
+- `get_range(..., ts_filter="ts_recv", skew=10.0)` は、サーバーに対して期間の前後を `skew` 秒ずつ広げて
+  要求し、こちらで `ts_recv` による絞り込みと並べ替えを行います（`limit` はそのあとに適用）。BRiSK の
+  タイムスタンプが受信側の時計より `skew` の半分を超えて先行していたときは警告します（`skew` を広げて
+  ください。広げないと、`end` より前に受信したのにタイムスタンプが `end` よりかなり後のレコードが欠けます）。
+  OHLCV バーには使えません。
+- `get_snapshot(dataset, at, symbols, schema="brisk-quotes", since=None, ts_filter="ts_recv", skew=10.0)`
+  は、銘柄ごとに1行、`instrument_id` 順で、`at` 以前の最新のレコードを返します。BRiSK は更新のたびに
+  銘柄の状態全体を送るので、それがその時点の板です。`since`（既定: `at` の取引日の日本時間0時）以降に
+  レコードがない銘柄は含まれません。取引時間中は、より遅い `since` を渡してください（渡さないと午前の
+  すべてを読みます）。
+- デモの再生には受信時計がなく、`ts_recv` は `ts_event` と同じです。そのため、どちらの絞り込みでも結果は一致します。
 
 コマンドラインでは、`brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13` が
 CSV を標準出力に書きます（`--encoding json|parquet`、`--output FILE`、`--end`、`--limit`）。素の HTTP で
