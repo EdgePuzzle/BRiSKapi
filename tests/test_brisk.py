@@ -824,31 +824,41 @@ def test_between_days_the_status_line_is_quiet(fake_host):
 
 def test_a_feed_with_no_session_to_join_waits_for_the_next_trading_days(tmp_path, monkeypatch):
     # The host says, outside the days' records, that the site has no session now (after the close, on a holiday);
-    # that is kept nowhere, and the feed waits past its start timeout for the next day's session.
+    # that is kept nowhere, and the feed waits past its start timeout for the next day's session. The host is
+    # driven by files the test makes, not by clocks, so a slow or loaded computer changes nothing it asserts.
     first = sbi_session()
     second = [{**b, 'trading_date': '20260312'} if b['type'] == 'bootstrap' else b for b in sbi_session(frames=20)]
+    day_gate, stop_gate = tmp_path / 'day', tmp_path / 'stop'
     script = tmp_path / 'waiting.cjs'
     script.write_text(
-        f"const say = b => console.log(JSON.stringify(b));\n"
+        f"const fs = require('fs'); const say = b => console.log(JSON.stringify(b));\n"
         f"say({json.dumps({'type': 'waiting', 'date': '2026-03-10', 'session_status': 'done'})});\n"
-        f"setTimeout(() => {{ {json.dumps(first)}.forEach(say); "
-        f"say({json.dumps({'type': 'waiting', 'date': '2026-03-11', 'session_status': 'done'})}); "
-        f"{json.dumps(second)}.forEach(say); }}, 1500);\n")
+        f"const go = () => fs.existsSync({json.dumps(str(day_gate))}) ? ({json.dumps(first)}.forEach(say), "
+        f"say({json.dumps({'type': 'waiting', 'date': '2026-03-11', 'session_status': 'done'})}), "
+        f"{json.dumps(second)}.forEach(say)) : setTimeout(go, 5);\n"
+        "go();\n")
     monkeypatch.setattr(brisk, 'DECODER', script)
     briskapi.login(cookies={'session_bfaf77a2': 'v'})
     feed = _live.Feed(command=['node', str(script)], upload=False, output=tmp_path / 'days', gateway=True)
     with feed._changed:
-        assert feed._changed.wait_for(lambda: feed.status == 'waiting', 10)
+        assert feed._changed.wait_for(lambda: feed.status == 'waiting', 30)
     assert feed.waiting == {'date': '2026-03-10', 'session_status': 'done'} and feed.seq == -1
+    # The day begins only after the start timeout (0.2 s) has run out, and the feed was still waiting.
+    threading.Timer(0.5, day_gate.touch).start()
     assert feed.ready(timeout=0.2) is feed and feed.status == 'running'
     feed.wait()
     assert [day['name'] for day in feed.recordings] == ['sbi_20260311_090000-090016', 'sbi_20260312_090000-090002']
     assert feed.trading_date == '20260312' and feed.waiting is None
-    # A host that stops while waiting fails the start as any other would.
-    script.write_text(f"console.log(JSON.stringify({json.dumps({'type': 'waiting', 'date': '2026-03-10'})}));\n"
-                      "setTimeout(() => process.exit(1), 300);\n")
+    # A host that stops while waiting fails the start as any other would, after the start timeout has run out too.
+    script.write_text(f"const fs = require('fs'); console.log(JSON.stringify({json.dumps({'type': 'waiting', 'date': '2026-03-10'})}));\n"
+                      f"const go = () => fs.existsSync({json.dumps(str(stop_gate))}) ? process.exit(1) : setTimeout(go, 5);\n"
+                      "go();\n")
+    feed = _live.Feed(command=['node', str(script)], upload=False)
+    with feed._changed:
+        assert feed._changed.wait_for(lambda: feed.status == 'waiting', 30)
+    threading.Timer(0.5, stop_gate.touch).start()
     with pytest.raises(briskapi.BriskError, match='before bootstrap'):
-        briskapi.connect(site='sbi', upload=False, timeout=0.1)
+        feed.ready(timeout=0.1)
 
 
 def test_e_shiten_has_its_own_address_cookies_and_variable(monkeypatch):
