@@ -706,6 +706,18 @@ test('the workers\' quotes come back in the host\'s order, and a worker that tra
   assert.throws(() => merge([1, 2, 3, 4], [{ ...results[0], ids: [2] }, results[1]], 2), /Quote worker 0 decoded other issues.*diverged/);
 });
 
+test('closing a pool returns once every one of its worker threads has exited', { skip: !cache }, async () => {
+  // A session's workers must be gone before the next session's start: their memory, and a V8 crash seen when a pool
+  // started while another's threads were still being terminated.
+  const { files } = demo();
+  const pool = await QuotePool.start({ assets: files, ids: [0, 1, 2], count: 3, options: { protocolVersion: 16000 } });
+  const workers = [...pool.workers];
+  assert.ok(workers.every(worker => worker.threadId > 0), 'running');
+  await pool.close();
+  assert.ok(workers.every(worker => worker.threadId === -1), 'every thread is gone when close() resolves');
+  await pool.close();   // and closing again is harmless
+});
+
 test('how many quote workers, and a worker that cannot start stops the session', { skip: !cache }, async () => {
   assert.equal(workerCount({ BRISK_WORKERS: '0' }), 0);
   assert.equal(workerCount({ BRISK_WORKERS: '3' }), 3);

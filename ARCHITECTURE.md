@@ -789,6 +789,24 @@ its share of the host's changed issues, or the session stops: its decoder would 
 diverged. Quotes waiting to be written may not pass 1 GiB; the session stops rather than
 fill the memory when the reader falls that far behind. A worker's decoder holds about 270 MB.
 
+**What a reconnect costs in memory.** A snapshot taken during the session restores the day's trades
+so far, millions, into every decoder. A trade record is some 130 bytes, and a worker reads no trades,
+so its history (`QuoteHistory`, made with `keepTrades: false`) keeps each issue's prices only (the
+count and the last price the decoder asks of it) and never a record. The main decoder keeps them: it
+turns them into the history batches that follow the bootstrap (some 300 bytes a trade at its peak).
+Each reconnect also starts a whole new session, with a decoder, a snapshot and workers, so the old
+one's memory must be gone first: `QuotePool.close()` resolves once every thread has exited (V8 crashed
+with SIGILL, in WebAssembly code, when a pool started while another's threads were still being
+terminated), `live()` waits for it, and `record()` collects garbage (`collectGarbage()`, which reaches
+`gc()` without a command-line flag) before the wait for the next session. With 2.5 million restored
+trades, as an SBI reconnect around 11:00 has, the host went to 8.1-8.7 GB in a session and kept 4.6-6.4 GB
+after it ended (a tester saw SBI's Node reach 5.9 GB after a reconnect, against 2.1-2.5 GB while
+recording); it now goes to 4.1-4.3 GB and keeps 2 GB, the main decoder's trades being the most of the
+rest (about 0.75 GB at that size). `tools/brisk_mock/reconnect_memory.cjs` measures it on the demo
+(`restored_trades.cjs` is its preload, which the workers must share). Starting and stopping worker
+threads still leaves about 100 MB behind per cycle after a collection (Node 26; four reconnects a day cost
+some 400 MB); keeping the workers across sessions would be the way past it.
+
 Parsing the host's lines is most of the Python feed's work (about 9 µs a quote update on one
 thread). Without the GIL (free-threaded Python 3.14) one thread reads the pipe a chunk at a
 time (up to 1 MB), `PARSERS` threads (up to four) parse the chunks, and the feed's thread

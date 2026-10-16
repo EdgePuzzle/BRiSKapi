@@ -621,14 +621,24 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     loop.disable();
     monitor?.stop();
     link?.close();
-    pool?.close();
-    fastPool?.close();
+    await Promise.all([pool?.close(), fastPool?.close()]);   // gone before another session's workers start
     if (lanes) lanes.onChange = null;
     if (stop) stop.end = null;
   }
 }
 
 const RETRY_MS = [5000, 10000, 30000, 60000, 120000];
+
+// A session's decoder and buffers are garbage once live() has returned, but V8 collects them when it chooses; a session
+// started seconds later (a reconnect) would then have the old one's memory beside its own. So the host collects between
+// sessions. gc() is reached without a command-line flag; a runtime that refuses keeps V8's own schedule.
+let collect = null;
+function collectGarbage() {
+  try {
+    collect ??= (require('node:v8').setFlagsFromString('--expose-gc'), require('node:vm').runInNewContext('gc'));
+    collect();
+  } catch { /* V8's own schedule */ }
+}
 
 // One session per trading day, back to back, until `days` have been recorded (the command line: until
 // stopped). Each emits its own bootstrap ... end, which the Python feed keeps as that day's recording. A day
@@ -648,6 +658,7 @@ async function record({ days = Infinity, retryMs = RETRY_MS, sleep = ms => new P
         onCookies: fresh => { cookies = fresh; } });
       after = booted; day++; recorded = true; failures = 0;
       if (stop?.requested) return;
+      collectGarbage();
       continue;
     } catch (error) {
       if (stop?.requested) return;   // stopped before its stream had started: nothing to end
@@ -655,6 +666,7 @@ async function record({ days = Infinity, retryMs = RETRY_MS, sleep = ms => new P
       else if (!recorded || fatal(error)) throw error;
       const wait = retryMs[Math.min(failures++, retryMs.length - 1)];
       log(`[brisk] ${error.message}; reconnecting in ${wait / 1000}s (the recording so far is kept)`);
+      collectGarbage();
       await sleep(wait);
     }
   }

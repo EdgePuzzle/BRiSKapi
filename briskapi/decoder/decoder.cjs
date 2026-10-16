@@ -89,14 +89,19 @@ function* frames(data) {
 // An issue keeps the prices of all its records, for their count and the last one's price (also after one is
 // withdrawn), but the records themselves only while one could still be withdrawn from `pending`, and a few more:
 // a snapshot taken during the session restores the day's trades so far, millions, in every decoder.
+// A quote worker's (`trades` false) reads no trades, so it keeps neither the records nor `pending`: only each issue's
+// prices. A snapshot taken during the session restores the day's trades so far into every decoder, the workers' too,
+// and a record is some 130 bytes: with millions of trades, gigabytes at once across the host's decoders.
 class QuoteHistory {
-  constructor() { this.qrs = new Map(); this.pending = []; this.withdrawn = 0; this.taken = 0; }
+  constructor(trades = true) { this.qrs = new Map(); this.pending = []; this.withdrawn = 0; this.taken = 0; this.trades = trades; }
   initialize(p) { this.qrs.set(p, { prices: [], records: [] }); }
   deinitialize(p) { this.qrs.delete(p); this.pending = this.pending.filter(trade => trade.p !== p); }
   clone(dst, src) { const q = this.qrs.get(src); this.qrs.set(dst, { prices: q.prices.slice(), records: q.records.slice() }); }
   emplace(p, type, timestamp, price10, qty, lot, frame) {
-    const trade = { p, type, timestamp, price10, qty, lot, frame, round: this.taken }, q = this.qrs.get(p);
+    const q = this.qrs.get(p);
     q.prices.push(price10);
+    if (!this.trades) return;
+    const trade = { p, type, timestamp, price10, qty, lot, frame, round: this.taken };
     q.records.push(trade);
     // Records are taken in order, so once the 48th is, the 47 before it are too: none can be in `pending`.
     if (q.records.length > 64 && q.records[47].round < this.taken) q.records = q.records.slice(48);
@@ -106,6 +111,7 @@ class QuoteHistory {
     const q = this.qrs.get(p);
     if (!q.prices.length) return;
     q.prices.pop();
+    if (!this.trades) return;
     const trade = q.records.pop();   // none: one taken long ago
     const at = trade ? this.pending.lastIndexOf(trade) : -1;
     if (at >= 0) this.pending.splice(at, 1);
@@ -253,6 +259,7 @@ class Decoder {
   // options.protocolVersion: 16000 for the Next demo (default), 18000 for the brokers' BRiSK.
   // options.callbacks: { send(Buffer), heartbeat(ns BigInt), frameNumbers(Array), basePrice(issueIndex),
   //   authError(), marketFinished() }, the vendor client's six WASM callbacks.
+  // options.keepTrades: false for a decoder whose trades nothing reads (a quote worker's): see QuoteHistory.
   // options.boot: { exceptional_sq, base_prices } from the app boot response, applied in the
   //   vendor client's order: after the master is loaded, before the snapshot.
   // options.checkMaster(master): throws if the master read does not look like a market, before
@@ -262,7 +269,7 @@ class Decoder {
     // Isolate the legacy glue's globals and process exception handlers. No UI,
     // network, filesystem access or account state is needed inside this VM.
     const context = vm.createContext({
-      module: { exports: {} }, exports: {}, qrm: new QuoteHistory(),
+      module: { exports: {} }, exports: {}, qrm: new QuoteHistory(options.keepTrades !== false),
       console: { log() {}, warn() {}, error() {} },
       crypto: crypto.webcrypto, TextDecoder, TextEncoder, setTimeout, clearTimeout,
     });

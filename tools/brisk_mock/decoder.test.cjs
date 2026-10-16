@@ -670,3 +670,21 @@ test('trade records: an issue\'s count and last price, withdrawals as before, an
   qrm.deinitialize(2);
   assert.equal(qrm.pending.length, 0);
 });
+
+test('a quote worker\'s history keeps each issue\'s count and last price, and no trade records', () => {
+  const full = new QuoteHistory(), lean = new QuoteHistory(false);
+  for (const qrm of [full, lean]) {
+    qrm.initialize(1);
+    for (let k = 1; k <= 2000; k++) qrm.emplace(1, 1, k, 1000 + k, 1, 100, k);
+    qrm.popBack(1);   // a withdrawn trade: the count and the last price both step back
+    qrm.emplace(1, 2, 3000, 7777, 1, 100, 3000);
+  }
+  assert.deepEqual([lean.size(1), lean.lastPrice10(1)], [full.size(1), full.lastPrice10(1)], 'what the decoder asks of it');
+  assert.deepEqual([lean.size(1), lean.lastPrice10(1)], [2000, 7777]);
+  assert.equal(lean.pending.length, 0);
+  assert.equal(lean.qrs.get(1).records.length, 0, 'no record of any trade');
+  assert.deepEqual([lean.take().length, lean.withdrawn], [0, 0]);
+  lean.clone(2, 1);
+  assert.deepEqual([lean.size(2), lean.lastPrice10(2)], [2000, 7777]);
+  assert.equal(full.take().length, 2000, 'the host\'s own history still reports its trades');
+});

@@ -44,7 +44,7 @@ class QuotePool {
         worker.once('exit', code => failed(new Error(`A quote worker stopped (exit code ${code})`)));
       })));
     } catch (error) {
-      pool.close();
+      await pool.close();
       throw error;
     }
     return pool;
@@ -107,9 +107,12 @@ class QuotePool {
   // begin(), then the bootstrap's read of `ids` (each worker reads its share, as the host's decoder read them).
   begin(ids) { this.post({ op: 'begin', ids }); }
 
+  // Stops the workers; resolves once every thread has exited. The host starts the next session's workers only then:
+  // threads still tearing down hold their memory beside the new ones', and V8 has crashed (SIGILL, in WebAssembly code)
+  // when a pool started while another's threads were still being terminated.
   close() {
     this.closed = true;
-    for (const worker of this.workers || []) worker.terminate();
+    return Promise.all((this.workers || []).map(worker => worker.terminate())).then(() => undefined);
   }
 }
 
@@ -188,7 +191,7 @@ async function work() {
   // Listen at once: the host feeds frames while the decoder loads.
   parentPort.on('message', message => { queue.push(message); drain(); });
   const files = Object.fromEntries(Object.entries(assets).map(([name, data]) => [name, view(data)]));
-  decoder = await Decoder.create(files, { ...options, callbacks: {} });
+  decoder = await Decoder.create(files, { ...options, keepTrades: false, callbacks: {} });
   decoder.restored = [];   // the host's decoder reports what the snapshot restored
   parentPort.postMessage({ ready: true });
   drain();
