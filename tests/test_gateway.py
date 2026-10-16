@@ -526,7 +526,8 @@ class Socket extends EventTarget {
     const send = n => { for (const end = Math.min(chunks.length, i + n); i < end; i++) {
       const c = chunks[i]; this.dispatchEvent(new MessageEvent('message', { data: c.buffer.slice(c.byteOffset, c.byteOffset + c.length) })); } };
     setImmediate(() => send(3));
-    this.timer = setInterval(() => { send(5); if (i >= chunks.length) { clearInterval(this.timer); setTimeout(() => this.close(1000), 50); } }, 25);
+    // The stream waits at frame 100 until the test says go (a file), so the session that joins does so mid-stream however slow the computer.
+    this.timer = setInterval(() => { if (process.env.GATE && i >= 100 && !fs.existsSync(process.env.GATE)) return; send(5); if (i >= chunks.length) { clearInterval(this.timer); setTimeout(() => this.close(1000), 50); } }, 25);
   }
   send() {}
   close(code = 1000) { clearInterval(this.timer); if (this.closed) return; this.closed = true; this.dispatchEvent(Object.assign(new Event('close'), { code, reason: '' })); }
@@ -545,17 +546,20 @@ def test_a_live_session_joins_the_fast_lane_of_a_running_host_through_the_feed(t
     decoders = Path(_live.__file__).parent / 'decoder'
     script = tmp_path / 'host.cjs'
     script.write_text(HOST % {'brisk': json.dumps(str(decoders / 'brisk.cjs')), 'decoder': json.dumps(str(decoders / 'decoder.cjs'))})
-    feed = _live.Feed(command=['node', str(script)], env={**os.environ, 'BRISK_WORKERS': '3'}, upload=False, gateway=True).ready()
+    go = tmp_path / 'go'
+    feed = _live.Feed(command=['node', str(script)], env={**os.environ, 'BRISK_WORKERS': '3', 'GATE': str(go)}, upload=False,
+                      gateway=True).ready()
     assert feed.gateway._lanes == {'fast': True, 'capacity': 500}
     slow, slow_got = _records(['mbp-10'], 'ALL_SYMBOLS')
     wait_for(lambda: [c.lane for c in feed.gateway._clients] == ['slow'] and feed.gateway._clients[0].codes is None)
     fast, fast_got = _records(['mbp-10', 'trades'], ['7203'])
     wait_for(lambda: sorted(c.lane for c in feed.gateway._clients) == ['fast', 'slow'])   # joined: the host read it
+    go.touch()   # the rest of the stream
     feed.wait()
     fast.block_for_close(timeout=30)
     slow.block_for_close(timeout=30)
     got, expected = fast_got['mbp-10', '7203'], slow_got['mbp-10', '7203']
-    assert len(got) > 20 and got == expected[-len(got):], 'from its join, the recording\'s records, each once'
+    assert len(got) > 40 and got == expected[-len(got):], 'from its join, the recording\'s records, each once'
     assert all(symbol == '7203' for _, symbol in fast_got)
 
 

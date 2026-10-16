@@ -2,6 +2,7 @@
 import io
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 
@@ -406,7 +407,7 @@ def test_a_replay_of_a_few_symbols_reads_the_rows_of_those_alone(tmp_path, monke
     real = pq.read_table
 
     def spy(path, *args, **kwargs):
-        seen.append((str(path).split('/parts/', 1)[-1].split('/', 1)[-1], kwargs.get('filters')))
+        seen.append((Path(path).as_posix().split('/parts/', 1)[-1].split('/', 1)[-1], kwargs.get('filters')))
         return real(path, *args, **kwargs)
     monkeypatch.setattr(_parquet.pq, 'read_table', spy)
     list(spool.replay(10**6, {'7203'}))
