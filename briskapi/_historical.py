@@ -10,6 +10,11 @@ broker's BRiSK they came through) and XTKS.BRISKDEMO (the public demo, open to e
 trades, mbp-10, definition, imbalance, brisk-quotes, and OHLCV bars (ohlcv-1s/1m/1h/1d), which come only
 from the cloud: built ahead from your own live recordings, for the securities and times they cover. Times
 without a zone, and dates, are JST (the trading day for a date); `end` is exclusive.
+
+Beyond Databento's parameters, two things for tests that must not look ahead (the server filters on BRiSK's stamp,
+`ts_event`; a live feed's records reach the recording computer a little later, `ts_recv`):
+`get_range(..., ts_filter='ts_recv')` cuts and sorts on the receipt time, and `get_snapshot(at)` returns each
+security's latest record as of a moment.
 See docs/cloud-api.md.
 """
 from __future__ import annotations
@@ -24,10 +29,14 @@ import urllib.parse
 import urllib.request
 import warnings
 
+import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from briskapi import _https, cli, identity
 from briskapi._recording import BriskError
+from briskapi.records import BARS, DAY_NS, JST_NS, timestamp
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -50,6 +59,12 @@ class DataStore:
 
     def __init__(self, data: bytes, schema: str):
         self._data, self.schema = data, schema
+
+    @classmethod
+    def from_table(cls, table, schema: str) -> 'DataStore':
+        sink = io.BytesIO()
+        pq.write_table(table, sink, compression='zstd')
+        return cls(sink.getvalue(), schema)
 
     def _arrow(self):
         return pq.read_table(io.BytesIO(self._data))
@@ -187,16 +202,75 @@ class _Timeseries:
         self._client = client
 
     def get_range(self, dataset, start, end=None, symbols='ALL_SYMBOLS', schema='trades', stype_in='raw_symbol',
-                  stype_out='instrument_id', limit=None, path=None) -> DataStore:
+                  stype_out='instrument_id', limit=None, path=None, ts_filter='ts_event', skew=10.0) -> DataStore:
         """Records of `schema` for `symbols` (JPX codes) in [start, end), merged across your recordings and
         time-ordered. `path` also writes them there (Parquet). Records carry both `instrument_id` and the code
-        (`symbol`), so `stype_out` is `instrument_id` as Databento's default."""
+        (`symbol`), so `stype_out` is `instrument_id` as Databento's default.
+
+        `ts_filter` picks the clock `start`, `end` and the order use. 'ts_event' (the default) is BRiSK's stamp: the
+        same range returns the same rows whichever capture holds them. 'ts_recv' is when the recording computer
+        received the record: what a live program could have known by then (a replay's `ts_recv` is `ts_event`). The
+        cloud API cuts only on `ts_event`, so a 'ts_recv' request asks for [start - skew, end + skew) seconds of it and
+        cuts the rest here, with `limit` applied after; widen `skew` if BRiSK's stamps can run further ahead of the
+        receipt clock (a warning says when they came close). Not for OHLCV bars."""
         if stype_out != 'instrument_id':
             raise ValueError("stype_out is 'instrument_id'; each record also has its code in `symbol`")
-        data, _ = self._client._call('timeseries.get_range', dict(dataset=dataset, start=start, end=end, symbols=symbols,
-                                                                  schema=schema, stype_in=stype_in, limit=limit,
+        if ts_filter not in ('ts_event', 'ts_recv'):
+            raise ValueError("ts_filter is 'ts_event' or 'ts_recv'")
+        if ts_filter == 'ts_recv':
+            store = self._by_receipt(dataset, start, end, symbols, schema, stype_in, limit, skew)
+        else:
+            data, _ = self._client._call('timeseries.get_range', dict(dataset=dataset, start=start, end=end, symbols=symbols,
+                                                                      schema=schema, stype_in=stype_in, limit=limit,
+                                                                      encoding='parquet'), post=True)
+            store = DataStore(data, schema)
+        if path:
+            store.to_parquet(path)
+        return store
+
+    def _by_receipt(self, dataset, start, end, symbols, schema, stype_in, limit, skew) -> DataStore:
+        if schema in BARS:
+            raise ValueError("OHLCV bars have no receipt time; use ts_filter='ts_event'")
+        if not skew >= 0:
+            raise ValueError('skew is a number of seconds, 0 or more')
+        begin = timestamp(start)
+        finish = timestamp(end, default=(begin + JST_NS) // DAY_NS * DAY_NS - JST_NS + DAY_NS)
+        pad = round(skew * 10**9)
+        data, _ = self._client._call('timeseries.get_range', dict(dataset=dataset, start=begin - pad, end=finish + pad,
+                                                                  symbols=symbols, schema=schema, stype_in=stype_in,
                                                                   encoding='parquet'), post=True)
-        store = DataStore(data, schema)
+        table = pq.read_table(io.BytesIO(data))
+        if table.num_rows:
+            recv = pc.cast(table.column('ts_recv'), pa.int64())
+            lead = pc.max(pc.subtract(pc.cast(table.column('ts_event'), pa.int64()), recv)).as_py()
+            if pad and lead > pad / 2:
+                warnings.warn(f"BRiSK's stamp ran {lead / 1e9:.1f} s ahead of the receipt clock in this window; records "
+                              f'received before `end` but stamped more than skew={skew} s after it would be missing: '
+                              'pass a larger skew', stacklevel=3)
+            table = table.filter(pc.and_(pc.greater_equal(recv, begin), pc.less(recv, finish)))
+        order = [('ts_recv', 'ascending'), ('ts_event', 'ascending'), ('instrument_id', 'ascending')]
+        table = table.sort_by(order + ([('sequence', 'ascending')] if 'sequence' in table.column_names else []))
+        return DataStore.from_table(table.slice(0, int(limit)) if limit else table, schema)
+
+    def get_snapshot(self, dataset, at, symbols='ALL_SYMBOLS', schema='brisk-quotes', since=None, ts_filter='ts_recv',
+                     skew=10.0, path=None) -> DataStore:
+        """Each security's latest record of `schema` at or before `at`, one row per security, in `instrument_id` order:
+        the book as it stood (BRiSK sends a security's state on every update, so the last one is its state; a security
+        that had none since `since` is absent). `since` is where the search starts, default the JST midnight of `at`'s
+        trading day (the pre-open hour holds few records; during the session pass a later `since`). `ts_filter` as in
+        get_range: the default 'ts_recv' returns what a program receiving the feed would have held at `at`."""
+        if schema in BARS:
+            raise ValueError('A snapshot needs a record schema, not OHLCV bars')
+        moment = timestamp(at)
+        floor = timestamp(since, default=(moment + JST_NS) // DAY_NS * DAY_NS - JST_NS)
+        if floor > moment:
+            raise ValueError('since is after at')
+        table = self.get_range(dataset, floor, moment + 1, symbols, schema, ts_filter=ts_filter, skew=skew)._arrow()
+        if table.num_rows:
+            last = pa.table({'k': table.column('instrument_id'), 'i': pa.array(np.arange(table.num_rows))}) \
+                .group_by('k', use_threads=False).aggregate([('i', 'max')]).column('i_max')
+            table = table.take(pa.array(np.sort(last.to_numpy()))).sort_by('instrument_id')
+        store = DataStore.from_table(table, schema)
         if path:
             store.to_parquet(path)
         return store

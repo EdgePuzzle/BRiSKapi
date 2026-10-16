@@ -140,6 +140,8 @@ Planned for phase 2:
   captures of one day agree on BRiSK's stamp and differ in their receipt times, so the same
   range returns the same rows whichever capture holds them. Ties sort by `instrument_id`, then
   `sequence`.
+- A record that several of your captures hold keeps the earliest of their receipt times: the
+  first moment a program on any of them could have known it.
 - `start` and `end` are ISO 8601, a date or an integer. A date is that JST trading day's
   midnight (so an `end` date excludes the day), a time without a zone is JST, `Z` or an offset
   is honoured, and an integer of ten or more digits is UTC nanoseconds. `end` is exclusive and
@@ -275,6 +277,27 @@ client.timeseries.get_range(dataset="XTKS.BRISKDEMO", symbols=["7203"], schema="
 Same names and parameters as `databento.Historical`, returning a store with `to_df()`,
 `to_ndarray()`, `to_csv()`, `to_json()`, `to_parquet()`, `to_file()`, `replay()`, iteration and `len()`, with `to_df()`'s `price_type`, `pretty_ts`, `map_symbols`, `tz` and `count`. It transports Parquet, so no new dependency. The
 gateway comes from `query_url` in `archive.json`.
+
+Two additions to Databento's parameters, for tests that must not look ahead (the client's, no new
+endpoint). The server cuts on `ts_event`, but a live feed's records reach the recording computer a
+little later (`ts_recv`):
+
+```python
+client.timeseries.get_range(dataset="XTKS.BRISK", schema="brisk-quotes", start="2026-10-13T08:55",
+                            end="2026-10-13T08:59:58", ts_filter="ts_recv")      # what had been received by 08:59:58
+client.timeseries.get_snapshot("XTKS.BRISK", at="2026-10-13T08:59:58", schema="brisk-quotes")   # each security's latest record then
+```
+
+- `get_range(..., ts_filter="ts_recv", skew=10.0)` asks the server for the window padded by `skew`
+  seconds on both sides, then cuts and sorts on `ts_recv` here, with `limit` applied after. It warns
+  when BRiSK's stamps ran ahead of the receipt clock by more than half of `skew` (widen it, or
+  records received before `end` but stamped well after it would be missing). Not for OHLCV bars.
+- `get_snapshot(dataset, at, symbols, schema="brisk-quotes", since=None, ts_filter="ts_recv", skew=10.0)`
+  returns one row per security, in `instrument_id` order: its latest record at or before `at`. BRiSK
+  sends a security's whole state on every update, so that is its book as it stood; a security with no
+  record since `since` (default: the JST midnight of `at`'s trading day) is absent. During the session
+  pass a later `since`, or the search reads the morning.
+- A demo replay has no receipt clock: its `ts_recv` is its `ts_event`, so both filters agree there.
 
 On the command line, `brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13`
 writes CSV to stdout (`--encoding json|parquet`, `--output FILE`, `--end`, `--limit`). Over

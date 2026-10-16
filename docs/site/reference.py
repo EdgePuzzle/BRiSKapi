@@ -66,6 +66,12 @@ GET_RANGE_PARAMS = [
     P('stype_out', 'str', 'Only `instrument_id`; every record also has its code in `symbol`.'),
     P('limit', 'int | None', 'The most records to return, after time-ordering.'),
     P('path', 'str | Path | None', 'Also write the records (Parquet) to this file.'),
+    P('ts_filter', 'str', 'The clock `start`, `end` and the order use: `ts_event` (default; BRiSK\'s stamp, the same rows whichever '
+      'capture holds them) or `ts_recv` (when your computer received the record, for tests that must not look ahead). The cloud '
+      'API cuts only on `ts_event`, so a `ts_recv` request asks for `skew` seconds either side and cuts the rest in the client, '
+      'with `limit` applied after. Not for bars.'),
+    P('skew', 'float', 'Seconds of padding either side of the window for `ts_filter="ts_recv"` (default 10). A warning says when '
+      'BRiSK\'s stamps ran ahead of the receipt clock by more than half of it.'),
 ]
 
 STORE = CLIENT + RANGE
@@ -88,7 +94,8 @@ CLOUD = [
            'uploads, and only for the securities and times they cover.',
            'Historical.timeseries.get_range(\n    dataset: str,\n    start: str | int | date,\n    end: str | int | date | None = None,\n'
            '    symbols: Iterable[str] | str = "ALL_SYMBOLS",\n    schema: str = "trades",\n    stype_in: str = "raw_symbol",\n'
-           '    stype_out: str = "instrument_id",\n    limit: int | None = None,\n    path: str | Path | None = None,\n) -> DataStore',
+           '    stype_out: str = "instrument_id",\n    limit: int | None = None,\n    path: str | Path | None = None,\n'
+           '    ts_filter: str = "ts_event",   # or "ts_recv"\n    skew: float = 10.0,\n) -> DataStore',
            GET_RANGE_PARAMS, 'A [`DataStore`](/reference/historical/store/to_df.md) of the records.',
            {'Python': CLIENT + 'data = client.timeseries.get_range(\n    dataset="XTKS.BRISKDEMO",\n    symbols=["7203"],\n'
             '    schema="trades",\n    start="2021-09-27T09:00",\n    end="2021-09-27T09:01",\n    limit=1,\n)\n'
@@ -110,6 +117,29 @@ CLOUD = [
             'HTTP': curl('timeseries.get_range', 'dataset=XTKS.BRISKDEMO', 'symbols=7203,6758', 'schema=ohlcv-1m',
                          'start=2021-09-27', 'encoding=csv', post=True),
             'CLI': 'brisk query XTKS.BRISKDEMO --schema ohlcv-1m --symbols 7203,6758 --start 2021-09-27'}),
+    Method('historical/timeseries/get_snapshot', 'Historical.timeseries.get_snapshot', '.get_snapshot',
+           'The latest record of each security at or before a moment: its book as it stood. BRiSK sends a security\'s whole '
+           'state on every update, so the last record is the state. By default the moment is on the receipt clock, so it '
+           'holds what a program receiving the feed would have held then. A security with no record since `since` is '
+           'absent. Implemented in the client over `get_range`; it adds no endpoint.',
+           'Historical.timeseries.get_snapshot(\n    dataset: str,\n    at: str | int | date,\n    symbols: Iterable[str] | str = "ALL_SYMBOLS",\n'
+           '    schema: str = "brisk-quotes",\n    since: str | int | date | None = None,\n    ts_filter: str = "ts_recv",\n'
+           '    skew: float = 10.0,\n    path: str | Path | None = None,\n) -> DataStore',
+           [P('dataset', 'str', '`XTKS.BRISK` (your own live recordings) or `XTKS.BRISKDEMO` (the public demo, open to every identity).',
+              required=True),
+            P('at', 'str | int | date', 'The moment: an ISO 8601 time (JST unless it names a zone), a date (that trading day, from '
+              'JST midnight) or UTC nanoseconds. Records at exactly this moment count.', required=True),
+            GET_RANGE_PARAMS[3],
+            P('schema', 'str', 'A record schema: `brisk-quotes` (default), `mbp-10`, `imbalance`, `trades` or `definition`; not '
+              'bars.'),
+            P('since', 'str | int | date | None', 'Where the search starts. Default: the JST midnight of `at`\'s trading day. '
+              'During the session pass a later one, or the search reads the whole morning.'),
+            P('ts_filter', 'str', '`ts_recv` (default: what had been received by `at`) or `ts_event` (BRiSK\'s stamp).'),
+            GET_RANGE_PARAMS[-1], GET_RANGE_PARAMS[8]],
+           'A [`DataStore`](/reference/historical/store/to_df.md) with one row per security, in `instrument_id` order.',
+           {'Python': CLIENT + 'snap = client.timeseries.get_snapshot(\n    dataset="XTKS.BRISKDEMO",\n    at="2021-09-27T09:00:00",\n'
+            '    symbols=["7203", "6758"],\n    schema="brisk-quotes",\n)\n'
+            'print(snap.to_df(tz="Asia/Tokyo")[["symbol", "bid_price", "ask_price", "indicative_price", "indicative_volume"]])'}),
     Method('historical/metadata/list_datasets', 'Historical.metadata.list_datasets', '.list_datasets',
            'The datasets you can query. Named like Databento\'s, venue then feed: `XTKS` is the Tokyo Stock Exchange.',
            'Historical.metadata.list_datasets() -> list[str]', [], 'A list of dataset codes.',

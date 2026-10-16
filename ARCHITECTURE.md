@@ -1425,7 +1425,9 @@ captures of one day agree on `ts_event` and differ in `ts_recv`, so the same ran
 same rows from any of them.
 
 A day recorded twice (a restart, two computers, two brokers) gives overlapping recordings.
-Their rows are merged and deduplicated, keeping the first, by (`instrument_id`, `trade_id`)
+Their rows are merged and deduplicated, keeping the one with the earliest `ts_recv` (the first
+moment any capture could have known it; a stable sort by `ts_recv` first, so equal receipts keep
+the captures' order), by (`instrument_id`, `trade_id`)
 for trades, (`instrument_id`, `ts_event`) for definitions, (`instrument_id`, `sequence`,
 `auction_type`) for imbalance and (`instrument_id`, `sequence`) for the rest. The frame
 numbers are the server's, which should make captures agree; that is not yet confirmed on live
@@ -1521,6 +1523,18 @@ and `get_cost`, which post the request. The key goes as the basic-auth username 
 password. A 303 is followed by hand with a plain request (`_NoRedirect` stops urllib doing it),
 so the key never reaches the result's URL. `brisk query` posts the same `get_range` request
 with the chosen encoding (CSV by default; Parquet needs `--output`).
+
+The client adds two things the server does not do, so that no endpoint changes. `get_range(...,
+ts_filter='ts_recv', skew=10.0)` asks for [start - skew, end + skew) on `ts_event` (the only clock
+the server cuts on), then keeps rows with `start <= ts_recv < end`, sorts by `ts_recv`, `ts_event`,
+`instrument_id` and `sequence`, and applies `limit` last (it is not sent). BRiSK's stamp is not
+known to be the exchange's, and the two computers' clocks are not synchronised, so a record received
+before `end` can carry a stamp after `end + skew`; the client warns when the largest
+`ts_event - ts_recv` it sees passes half of `skew`, the only evidence it has of a window too narrow.
+`get_snapshot(at, since=None, ...)` calls `get_range` on [`since`, `at` + 1 ns) (`since` defaults to the
+JST midnight of `at`'s trading day) and keeps each `instrument_id`'s last row in that order: BRiSK
+sends a security's whole state on every update, so the last record is its state, and a security with
+none in the window is absent. Bars have no receipt time, so both refuse them.
 
 ## Development and deployment
 

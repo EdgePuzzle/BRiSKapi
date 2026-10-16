@@ -50,8 +50,9 @@ def cumulative(issue, second):
     return volume, turnover
 
 
-def session(first, last, date=DATE, source='brisk_live'):
-    """A broker session from `first` to `last` (seconds after 09:00), one quote batch per second."""
+def session(first, last, date=DATE, source='brisk_live', lag_ms=20):
+    """A broker session from `first` to `last` (seconds after 09:00), one quote batch per second, each received `lag_ms`
+    after BRiSK's stamp."""
     midnight_ms = int(dt.datetime.strptime(date, '%Y%m%d').replace(tzinfo=JST).timestamp() * 1000)
     master = [{**dict.fromkeys(schema.MASTER_KEYS, 0), 'issue_id': i, 'code': code, 'name': f'Issue {code}', 'lot_size': 100,
                'base_price10': 30000 if i == 0 else 5000, 'limit_up10': 39000 if i == 0 else 6500,
@@ -77,7 +78,7 @@ def session(first, last, date=DATE, source='brisk_live'):
         now = OPEN_US + second * 1_000_000
         trades = [{'issue_id': i, 'code': CODES[i], 'frame': second + 1, 'time_us': now, 'price10': price10,
                    'quantity': quantity, 'side': 1 if i == 0 else 2} for i, price10, quantity in trades_at(second)]
-        batches.append(dict(type='quotes', seq=seq, source_time_us=now, received_unix_ms=midnight_ms + now // 1000 + 20,
+        batches.append(dict(type='quotes', seq=seq, source_time_us=now, received_unix_ms=midnight_ms + now // 1000 + lag_ms,
                             decode_ns=250_000, replay_lateness_ms=None, quotes=[quote(0, second), quote(1, second)],
                             trades=trades))
     n = len(batches)
@@ -560,3 +561,98 @@ def test_every_schema_returns_exactly_its_documented_fields(archive):
                 assert text and f'`{field}`' in doc or field.split('_')[0] in {'bid', 'ask'} and '_NN' in doc, (name, field)
     book = query(s3, OWNER, dataset='XTKS.BRISK', schema='brisk-quotes', symbols='7203', start=at(0), end=at(1)).to_pylist()[0]
     assert book['bids'] == [{'price': 2999.0, 'size': 300, 'count': 3}, {'price': 2998.0, 'size': 200, 'count': 2}]
+
+
+def test_a_record_two_captures_hold_keeps_its_earliest_receipt(archive):
+    s3, db, put = archive
+    put(session(0, 150, lag_ms=500))
+    put(session(120, 300, lag_ms=20))          # overlaps 09:02:00 to 09:02:30, received sooner
+    quotes = query(s3, OWNER, dataset='XTKS.BRISK', schema='brisk-quotes', symbols='7203', start='2026-10-13')
+    recv = pc.cast(quotes.column('ts_recv'), pa.int64()).to_numpy()
+    event = pc.cast(quotes.column('ts_event'), pa.int64()).to_numpy()
+    lag_ms = {int(seq): int((r - e) // 1_000_000) for seq, r, e in zip(quotes.column('sequence').to_pylist(), recv, event)}
+    assert lag_ms[100] == 500 and lag_ms[200] == 20            # held by one capture each
+    assert all(lag_ms[frame] == 20 for frame in range(122, 152))   # held by both: the sooner one, not the first listed
+
+
+BASE = int(dt.datetime(2026, 10, 13, 9, tzinfo=JST).timestamp()) * 10**9
+
+
+def quote_rows(rows):
+    """A brisk-quotes-like body from (instrument_id, event s, receipt s, sequence) rows, seconds after 09:00 JST."""
+    when = lambda values: pa.array([BASE + round(v * 1e9) for v in values], pa.int64()).cast(pa.timestamp('ns', tz='UTC'))  # noqa: E731
+    table = pa.table({'ts_recv': when([r[2] for r in rows]), 'ts_event': when([r[1] for r in rows]),
+                      'instrument_id': pa.array([r[0] for r in rows], pa.uint32()),
+                      'sequence': pa.array([r[3] for r in rows], pa.uint64()),
+                      'symbol': pa.array([str(r[0]) for r in rows])})
+    sink = io.BytesIO()
+    pq.write_table(table, sink)
+    return sink.getvalue()
+
+
+def served(monkeypatch, rows):
+    """A Historical client whose cloud API answers every request with these rows, and the requests it saw."""
+    seen = []
+
+    def call(self, endpoint, params, post=False):
+        seen.append((endpoint, dict(params)))
+        return quote_rows(rows), 'application/octet-stream'
+    monkeypatch.setattr(_historical.Historical, '_call', call)
+    return briskapi.Historical(gateway='https://query.test/'), seen
+
+
+ROWS = [(7203, 1.0, 1.02, 1), (7203, 9.99, 10.02, 2),      # the second was stamped inside the window, received after it
+        (7203, 10.005, 9.995, 3),                         # stamped after the end, received before it (its stamp ran ahead)
+        (6758, 0.5, 0.52, 4), (6758, 30.0, 30.02, 5)]     # the last is far outside
+
+
+def test_get_range_can_cut_on_the_receipt_time(monkeypatch):
+    client, seen = served(monkeypatch, ROWS)
+    got = client.timeseries.get_range('XTKS.BRISK', start='2026-10-13T09:00:00', end='2026-10-13T09:00:10', schema='brisk-quotes',
+                                      ts_filter='ts_recv')
+    assert got.schema == 'brisk-quotes' and [r['sequence'] for r in got] == [4, 1, 3]     # by receipt; 2 and 5 are not yet/any more
+    params = seen[0][1]                                   # the cloud API is asked for the window padded by skew
+    assert (params['start'], params['end']) == (BASE - 10 * 10**9, BASE + 20 * 10**9) and 'limit' not in params
+    assert [r['sequence'] for r in client.timeseries.get_range('XTKS.BRISK', start='2026-10-13T09:00:00', end='2026-10-13T09:00:10',
+                                                               schema='brisk-quotes')] == [1, 2, 3, 4, 5]   # the default is untouched
+    assert 'limit' in seen[1][1] and seen[1][1]['start'] == '2026-10-13T09:00:00'
+    # limit is applied after the cut; path writes the cut records; the default window is the trading day.
+    one = client.timeseries.get_range('XTKS.BRISK', start='2026-10-13T09:00:00', end='2026-10-13T09:00:10', schema='brisk-quotes',
+                                      ts_filter='ts_recv', limit=1)
+    assert [r['sequence'] for r in one] == [4]
+    day = client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', schema='brisk-quotes', ts_filter='ts_recv', skew=0)
+    assert len(day) == 5 and seen[-1][1]['end'] - seen[-1][1]['start'] == 86400 * 10**9
+    # BRiSK's stamp running ahead of the receipt clock by more than half of skew is said; a larger skew silences it.
+    client, seen = served(monkeypatch, ROWS + [(7203, 15.0, 9.0, 6)])
+    with pytest.warns(UserWarning, match=r'6\.0 s ahead'):
+        client.timeseries.get_range('XTKS.BRISK', start='2026-10-13T09:00:00', end='2026-10-13T09:00:10', ts_filter='ts_recv')
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        client.timeseries.get_range('XTKS.BRISK', start='2026-10-13T09:00:00', end='2026-10-13T09:00:10', ts_filter='ts_recv', skew=20)
+    for bad in (dict(ts_filter='ts_arrival'), dict(ts_filter='ts_recv', schema='ohlcv-1m'), dict(ts_filter='ts_recv', skew=-1)):
+        with pytest.raises(ValueError):
+            client.timeseries.get_range('XTKS.BRISK', start='2026-10-13', **bad)
+
+
+def test_get_snapshot_is_the_latest_record_of_each_security_as_of_a_moment(monkeypatch, tmp_path):
+    rows = [(7203, 1.0, 1.02, 1), (7203, 5.0, 5.02, 2), (7203, 5.5, 8.5, 3),      # 7203's third reached us at 08.5 s
+            (6758, 2.0, 2.02, 4), (6758, 7.0, 7.02, 5), (167, 0.0, 0.02, 6)]
+    client, seen = served(monkeypatch, rows)
+    snap = client.timeseries.get_snapshot('XTKS.BRISK', at='2026-10-13T09:00:06', schema='brisk-quotes')
+    assert [(r['instrument_id'], r['sequence']) for r in snap] == [(167, 6), (6758, 4), (7203, 2)] and len(snap) == 3
+    assert snap.schema == 'brisk-quotes'
+    midnight = BASE - 9 * 3600 * 10**9
+    assert (seen[0][1]['start'], seen[0][1]['end']) == (midnight - 10**10, BASE + 6 * 10**9 + 1 + 10**10)   # padded by skew
+    # as of 09:00:09 the third reached us; by BRiSK's stamp it was already there at 06 s.
+    assert dict((r['instrument_id'], r['sequence']) for r in client.timeseries.get_snapshot(
+        'XTKS.BRISK', at='2026-10-13T09:00:09', path=tmp_path / 's.parquet'))[7203] == 3 and (tmp_path / 's.parquet').exists()
+    by_stamp = client.timeseries.get_snapshot('XTKS.BRISK', at='2026-10-13T09:00:06', ts_filter='ts_event')
+    assert dict((r['instrument_id'], r['sequence']) for r in by_stamp)[7203] == 3
+    assert len(client.timeseries.get_snapshot('XTKS.BRISK', at='2026-10-13T08:00:00')) == 0        # nothing yet
+    assert seen[-1][1]['start'] == midnight - 10**10
+    client.timeseries.get_snapshot('XTKS.BRISK', at='2026-10-13T09:00:06', since='2026-10-13T08:30', ts_filter='ts_event')
+    assert seen[-1][1]['start'] == BASE - 30 * 60 * 10**9
+    for bad in (dict(schema='ohlcv-1m'), dict(since='2026-10-13T10:00')):
+        with pytest.raises(ValueError):
+            client.timeseries.get_snapshot('XTKS.BRISK', at='2026-10-13T09:00:06', **bad)

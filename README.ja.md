@@ -642,7 +642,13 @@ client.metadata.get_dataset_condition("XTKS.BRISK", start_date="2026-10-01")   #
 ```
 
 `get_range(dataset, start, end=None, symbols='ALL_SYMBOLS', schema='trades', limit=None,
-path=None)` はストアを返します。`path` を指定すると Parquet ファイルにも書き出します。
+path=None, ts_filter='ts_event', skew=10.0)` はストアを返します。`path` を指定すると Parquet ファイルにも
+書き出します。サーバーは BRiSK のタイムスタンプ（`ts_event`）で絞り込みますが、ライブフィードのレコードは
+少し遅れて手元のコンピューターに届きます（`ts_recv`）。先読みをしてはならないテストでは、
+`ts_filter='ts_recv'` で受信時刻による絞り込みと並べ替えができます（前後 `skew` 秒を広げて要求し、
+タイムスタンプがそれより先行していたら警告します）。`get_snapshot(dataset, at, symbols='ALL_SYMBOLS',
+schema='brisk-quotes', since=None)` は、`at` 時点の各銘柄の最新のレコードを1銘柄1行で返します（既定は
+受信時刻基準。`ts_filter='ts_event'` も指定できます）。
 `client.metadata` には `list_datasets()`、`list_schemas(dataset)`、`list_fields(schema)`、
 `list_publishers()`、`get_dataset_range(dataset)`、`get_dataset_condition(dataset, start_date, end_date)`
 （各日付が available か missing か、自分の記録がカバーする時間帯を日本時間で返します）、
