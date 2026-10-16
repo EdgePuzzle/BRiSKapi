@@ -101,6 +101,7 @@ class Spool:
         self._on_part = on_part     # called (on the writer's thread) with the spool after each part is written
         self._shipped, self._cut, self._cut_at, self._index = 0, None, 0, {}
         self.last_parts, self._last_piece = [], None   # the parts of the piece last tried, and how
+        self.skipped = []         # (first, last) clock of each piece not made, for the stream gave it no update
 
     @classmethod
     def reopen(cls, folder, intent=None):
@@ -113,6 +114,7 @@ class Spool:
         spool._writer, spool._error, spool._readers, spool._removed = ThreadPoolExecutor(1), None, 0, False
         spool._opened, spool._midnight = time.monotonic(), None
         spool._on_part, spool._cut, spool._cut_at, spool._index, spool.last_parts, spool._last_piece = None, None, 0, {}, [], None
+        spool.skipped = []
         try:
             spool._shipped = min(int(json.loads((spool.path / 'shipped.json').read_text())['parts']), len(parts))
         except (OSError, ValueError, KeyError, TypeError):
@@ -179,14 +181,17 @@ class Spool:
         if self._on_part:
             self._on_part(self)
 
-    def replay(self, count):
+    def replay(self, count, codes=None):
         """The segment's first `count` lines, as a Live replay sends them: closed parts re-encoded, then the lines
-        not yet written as they arrived. The spool stays until the replay is read or closed."""
+        not yet written as they arrived. With `codes`, a part's lines hold only their symbols' quotes and trades (and
+        none for a batch that has none): a session of a few symbols is not sent the whole market. The spool stays
+        until the replay is read or closed."""
+        issues = None if codes is None else {m['issue_id'] for m in self.master if m['code'] in codes}
         with self._lock:
             parts, pending = list(self._parts), [(first, list(lines)) for first, lines in self._pending]
             pending.append((self.count - len(self._lines), list(self._lines)))
             self._readers += 1
-        return _Replay(self, parts, pending, count)
+        return _Replay(self, parts, pending, count, issues)
 
     def _release(self):
         with self._lock:
@@ -211,10 +216,22 @@ class Spool:
         with `final` (the segment over, its parts all closed) also what is left, ending as the segment did (or,
         with `repair`, with the end its host never wrote). Returns (manifest, repaired), or None when no piece is
         ready. The parts count as shipped once tried, packaged or not (last_parts names them), so a piece is never
-        shipped twice. `progress(label)` is told how its packaging goes (see briskapi._native.package)."""
+        shipped twice. A piece the stream sent no update to (a reconnection in the lunch break: its book and the
+        day's history, as the segment before had them) is not made: it is in `skipped`. `progress(label)` is told
+        how its packaging goes (see briskapi._native.package)."""
         if final:
             self.close_part(wait=True)
-        parts = self.parts()[self._shipped:]
+        while True:
+            parts, last = self._next(self.parts()[self._shipped:], final)
+            if parts is None:
+                return None
+            if any(self._info(part)['updates'] for part in parts):
+                return self._package(parts, Path(output), last=last, repair=repair and last, progress=progress)
+            self.skipped.append((self._info(parts[0])['first'], self._info(parts[-1])['last']))
+            self._mark(len(parts))
+
+    def _next(self, parts, final):
+        """The parts of the next piece, and whether it is the segment's last; (None, False) when none is ready."""
         if parts:
             began, rows = self._info(parts[0])['first'], 0
             for count, part in enumerate(parts, 1):
@@ -223,8 +240,8 @@ class Spool:
                     break   # the segment's end goes with the rest
                 rows += info['rows']
                 if (began < LUNCH_US <= info['last'] or rows >= MAX_PIECE_ROWS) and (count < len(parts) or not final):
-                    return self._package(parts[:count], Path(output), last=False, progress=progress)
-        return self._package(parts, Path(output), last=True, repair=repair, progress=progress) if final and parts else None
+                    return parts[:count], False
+        return (parts, True) if final and parts else (None, False)
 
     def _package(self, parts, output, last, repair=False, progress=None):
         from briskapi import cli
@@ -323,18 +340,20 @@ class Spool:
 
 
 class _Replay:
-    def __init__(self, spool, parts, pending, count):
+    def __init__(self, spool, parts, pending, count, issues=None):
         self._spool, self._parts, self._pending, self._count, self._open = spool, parts, pending, count, True
+        self._issues = issues
 
     def __iter__(self):
         try:
-            at = 0
-            for folder, _, _ in self._parts:
-                for batch in _parquet.part_batches(folder, self._spool.header, self._spool.master):
-                    if at >= self._count:
+            for folder, first, _ in self._parts:
+                if first >= self._count:
+                    return
+                for batch in _parquet.part_batches(folder, self._spool.header, self._spool.master, self._issues):
+                    if batch['seq'] >= self._count:   # a batch's number is its line's: the replay ends where the live stream begins
                         return
                     yield json.dumps(batch, separators=(',', ':'), ensure_ascii=False).encode() + b'\n'
-                    at += 1
+            at = self._parts[-1][2] if self._parts else 0
             for first, lines in self._pending:
                 for line in lines[max(at - first, 0):]:
                     if at >= self._count:

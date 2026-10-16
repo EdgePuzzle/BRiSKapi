@@ -233,7 +233,8 @@ PYTHON = [
            '    timeout: float | None = None,\n    node: str = "node",\n    cache: str | Path | None = None,        # the demo\n'
            '    speed: float = 1,                       # the demo\n'
            '    limit_frames: int | None = None,        # the demo\n    trace_protocol: bool = False,           # a broker\n'
-           '    profile: dict | None = None,            # a broker\n    upload_market_data: bool | None = None,  # a broker\n) -> Feed',
+           '    profile: dict | None = None,            # a broker\n    upload_market_data: bool | None = None,  # a broker\n'
+           '    fast_symbols: int | None = None,        # a broker\n) -> Feed',
            [P('site', 'str', '`"demo"`, or `"sbi"`, `"e-shiten"`, `"matsui"`, `"monex"` or `"smbcnikko"`: your '
               'broker\'s live BRiSK, signing in as '
               '[`login`](/reference/python/broker_login.md) does unless it already has.', required=True),
@@ -252,7 +253,9 @@ PYTHON = [
             P('trace_protocol', 'bool', 'A broker\'s connection steps on stderr, tokens redacted.'),
             P('profile', 'dict | None', 'A broker connection\'s unverified Socket.IO parameters.'),
             P('upload_market_data', 'bool | None', '`False` uploads a broker session\'s timing summary but not its market '
-              'recording.')],
+              'recording.'),
+            P('fast_symbols', 'int | None', 'A broker feed with `gateway`: how many symbols `briskapi.Live` sessions will want '
+              'on its fast lane (default 500 to 1,000, by the cores); each 500 takes a worker from the recording.')],
            'A [`Feed`](/reference/python/feed_quotes.md), already holding every selected security\'s state.',
            {'Python': 'import briskapi\n\nfeed = briskapi.connect(site="demo", codes=["7203"], upload=False)\n'
             'print(feed)\nprint(briskapi.Ticker("7203").quote()["indicative_price"])\nfeed.close()',
@@ -526,8 +529,8 @@ BROKER = [
            '`brisk live --site sbi` or another broker\'s site (see [Recording](/guides/recording.md)).',
            'briskapi.connect(\n    *,\n    site: str,\n    codes: list[str] | None = None,\n    history: bool = False,\n'
            '    upload: bool | None = None,\n    upload_market_data: bool | None = None,\n    output: str | Path | None = None,\n'
-           '    on_day: Callable | None = None,\n    gateway: bool = False,\n    trace_protocol: bool = False,\n'
-           '    profile: dict | None = None,\n    timeout: float | None = None,\n) -> Feed',
+           '    on_day: Callable | None = None,\n    gateway: bool = False,\n    fast_symbols: int | None = None,\n'
+           '    trace_protocol: bool = False,\n    profile: dict | None = None,\n    timeout: float | None = None,\n) -> Feed',
            [P('site', 'str', '`"sbi"`, `"e-shiten"`, `"matsui"`, `"monex"` or `"smbcnikko"`. Uses the session [`login`](/reference/python/broker_login.md) made, '
               'or signs in as it does.', required=True),
             P('codes', 'list[str] | None', 'Securities to decode.'), P('history', 'bool', 'Keep every update and trade.'),
@@ -536,6 +539,8 @@ BROKER = [
             P('output', 'str | Path | None', 'Keep each recording here as `SITE_YYYYMMDD_FROM-TO` (its broker\'s site).'),
             P('on_day', 'Callable | None', 'Called with each recording\'s result.'),
             P('gateway', 'bool', 'Also serve the feed to `briskapi.Live()` on this computer (`brisk live` does by default).'),
+            P('fast_symbols', 'int | None', 'With `gateway`: how many symbols `briskapi.Live` sessions will want on the feed\'s '
+              'fast lane (default 500 to 1,000, by the cores); each 500 takes a worker from the recording.'),
             P('trace_protocol', 'bool', 'Print the connection steps, tokens redacted.'),
             P('profile', 'dict | None', 'Unverified Socket.IO parameters, should the server open with Socket.IO.'),
             P('timeout', 'float | None', 'Seconds to wait for the initial state (default 120). With no session to join '

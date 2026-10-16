@@ -310,6 +310,23 @@ def test_cli_live_says_what_it_saves_and_says_saved_only_once_it_is(fake_host, m
     assert 'is recorded' not in out.err
 
 
+def test_cli_live_says_a_reconnection_that_got_no_update_has_nothing_to_save(tmp_path, monkeypatch, capsys):
+    # The stream was lost and came back in the lunch break: the segment is a book, the day's history and its end.
+    clock = 11 * 3600 * 10**6 + 2700 * 10**6
+    bootstrap, end = sbi_session()[0], sbi_session()[-1]
+    bootstrap['source_time_us'] = end['source_time_us'] = clock
+    end.update(seq=1, frames=0, quote_updates=0)
+    script = tmp_path / 'sbi_fake.cjs'
+    script.write_text(f"for (const b of {json.dumps([bootstrap, end])}) console.log(JSON.stringify(b));\n")
+    monkeypatch.setattr(brisk, 'DECODER', script)
+    monkeypatch.setenv('BRISK_SBI_COOKIES', '{"session_bfaf77a2": "v"}')
+    monkeypatch.setattr(cli, 'SAVE_SECONDS', {True: 0, False: 0})
+    cli.main(['live', '--site', 'sbi', '--no-gateway', '--quotes', '--no-upload', '--output', str(tmp_path / 'days')])
+    err = capsys.readouterr().err
+    assert '[brisk] sbi 2026-03-11 from 11:45:00: no update came until 11:45:00; nothing to save' in err
+    assert 'saved to' not in err and not (tmp_path / 'days').exists(), 'no recording was made of it'
+
+
 def told_of_the_day(err):
     return [line.removeprefix('[brisk] sbi 2026-03-11 from 09:00:00: ') for line in err.splitlines()
             if line.startswith('[brisk] sbi 2026-03-11 from 09:00:00: ')]
@@ -596,8 +613,8 @@ setInterval(() => {{}}, 1000);
 
 
 def test_a_day_whose_host_cannot_end_it_is_repaired_with_its_end_and_uploaded(tmp_path, monkeypatch):
-    script = tmp_path / 'held.cjs'   # prints the bootstrap, then neither ends its day nor stops but by force
-    script.write_text(f'console.log({json.dumps(json.dumps(sbi_session()[0]))});\nsetInterval(() => {{}}, 1000);\n')
+    script = tmp_path / 'held.cjs'   # prints the bootstrap and a quote, then neither ends its day nor stops but by force
+    script.write_text(''.join(f'console.log({json.dumps(json.dumps(b))});\n' for b in sbi_session()[:2]) + 'setInterval(() => {}, 1000);\n')
     monkeypatch.setattr(brisk, 'DECODER', script)
     sent = []
     def publish(directory, url, **options):
@@ -614,8 +631,24 @@ def test_a_day_whose_host_cannot_end_it_is_repaired_with_its_end_and_uploaded(tm
         feed = briskapi.connect(site='sbi', upload_market_data=True)
         feed.close(timeout=0.5)
     assert feed.status == 'closed' and feed.uploaded == {'status': 'stored'}
-    assert [s['batches'] for s in sent] == [2], 'the bootstrap and its repaired end'
+    assert [s['batches'] for s in sent] == [3], 'the bootstrap, a quote and its repaired end'
     assert feed.recordings[-1]['repaired'] and feed.recordings[-1]['name'].startswith('sbi_20260311_')
+    assert not any(_spool.kept_dir().glob('*')) and not any(_spool.spool_root().glob('segment-*'))
+
+
+def test_a_day_whose_host_cannot_end_it_and_got_no_update_leaves_no_recording_to_repair(tmp_path, monkeypatch):
+    script = tmp_path / 'held.cjs'   # the bootstrap only: no update ever came
+    script.write_text(f'console.log({json.dumps(json.dumps(sbi_session()[0]))});\nsetInterval(() => {{}}, 1000);\n')
+    monkeypatch.setattr(brisk, 'DECODER', script)
+    monkeypatch.setattr(cli, 'upload', lambda *a, **k: pytest.fail('a book with no update is not uploaded'))
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    briskapi.consent(accept=True)
+    with warnings.catch_warnings(record=True) as caught:   # opened where the feed's threads inherit it (free-threaded builds)
+        warnings.simplefilter('always')
+        feed = briskapi.connect(site='sbi', upload_market_data=True)
+        feed.close(timeout=0.5)
+    assert feed.status == 'closed' and feed.recordings[-1]['name'] is None and feed.recordings[-1]['uploaded'] is None
+    assert not [w for w in caught if 'ended early' in str(w.message)], 'nothing was repaired'
     assert not any(_spool.kept_dir().glob('*')) and not any(_spool.spool_root().glob('segment-*'))
 
 
@@ -889,6 +922,153 @@ def eshiten_host(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, 'upload_timing',
                         lambda report, url: sent['timing'].append(schema.validate_timing(report)) or {'status': 'stored'})
     return sent
+
+
+class _Store:
+    def __init__(self, record):
+        self.record = record
+
+    def load(self):
+        return self.record
+
+
+class _Closed:
+    """A threading.Event that never blocks: it records the waits asked of it, and may do something while one 'passes'."""
+    def __init__(self, during=None, is_set=False):
+        self.waits, self.during, self.is_set = [], during, is_set
+
+    def wait(self, seconds):
+        self.waits.append(seconds)
+        if self.during:
+            self.during()
+        return self.is_set
+
+
+@pytest.fixture
+def passkey_login(monkeypatch, tmp_path):
+    """briskapi.passkey with a saved passkey for `sbi` (record in `state`), and a `login` that fails as often as `failures` says."""
+    from briskapi import passkey
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
+    state = {'record': {'site': 'sbi', 'credential': {}}, 'failures': 0, 'logins': []}
+    monkeypatch.setattr(passkey, 'default_store', lambda: _Store(state['record']))
+
+    def login(**options):
+        state['logins'].append(options)
+        if state['failures']:
+            state['failures'] -= 1
+            raise passkey.PasskeyError('the login page did not load')
+        briskapi.login(cookies={'session_bfaf77a2': 'new'}, remember=True)
+    monkeypatch.setattr(passkey, 'login', login)
+    return state
+
+
+def test_a_feed_whose_session_expired_signs_in_again_with_the_saved_passkey(passkey_login):
+    told, closed = [], _Closed()
+    assert brisk._sign_in_again('sbi', closed, tell=told.append) is True
+    assert passkey_login['logins'] == [{'remember': True, 'node': 'node'}] and closed.waits == [0]
+    assert told == ['the session has expired; signing in again with your saved passkey (Chrome opens)',
+                    'signed in again; the feed goes on']
+    assert json.loads(brisk.cookies_path('sbi').read_text()) == {'session_bfaf77a2': 'new'}, 'where the host reads them'
+
+
+def test_signing_in_again_is_tried_a_few_times_further_apart_and_then_left_to_the_person(passkey_login):
+    passkey_login['failures'] = 2
+    told, closed = [], _Closed()
+    assert brisk._sign_in_again('sbi', closed, waits=(0, 600, 1800), tell=told.append) is True
+    assert closed.waits == [0, 600, 1800] and len(passkey_login['logins']) == 3
+    assert [t for t in told if 'failed' in t] == ['signing in again failed: the login page did not load; trying again in 10 minutes',
+                                                  'signing in again failed: the login page did not load; trying again in 30 minutes']
+    passkey_login['failures'], passkey_login['logins'], told[:] = 9, [], []
+    assert brisk._sign_in_again('sbi', _Closed(), waits=(0, 60), tell=told.append) is False
+    assert len(passkey_login['logins']) == 2 and 'sign in again yourself (`brisk login`)' in told[-1]
+
+
+def test_a_feed_without_a_passkey_for_its_site_tells_how_to_sign_in_and_does_not_try(passkey_login):
+    for record, said in ((None, 'no passkey is saved for sbi: sign in again yourself'),
+                         ({'site': 'e-shiten', 'credential': {}}, 'no passkey is saved for sbi (the saved one is for e-shiten)')):
+        passkey_login['record'], told = record, []
+        assert brisk._sign_in_again('sbi', _Closed(), tell=told.append) is False
+        assert said in told[0] and "briskapi.login(site='sbi', cookies=..., remember=True)" in told[0]
+    assert passkey_login['logins'] == [], 'another broker\'s passkey is never used'
+
+
+def test_signing_in_again_stops_when_the_feed_closes_or_somebody_else_has_signed_in(passkey_login):
+    assert brisk._sign_in_again('sbi', _Closed(is_set=True), tell=lambda text: None) is False
+    first = _Closed(during=lambda: briskapi.login(cookies={'session_bfaf77a2': 'by hand'}, remember=True))
+    assert brisk._sign_in_again('sbi', first, tell=lambda text: None) is False
+    assert passkey_login['logins'] == [], 'neither signs in'
+    assert brisk._sign_in_again('sbi', _Closed(), tell=lambda text: None) is True, 'with nothing changing, it does'
+
+
+def test_a_saved_passkey_that_cannot_be_read_is_told_not_raised(monkeypatch):
+    from briskapi import passkey
+    monkeypatch.setattr(passkey, 'default_store', lambda: (_ for _ in ()).throw(passkey.PasskeyError('no secure place')))
+    told = []
+    assert brisk._sign_in_again('sbi', _Closed(), tell=told.append) is False
+    assert 'no secure place' in told[0]
+
+
+def test_a_host_that_says_its_session_expired_has_the_feed_sign_in_again_and_a_failure_does_not_stop_it(tmp_path, monkeypatch, capsys):
+    script = tmp_path / 'expired.cjs'
+    script.write_text('console.log(JSON.stringify({type: "expired"}));\n'
+                      f'for (const b of {json.dumps(sbi_session())}) console.log(JSON.stringify(b));\n')
+    monkeypatch.setattr(brisk, 'DECODER', script)
+    asked = []
+    monkeypatch.setattr(brisk, '_sign_in_again', lambda site, closed, node='node': asked.append((site, closed)) or 1 / 0)
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    feed = briskapi.connect(site='sbi', codes=['7203'], upload=False).wait()
+    assert feed.status == 'completed' and briskapi.Ticker('7203').quote()['last_price'] == 10160.0, 'the day was recorded all the same'
+    deadline = time.time() + 5
+    while not asked and time.time() < deadline:
+        time.sleep(0.01)
+    assert [site for site, _ in asked] == ['sbi'] and isinstance(asked[0][1], threading.Event)
+    err, deadline = '', time.time() + 5
+    while 'signing in again failed: division by zero' not in err and time.time() < deadline:
+        time.sleep(0.01)
+        err += capsys.readouterr().err
+    assert 'signing in again failed: division by zero' in err, 'a failure is told, not raised in the feed'
+
+
+def test_the_host_is_told_where_a_new_login_saves_its_cookies(tmp_path, monkeypatch):
+    # A feed that waits overnight meets the 05:00 expiry: it reads the cookies `brisk login` saved after it.
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
+    monkeypatch.setenv('BRISK_UPLOAD', '0')
+    script = tmp_path / 'fake.cjs'
+    script.write_text(f'for (const b of {json.dumps(sbi_session())}) console.log(JSON.stringify(b));\n')
+    monkeypatch.setattr(brisk, 'DECODER', script)
+    from briskapi import _live
+    told, real = [], _live.Feed
+    def spy(**kwargs):
+        told.append(kwargs['env']['BRISK_COOKIES_FILE'])
+        return real(**kwargs)
+    monkeypatch.setattr(_live, 'Feed', spy)
+    briskapi.login(cookies={'s': 'v'}, site='e-shiten')
+    briskapi.connect(site='e-shiten', codes=['7203'], upload=False).wait()
+    assert told == [str(tmp_path / 'config' / 'brisk' / 'e-shiten-cookies.json')]
+
+
+def test_fast_symbols_reaches_the_host_and_is_for_a_broker_with_a_whole_number(tmp_path, monkeypatch, capsys):
+    from briskapi import _live
+    script = tmp_path / 'fake.cjs'
+    script.write_text(f'for (const b of {json.dumps(sbi_session())}) console.log(JSON.stringify(b));\n')
+    monkeypatch.setattr(brisk, 'DECODER', script)
+    told, real = [], _live.Feed
+
+    def spy(**kwargs):
+        told.append(kwargs['env'].get('BRISK_FAST_SYMBOLS'))
+        return real(**kwargs)
+    monkeypatch.setattr(_live, 'Feed', spy)
+    briskapi.login(cookies={'session_bfaf77a2': 'v'})
+    briskapi.connect(site='sbi', codes=['7203'], upload=False, fast_symbols=1500).wait()
+    briskapi.connect(site='sbi', codes=['7203'], upload=False).wait()
+    assert told == ['1500', None]
+    for wrong in (0, -3, 1.5, '1500'):
+        with pytest.raises(ValueError, match='fast_symbols is the number of symbols'):
+            briskapi.connect(site='sbi', upload=False, fast_symbols=wrong)
+    with pytest.raises(ValueError, match='fast_symbols: only for a broker site'):
+        briskapi.connect(site='demo', fast_symbols=500)
+    with pytest.raises(SystemExit, match="--fast-symbols applies to a broker's site"):
+        cli.main(['live', '--site', 'demo', '--fast-symbols', '500'])
 
 
 def test_e_shiten_uploads_like_sbi_and_honors_opt_out(eshiten_host, monkeypatch, capfd):

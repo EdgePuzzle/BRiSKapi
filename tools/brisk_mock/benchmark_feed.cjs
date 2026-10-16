@@ -63,6 +63,7 @@ let peakRss = 0;
 const sample = setInterval(() => { peakRss = Math.max(peakRss, process.memoryUsage().rss); }, 50);
 live({ cookies: { fake: 'v' }, protocolVersion: 16000, fetchImpl, WebSocketImpl: Socket,
   staleSeconds: 0, heartbeatMs: 1e9, lanes: readLanes(process.stdin),
+  fastSymbols: process.env.BRISK_FAST_SYMBOLS ? Number(process.env.BRISK_FAST_SYMBOLS) : null,
   emit: async (record, line = JSON.stringify(record)) => { if (!process.stdout.write(line + '\n')) await once(process.stdout, 'drain'); } })
   .then(summary => {
     clearInterval(sample);

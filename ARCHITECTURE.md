@@ -196,6 +196,10 @@ at the day's end; a completed part reaching `MAX_PIECE_ROWS` (80 million) starts
 morning held 63 million updates and afternoon 41 million, so both fit their own session recording, with room
 below the archive's 100-million-depth-row limit for the last complete part and a cut's opening book. After each part is written
 the spool tells the feed's worker, which decides from the parts' small columns (`_parquet.part_index`).
+A piece the stream sent no update to (no `quotes` batch: only the book of a bootstrap and the day's history, as after a
+reconnection in the lunch break) is not made: `Spool.ship` marks its parts shipped, lists it in `Spool.skipped`, goes on
+to the next, and `brisk live` says `no update came until 12:00:03; nothing to save` (`Saving.empty`). What it held, the
+recording before it has; a feed stopped with only such a segment repairs and uploads nothing.
 Each piece is a recording of its own: the afternoon's (`brisk-parquet package` with a cut) starts with a
 bootstrap like the day's, at the clock of the batch before it, holding each issue's last quote so far
 (an issue with none is skipped), then its batches numbered on from it and the day's end with its own
@@ -294,7 +298,11 @@ to the broker; a session needs the gateway's key and nothing else.
   count of lines published, and queues the batch for every session, all under one lock. A
   subscription widens the session's symbols, takes the bootstrap, the latest quotes and a
   replay of the spool's first that-many lines under that lock (`Spool.replay`: the closed parts,
-  read back and re-encoded, then the lines not yet written, as the decoder wrote them), and
+  read back and re-encoded, then the lines not yet written, as the decoder wrote them; for a session that
+  named symbols the parts are read for those issues alone, a part's row groups of other issues skipped by their
+  statistics, and a batch without any left out, so a replay costs the symbols' rows and not the market's: ten
+  liquid symbols of a 20,000-batch day took 74 s when the whole market was re-encoded and sent, and 4 s after),
+  and
   queues its answer (written out, with the replay, on the session's thread). So its answer
   comes after every batch the session got without its symbols and before every batch with
   them, and a replay meets the live batches exactly; batches that arrive meanwhile wait behind
@@ -303,7 +311,8 @@ to the broker; a session needs the gateway's key and nothing else.
 - **The fast lane.** A broker feed's recording reads every quote of the whole market, frame by
   frame, and at the opening auction it can fall behind the stream. The host (with
   `BRISK_LANES=1`, which the feed sets when it serves a gateway) also runs a pool of its own
-  for the fast lane, a quarter of its quote workers (at least one). Its decoders are fed every
+  for the fast lane, a quarter of its quote workers (at least one), or as many as read the symbols the feed was told to expect
+  (`--fast-symbols N`, `BRISK_FAST_SYMBOLS`: `ceil(N / 500)` of them, the recording's taking the rest). Its decoders are fed every
   frame, read the quotes of the symbols Live sessions are on the lane for, as each frame
   arrives, and write them at once as out-of-band lines (`"lane": "fast"`) of the frame's
   batch number, ahead of the recording's batch. Lines come in one stream, so the feed reads
@@ -326,7 +335,36 @@ to the broker; a session needs the gateway's key and nothing else.
   frame and the trade's place in it) and bars are as the cloud's. Tested from the host
   (each fast line is the recording batch's quotes and trades of those symbols, a join the
   recording's state) through the gateway (records equal to the recording's, across a join and
-  a move back) to a live host behind the feed.
+  a move back) to a live host behind the feed. A session that wants more symbols than the lane reads is warned, once, with how
+  many it would take (`--fast-symbols`).
+- **Latest quotes (`Live.latest`).** A program that decides at a moment, as the Tokyo long/short system's cuts at 08:59:50, 08:59:55
+  and 08:59:58 before the open do, with 750 to 1,500 names, wants each name's freshest quote then. Following every update with a
+  Python record each (some 11 microseconds, at an opening burst far more than one thread makes) falls behind exactly when the
+  decision is due, and its age is the backlog's. So the gateway keeps, besides the recording's latest quote of each issue, the
+  fast lane's (`_fast_quotes`) and when the feed received each (`_fast_received`, `_received`: the batch's `received_unix_ms`).
+  A `{"latest": {"id", "symbols", "schema"}}` request is answered under the lock only by collecting those quotes (the fast
+  lane's for a symbol it reads, else the recording's); the session's own thread then makes the table (`latest_table`: the quotes
+  as the depths table, projected as `schema` records, `ts_recv` each quote's receipt) and writes it as one Arrow IPC stream
+  after a control line giving its length. The client reads it back with no per-record work. 1,500 quotes took 36 ms as JSON in and
+  out and take about 18 ms this way (the depths table's 7 ms and the projection's 2 are the rest; the IPC is under 2),
+  and the answer's newest quote was 24 ms old at the demo's opening pace and 33 ms at the 95th percentile. A session that
+  subscribes with `stream=False` is `silent` at the gateway: its symbols join the lane's union (`_fast_union`), its quotes
+  are never sent (`_Client.send`, `send_fast`), and it asks `latest` when it needs them. `Gateway.table_day` builds the
+  day's equity table once, at the first request. What a quote's age is made of, split on the demo (1,500 symbols, 8 workers, 3 of them the lane's): the host's part, a frame's
+  receipt to its lane line written (its fast workers each decode the whole frame): 1 ms at the 50th percentile and 80 ms at the 95th at
+  4x the demo's pace (the demo's opening frames are far larger than the rest), 190 ms at the 50th at 16x, which is the decoder's
+  rate; and the feed's part, the line written to its reaching `Gateway.lane`: 1 ms and 7 ms at 4x. The lane's lines were
+  read by the feed thread in turn with the recording's batches, and the recording's are written after the lane's of their
+  frame, so the feed thread was rarely behind them; but it waits for anything slow in its own process (a `feed.on_quote`
+  callback, by design: a consumer applies backpressure), and a 2 ms callback on 20 symbols at the demo's pace made the feed's
+  part 25 ms at the 95th percentile and the newest quote 42 to 53 ms old. So the lane's lines go to the gateway on a thread of
+  their own (`Feed._lane_loop`, with the GIL off): 2 ms and 28 ms. Both threads count the host's lines, and three kinds keep
+  their place against the feed thread's: a lanes line comes after every line before it has been published, a bootstrap after
+  the feed thread published it (the lane's quotes build on its state), and the feed thread waits at a bootstrap and an end
+  for the lane's lines before them (taking each wait out, one at a time, fails `test_the_lanes_line_bootstrap_and_end_keep_their_place_...`). The host's part is
+  the floor of what can be done here: the WASM decoder's speed.
+- **A session's lines.** A session that named symbols skips, unread, the recording's lines that mention none of them. A line's
+  codes are found in one pass and looked up in a set (`_CODE`): scanning for each of 1,500 codes in turn took 34 ms of a 60 KB line.
 - **Slow sessions.** Each session has its own sending thread and queue. The feed never waits
   for one: a session more than `MAX_BEHIND` (1 GiB) behind has its queue dropped, is sent an
   error and is disconnected (after 10 seconds if it still reads nothing), so a stalled program
@@ -341,7 +379,8 @@ to the broker; a session needs the gateway's key and nothing else.
   batch holds a quote or two, so a live batch of `mbp-10`, `trades` and `imbalance` subscriptions alone is
   projected record by record (`Live._rows`, 0.06 ms): the same records, which `tests/test_gateway.py`
   compares with the Arrow projection on random batches (Arrow converts five tenths of a yen, 0.1 to
-  0.4 and 1.8, one digit below the true quotient, and so does `_yen`). Replays, snapshots, bars,
+  0.4 and 1.8, one digit below the true quotient, and so does `_yen`). A replay's batches too (a batch of
+  a replay still holds a liquid symbol's quote, at some 2 ms for the Arrow table); snapshots, bars,
   `brisk-quotes` and mixed sessions use the Arrow path. pyarrow imports pandas, if it is installed, at its
   first conversion of Python objects (0.6 s, once a process), which the first batch of a session would have waited
   for: `_parquet.warm()` makes that conversion first, at `Live.start` and where the feed begins. `ts_recv` is the batch's `received_unix_ms` for
@@ -412,7 +451,8 @@ served only to logged-in sessions and changes with the broker's releases, so it 
 pinned), checks that it exports every function the host calls, and decodes
 WebSocket frames with protocol version 18000. Cookies reach it through the
 environment (the site's own variable, such as `BRISK_SBI_COOKIES` or `BRISK_ESHITEN_COOKIES`;
-`BRISK_SITE` names the site), never the command line. One table names the brokers in each place,
+`BRISK_SITE` names the site), never the command line; `BRISK_COOKIES_FILE` names the file `brisk login` saves
+them in, which the host reads again when the site no longer accepts the cookies it was given (see the wait below). One table names the brokers in each place,
 `SITES` in `brisk.py` and in `brisk.cjs`, with their sources and transports in `schema.py`
 (`tests/test_brisk.py` checks they agree): address, label, cookie variable, `source` and
 transport `kind`.
@@ -787,7 +827,10 @@ Any other close, and any failure of the stream once it has started (stale data, 
 heartbeats, a dropped WebSocket), ends the segment the same way under `record()`: `live()`
 emits the segment's `end` and throws `Interrupted`, and `record()` connects again after
 `RETRY_MS` (5 s, 10 s, 30 s, 1 min, then every 2 min; the waits grow while connecting keeps
-failing). The new session boots afresh and starts from a new snapshot, numbered from 0, so the
+failing). The log line of a stream that closed says how the link looked (`stream closed (1006) after 31m07s (last frame
+0.2 s earlier, event loop lag up to 45 ms, Node 2.3 GB)`): a link the other end or the network drops had frames until a
+moment before and a host on time, and a host too busy to answer looks otherwise; none of the host's own checks (heartbeat,
+stale data) ends a link as 1006. The new session boots afresh and starts from a new snapshot, numbered from 0, so the
 segment before the drop is a recording of its own and the Python feed packages and uploads it
 like a day; only the gap is missing, and the cloud API merges the day's recordings. What another
 connection cannot mend stops it with the error (`fatal`: an expired session, another WebSocket
@@ -808,9 +851,17 @@ the spool, a recording or the gateway), shows it as `feed.waiting`, and until th
 bootstrap has the status `waiting`, during which `ready()` and `connect()` wait past their
 timeout. A stop while waiting (Ctrl-C, `feed.close()`) just exits: there is no day to end. Its batches are numbered from 0,
 so each day is its own `bootstrap ... end`, and the Python feed keeps it as its own
-recording. The wait is plain HTTP, so a session that expires meanwhile, or any other
-failed request, ends the recording with that error instead of waiting on; how long a
-broker's session cookie lasts is not known. The wait, the roll and reconnecting are tested
+recording. The wait is plain HTTP. A request that fails is asked again at the next check. A session that expires
+meanwhile does not end the wait: the brokers end their sessions at 05:00 each morning, which a feed waiting
+overnight meets. The host says so once (`the session has expired; waiting for new cookies`) and to Python as an
+out-of-band `{"type": "expired"}` line, whereupon the feed signs in again on a thread of its own (`Feed._expired`,
+`brisk._sign_in_again`: `brisk login`'s `passkey.login(remember=True)` with the saved passkey, only if it is this site's, at
+once and then after 10, 30 and 60 minutes, stopping when the feed closes or somebody else has saved cookies; with no passkey
+or after the last try it says what to do instead). The host asks every minute
+(`STREAM_CHECK_MS`) with the cookies in `BRISK_COOKIES_FILE` when they differ from those it has, and carries
+a new login's to the days after (`record()`'s `cookies`). The same file is read when the first boot of a day is
+refused, so a feed whose cookies expired before a reconnection can take up a login made since; with none, the
+expiry is as fatal as before. The wait, the roll and reconnecting are tested
 offline against fake servers (a server that closes after the first day, a site that serves
 the next date at a later check, boots with no session running before a day and after one, a
 connection that drops mid-session, boots that fail and a session that expires before

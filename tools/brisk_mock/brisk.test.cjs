@@ -5,7 +5,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { Session, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, fetchCatchUp, Interrupted, fatal,
+const { Session, site, cookiesIn, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, fetchCatchUp, Interrupted, fatal,
   RETRY_MS, readLanes } = require('../../briskapi/decoder/brisk.cjs');
 const { frames, Decoder } = require('../../briskapi/decoder/decoder.cjs');
 const { QuotePool, workerCount, merge } = require('../../briskapi/decoder/workers.cjs');
@@ -203,6 +203,63 @@ test('started with no session running (after the close), the host says so once a
     + 'waiting for the next trading day']);
 });
 
+test('a session the site ends while the host waits for the next day is waited out, and a new login\'s cookies take its place',
+  async () => {
+  let ended = false, saved = null;
+  const { fetchImpl, requests } = server({}, {
+    '/api/frontend/boot': init => ended && init.headers.cookie === 's=old' ? new Response('', { status: 401 })
+      : JSON.stringify({ api_token: 'token', identity: IDENTITY }),
+    '/api/app/boot': () => JSON.stringify({ date: '2021-09-24', series: 0, session_status: 'done', time: 1000, next_date: 90000 }),
+  });
+  const batches = [], logged = [], waits = [], tried = [];
+  const steps = [() => { ended = true; }, () => {}, () => { saved = { s: 'new' }; }];
+  await assert.rejects(live({ cookies: { s: 'old' }, fetchImpl, emit: async b => batches.push(b), log: line => logged.push(line),
+    streamCheckMs: 60e3, dayCheckMs: 600e3, reloadCookies: () => saved, onCookies: fresh => tried.push(fresh),
+    sleep: async ms => {
+      waits.push(ms);
+      const step = steps.shift();
+      if (!step) throw new Error('stopped waiting');
+      step();
+    } }), /stopped waiting/);
+  // The 05:00 expiry came at the first check: it is said once, and asked about each minute, not waited on for ten.
+  assert.deepEqual(waits, [600e3, 60e3, 60e3, 600e3]);
+  assert.deepEqual(logged, ['[brisk] SBI BRiSK: no session is running (2021-09-24, status done); waiting for the next trading day',
+    '[brisk] SBI BRiSK: the session has expired; waiting for new cookies (sign in again with `brisk login`)']);
+  assert.equal(batches.filter(b => b.type === 'waiting').length, 1, 'Python is told of the wait once');
+  assert.deepEqual(batches.filter(b => b.type === 'expired'), [{ type: 'expired' }], 'and of the expiry once, to sign in again');
+  // The login made meanwhile is used at once (no further wait), and passed on to the days after.
+  assert.deepEqual(tried, [{ s: 'new' }]);
+  assert.deepEqual(requests.slice(-2).map(r => r.headers.cookie), ['s=new', 's=new']);
+});
+
+test('cookies of a new login are taken up at the start too, and without one an expired session still stops the host', async () => {
+  const { fetchImpl } = server({}, {
+    '/api/frontend/boot': init => init.headers.cookie === 's=old' ? new Response('', { status: 403 })
+      : JSON.stringify({ api_token: 'token', identity: IDENTITY }),
+    '/api/app/boot': () => JSON.stringify({ date: '2021-09-24', series: 0, session_status: 'done', time: 1000, next_date: 90000 }),
+  });
+  const options = { cookies: { s: 'old' }, fetchImpl, emit: async () => {}, log: () => {}, sleep: async () => { throw new Error('stopped waiting'); } };
+  await assert.rejects(live(options), /expired or invalid/);
+  await assert.rejects(live({ ...options, reloadCookies: () => ({ s: 'old' }) }), /expired or invalid/, 'the same cookies are no new login');
+  await assert.rejects(live({ ...options, reloadCookies: () => ({ s: 'new' }) }), /stopped waiting/);
+});
+
+test('the cookies `brisk login` saved are read from their file, and nothing else is taken for them', () => {
+  const folder = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'brisk-cookies-'));
+  try {
+    const file = path.join(folder, 'sbi-cookies.json');
+    assert.equal(cookiesIn(file), null, 'no file yet');
+    for (const text of ['', 'not JSON', 'null', '[]', '{}', '"s=v"']) {
+      fs.writeFileSync(file, text);
+      assert.equal(cookiesIn(file), null, JSON.stringify(text));
+    }
+    fs.writeFileSync(file, JSON.stringify({ session_x: 'v1' }));
+    assert.deepEqual(cookiesIn(file), { session_x: 'v1' });
+  } finally {
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+});
+
 test('a day whose session is over is said to have ended, never to be recorded: Python has still to save it', async () => {
   const { fetchImpl } = server({}, { '/api/app/boot': () => JSON.stringify({ date: '2021-09-27', series: 0,
     session_status: 'done', time: 1000, next_date: 1120 }) });
@@ -251,7 +308,18 @@ test('a connection lost mid-session ends that segment cleanly, and a new connect
   assert.equal(batches[ends[0]].quote_updates, batches.slice(0, ends[0]).filter(b => b.type === 'quotes')
     .reduce((n, b) => n + b.quotes.length, 0));
   assert.deepEqual(waits, [RETRY_MS[0]]);
-  assert.match(logged[0], /stream closed \(1006\); reconnecting in 5s/);
+  assert.match(logged[0], /stream closed \(1006\) after 0s \(last frame [\d.]+ s earlier, [^)]*\); reconnecting in 5s/);
+});
+
+test('a connection lost says how the link looked when it closed: its age, its last frame, the host\'s loop and memory',
+  { skip: !cache }, async () => {
+  const { files, chunks } = demo();
+  const { fetchImpl } = server(files);
+  await assert.rejects(live({ cookies: { s: 'v' }, codes: ['7203'], emit: async () => {}, fetchImpl, resumable: true,
+    WebSocketImpl: socketFrom(chunks, 1006), protocolVersion: 16000, sleep: async () => {}, log: () => {} }),
+  error => error instanceof Interrupted
+    && /^SBI BRiSK stream closed \(1006\) after \d+s \(last frame \d+\.\d s earlier, event loop lag up to \d+ ms, Node \d+\.\d GB\)$/
+      .test(error.message));
 });
 
 test('reconnecting stops at what another connection cannot mend, and never before anything was recorded',
@@ -614,6 +682,22 @@ test('the fast lane writes the subscribed symbols of each frame at once, as the 
   await live({ cookies: { s: 'v' }, emit: plain.emit, protocolVersion: 16000, fetchImpl: server(files).fetchImpl, workers: 3,
     WebSocketImpl: socketFrom(chunks.slice(0, 20)) });
   assert.ok(plain.batches.every(b => !b.lane && b.type !== 'lanes'));
+});
+
+test('the fast lane has the workers that read as many symbols as Live sessions will want of it', { skip: !cache }, async () => {
+  const { files } = demo();
+  const chunks = [...frames(files['ws.dat'])].slice(0, 20).map(f => f.data);
+  const capacity = async (workers, fastSymbols) => {
+    const lines = [];
+    const emit = async (record, line) => { lines.push(JSON.parse(line ?? JSON.stringify(record))); };
+    await live({ cookies: { s: 'v' }, emit, protocolVersion: 16000, fetchImpl: server(files).fetchImpl, workers,
+      lanes: { codes: new Set(['7203']), onChange: null }, fastSymbols, WebSocketImpl: socketFrom(chunks) });
+    return lines[0];
+  };
+  assert.equal((await capacity(4, null)).capacity, 500, 'a quarter of the workers, and at least one');
+  assert.equal((await capacity(8, null)).capacity, 1000);
+  assert.equal((await capacity(5, 1100)).capacity, 1500, 'three workers for eleven hundred symbols');
+  assert.equal((await capacity(3, 500)).capacity, 500);
 });
 
 test('the workers\' quotes come back in the host\'s order, and a worker that traced other issues stops the session', () => {

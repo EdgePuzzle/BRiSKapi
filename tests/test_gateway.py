@@ -658,6 +658,287 @@ def test_live_records_made_record_by_record_are_those_the_arrow_projection_makes
         assert [list(r) for r in mine] == [list(r) for r in theirs]   # and in the same order of fields
 
 
+@pytest.mark.parametrize('seed, subscriptions, replaying', [
+    (11, [('mbp-10', None, 0)], [0]),
+    (12, [('trades', {'7203', '6758'}, 0)], [0]),
+    (13, [('imbalance', {'167A'}, 0), ('mbp-10', {'7203'}, 0), ('trades', None, 0)], [0, 1, 2]),
+    (14, [('trades', {'6758'}, 0), ('mbp-10', None, None)], [0]),     # one subscription replays, another is live only
+    (15, [('mbp-10', {'7203'}, 0), ('trades', None, None)], [0]),     # trade IDs come from every trade, whoever wants it
+])
+def test_a_replay_is_made_record_by_record_as_it_is_by_arrow_too(seed, subscriptions, replaying):
+    from briskapi import _gateway
+    batches = _live_batches(seed)
+    sides = []
+    for by_rows in (True, False):
+        live = _gateway.Live()
+        live.dataset, live._by_rows = 'XTKS.BRISK', by_rows
+        live._subscriptions = [_gateway._Subscription(i, name, symbols, start, False) for i, (name, symbols, start) in enumerate(subscriptions)]
+        takers = [live._subscriptions[i] for i in replaying]
+        day = _gateway._Day(batches[0])   # a replay has a day of its own: its trade IDs carry on from its own batches
+        used = []
+        real = live._rows
+        live._rows = lambda *a: used.append(1) or real(*a)
+        sides.append([live._project(b, takers, day, replayed=True) for b in batches[1:]])
+        assert bool(used) == by_rows, 'each way used its own projection'
+    by_rows, by_arrow = sides
+    assert sum(len(r) for r in by_arrow) > 50
+    for mine, theirs in zip(by_rows, by_arrow):
+        assert [(r.schema, dict(r)) for r in mine] == [(r.schema, dict(r)) for r in theirs]
+        assert [[type(v) for v in r.values()] for r in mine] == [[type(v) for v in r.values()] for r in theirs]
+
+
+def test_live_age_tool_splits_a_records_age_into_brisks_delay_and_briskapis_own(monkeypatch, capsys):
+    import datetime as dt
+    import importlib.util
+    import time
+    spec = importlib.util.spec_from_file_location('live_age', Path(__file__).resolve().parents[1] / 'tools' / 'live_age.py')
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+
+    class FakeLive:
+        def subscribe(self, **options):
+            self.options = options
+
+        def add_callback(self, callback):
+            self.callback = callback
+
+        def start(self):
+            now = time.time()
+            for delay, own in ((30, 5), (40, 5), (50, 10), (500, 20)):   # BRiSK's delay and briskapi's own, in milliseconds
+                received = dt.datetime.fromtimestamp(now - own / 1000, dt.timezone.utc)
+                self.callback({'ts_event': received - dt.timedelta(milliseconds=delay), 'ts_recv': received})
+
+        def block_for_close(self, timeout=None):
+            self.timeout = timeout
+    fake = FakeLive()
+    monkeypatch.setattr(tool.briskapi, 'Live', lambda: fake)
+    import ast
+    import sys
+    monkeypatch.setattr(sys, 'argv', ['live_age.py', '--symbols', '7203,6758', '--minutes', '2'])
+    tool.main()
+    assert fake.options == {'dataset': 'XTKS.BRISK', 'schema': 'mbp-10', 'symbols': ['7203', '6758']} and fake.timeout == 120
+    out = capsys.readouterr().out
+    assert '4 records for 7203,6758' in out
+    said = {line.split('  (')[0].strip(): ast.literal_eval(line.split('): ', 1)[1]) for line in out.splitlines()[1:]}
+    assert set(said) == {'now - ts_event', 'ts_recv - ts_event', 'now - ts_recv'}
+    assert 499 <= said['ts_recv - ts_event']['max'] <= 501 and 49 <= said['ts_recv - ts_event']['p50'] <= 51
+    assert 20 <= said['now - ts_recv']['max'] <= 60 and said['now - ts_recv']['p50'] < 40
+    assert said['now - ts_event']['max'] >= said['ts_recv - ts_event']['max']
+
+
+def _lane_session(shift=0, frames=40):
+    """A broker session's lines as a host with a fast lane writes them: its lanes line, its bootstrap, then each frame's lane
+    line (7203's quotes) ahead of the recording's batch, and the end. `shift` moves its clock, to tell sessions apart."""
+    batches = session(0, frames)
+    lines = [{'type': 'lanes', 'fast': True, 'capacity': 500, 'codes': ['7203']}]
+    for b in batches:
+        b = {**b, **({'source_time_us': b['source_time_us'] + shift} if 'source_time_us' in b else {})}
+        if b['type'] == 'quotes':
+            lines.append(_fast(b, {'7203'}))
+        lines.append(b)
+    return lines
+
+
+def test_a_quote_on_the_fast_lane_does_not_wait_for_the_feed_thread_to_get_to_it(decoder, monkeypatch):
+    gate = threading.Event()
+    real = _live.Feed._apply
+
+    def slow(self, batch, new_day=False):
+        if batch['seq'] == 3:
+            gate.wait(30)   # the feed thread is busy with the recording's batch 3
+        return real(self, batch, new_day)
+    monkeypatch.setattr(_live.Feed, '_apply', slow)
+    script, _ = decoder(_lane_session())
+    feed = broker_feed(script)
+    try:
+        wait_for(lambda: feed.gateway._fast_seq >= 30)
+        assert feed.seq == 2 and feed._lane_thread, 'the recording stands at batch 2 while the lane is at 30'
+        assert feed.gateway._fast_quotes[feed.gateway._code_ids['7203']]['frame'] >= 30
+    finally:
+        gate.set()
+    feed.wait(timeout=20)
+    assert feed.status == 'completed' and feed.seq == 41
+
+
+def test_the_lanes_line_bootstrap_and_end_keep_their_place_between_the_lane_thread_and_the_feed_thread(decoder, monkeypatch):
+    import random
+    rng = random.Random(7)
+    events, lock = [], threading.Lock()
+    real_lane, real_publish, real_apply = _gateway.Gateway.lane, _gateway.Gateway.publish, _live.Feed._apply
+
+    def lane(self, batch, line):
+        with lock:
+            events.append(('lane', batch['type'], batch.get('seq'), batch.get('source_time_us', -1)))
+        # and the lane thread sometimes behind the feed thread, at the last frames of a session most of all
+        time.sleep(0.05 if batch.get('type') == 'quotes' and batch['seq'] >= 38 else rng.choice((0, 0, 0.002)))
+        return real_lane(self, batch, line)
+
+    def publish(self, batch, line, spool=None):
+        with lock:
+            events.append(('publish', batch['type'], batch['seq'], batch['source_time_us']))
+        return real_publish(self, batch, line, spool)
+
+    def apply(self, batch, new_day=False):
+        time.sleep(rng.choice((0, 0, 0.001, 0.003)))   # the feed thread is sometimes behind the lane thread, sometimes not
+        return real_apply(self, batch, new_day)
+    monkeypatch.setattr(_gateway.Gateway, 'lane', lane)
+    monkeypatch.setattr(_gateway.Gateway, 'publish', publish)
+    monkeypatch.setattr(_live.Feed, '_apply', apply)
+    shift = 10**11   # the second session's clock, a day later
+    script, _ = decoder(_lane_session(0) + _lane_session(shift))
+    broker_feed(script).wait(timeout=60)
+    lanes = [i for i, e in enumerate(events) if e[:2] == ('lane', 'lanes')]
+    boots = [i for i, e in enumerate(events) if e[:2] == ('publish', 'bootstrap')]
+    ends = [i for i, e in enumerate(events) if e[:2] == ('publish', 'end')]
+    assert len(lanes) == len(boots) == len(ends) == 2
+    fast = [(i, e) for i, e in enumerate(events) if e[0] == 'lane' and e[1] == 'quotes']
+    first = [i for i, e in fast if e[3] < shift // 2]
+    second = [i for i, e in fast if e[3] >= shift // 2]
+    assert len(first) == len(second) == 40
+    # Each session's lanes line before its bootstrap, its bootstrap before its lane quotes, those before its end, and the second
+    # session's lanes line only once the first has ended: as when one thread read the host's lines in turn.
+    assert lanes[0] < boots[0] < min(first) and max(first) < ends[0] < lanes[1] < boots[1] < min(second) and max(second) < ends[1]
+
+
+def test_a_failure_on_the_lane_thread_fails_the_feed_visibly(decoder, monkeypatch):
+    real = _gateway.Gateway.lane
+
+    def lane(self, batch, line):
+        if batch.get('seq') == 7:
+            raise RuntimeError('the lane broke')
+        return real(self, batch, line)
+    monkeypatch.setattr(_gateway.Gateway, 'lane', lane)
+    script, _ = decoder(_lane_session(0, 60))
+    feed = _live.Feed(command=['node', str(script)], upload=False, gateway=True)
+    with pytest.raises(brisk.BriskError):
+        feed.wait(timeout=20)
+    assert feed.status == 'failed' and 'the lane broke' in str(feed.error)
+
+
+def _latest_rows(table):
+    """latest()'s rows as dicts keyed by symbol, without ts_recv (the feed's receipt time, which a record carries too)."""
+    return {row['symbol']: {k: v for k, v in row.items() if k != 'ts_recv'} for row in table.to_pylist()}
+
+
+def test_latest_gives_every_symbols_last_record_in_one_request_from_the_fast_lane_and_sends_no_record():
+    batches = session(0, 60)
+    gateway = _gateway.Gateway('XTKS.BRISK', on_fast=lambda codes: None)
+    gateway.lane({'type': 'lanes', 'fast': True, 'capacity': 500, 'codes': []}, None)
+    gateway.publish(batches[0], _line_of(batches[0]))
+    codes = ['7203', '167A']
+    keeper, kept = brisk.Live(), []
+    keeper.subscribe('XTKS.BRISK', 'mbp-10', symbols=codes, stream=False)
+    keeper.add_callback(kept.append)
+    keeper.start()
+    streamer, got = _records(['mbp-10'], codes)
+    wait_for(lambda: {c.lane for c in gateway._clients} == {'joining'})
+    gateway.lane({'lane': 'fast', 'type': 'join', 'seq': 0, 'quotes': [], 'codes': codes}, None)
+    wait_for(lambda: {c.lane for c in gateway._clients} == {'fast'})
+    for b in batches[1:-1]:
+        fast = _fast(b, set(codes))
+        gateway.lane(fast, None)
+    wait_for(lambda: len(got['mbp-10', '7203']) == 60 and len(got['mbp-10', '167A']) == 60)
+    table = keeper.latest()
+    rows = _latest_rows(table)
+    assert set(rows) == set(codes)
+    for code in codes:   # the last record a stream got, flagged as the snapshot it is
+        assert rows[code] == {**{k: v for k, v in got['mbp-10', code][-1].items() if k != 'ts_recv'}, 'flags': 32}
+    assert table.column('ts_recv').null_count == 0 and not kept, 'no record was sent to the session that asked for none'
+    one = keeper.latest(symbols=['7203'])
+    assert one.num_rows == 1 and one.column('symbol').to_pylist() == ['7203']
+    gateway.close()
+    streamer.block_for_close(timeout=10)
+
+
+def test_latest_reads_the_recordings_quotes_where_the_fast_lane_does_not_read_a_symbol_and_receipt_times_come_with_them():
+    batches = session(0, 30)
+    gateway = _gateway.Gateway('XTKS.BRISK')   # no fast lane: the recording's state answers
+    gateway.publish(batches[0], _line_of(batches[0]))
+    live = brisk.Live()
+    live.subscribe('XTKS.BRISK', 'mbp-10', symbols=['7203', '167A'], stream=False)
+    live.start()
+    wait_for(lambda: gateway._clients and gateway._clients[0].codes)
+    for b in batches[1:-1]:
+        gateway.publish(b, _line_of(b))
+    table = live.latest()
+    got = {row['symbol']: row for row in table.to_pylist()}
+    last = {q['code']: (b, q) for b in batches[1:-1] for q in b.get('quotes', ())}
+    assert set(got) == {'7203', '167A'}
+    for code, row in got.items():
+        batch, quote = last[code]
+        assert row['sequence'] == quote['frame']
+        if batch.get('received_unix_ms'):
+            assert row['ts_recv'].timestamp() * 1000 == batch['received_unix_ms'], 'when the feed received that quote'
+        else:
+            assert row['ts_recv'] == row['ts_event']
+    assert live.latest(symbols='ALL_SYMBOLS').num_rows == len({q['code'] for q in batches[0]['quotes']})
+    gateway.close()
+
+
+def test_latest_answers_the_other_quote_schemas_and_refuses_what_is_not_a_quote():
+    batches = session(0, 30)
+    gateway = _gateway.Gateway('XTKS.BRISK')
+    gateway.publish(batches[0], _line_of(batches[0]))
+    live = brisk.Live()
+    live.subscribe('XTKS.BRISK', 'trades', symbols=['7203'])
+    live.start()
+    wait_for(lambda: gateway._clients and gateway._clients[0].codes)
+    for b in batches[1:-1]:
+        gateway.publish(b, _line_of(b))
+    assert live.latest().schema.names[:3] == live.latest('mbp-10').schema.names[:3], 'a trades session reads quotes as mbp-10'
+    assert 'ind_match_price' in live.latest('imbalance', symbols=['7203']).schema.names
+    assert 'last_price' in live.latest('brisk-quotes', symbols=['7203']).schema.names or live.latest('brisk-quotes').num_rows
+    with pytest.raises(ValueError, match='reads quotes'):
+        live.latest('trades')
+    gateway.close()
+
+
+def test_a_session_either_streams_or_keeps_quotes_for_latest_and_latest_needs_a_running_session():
+    live = brisk.Live()
+    with pytest.raises(brisk.BriskError, match='Start the session'):
+        live.latest()
+    gateway = _gateway.Gateway('XTKS.BRISK')
+    try:
+        with pytest.raises(ValueError, match='stream=False keeps quotes'):
+            live.subscribe('XTKS.BRISK', 'trades', symbols=['7203'], stream=False)
+        with pytest.raises(ValueError, match='stream=False keeps quotes'):
+            live.subscribe('XTKS.BRISK', 'mbp-10', symbols=['7203'], stream=False, start=0)
+        live.subscribe('XTKS.BRISK', 'mbp-10', symbols=['7203'], stream=False)
+        with pytest.raises(ValueError, match='either streams'):
+            live.subscribe('XTKS.BRISK', 'mbp-10', symbols=['6758'])
+        other = brisk.Live()
+        other.subscribe('XTKS.BRISK', 'mbp-10', symbols=['7203'])
+        with pytest.raises(ValueError, match='either streams'):
+            other.subscribe('XTKS.BRISK', 'mbp-10', symbols=['6758'], stream=False)
+    finally:
+        gateway.close()
+
+
+def test_a_session_for_more_symbols_than_the_fast_lane_reads_is_warned_and_told_what_to_do():
+    batches = session(0, 10)
+    with pytest.warns(UserWarning, match=r'3 symbols on the fast lane, which reads 2 at most.*--fast-symbols 3'):
+        # opened before the gateway's threads start: on a free-threaded build they inherit its warning context
+        gateway = _gateway.Gateway('XTKS.BRISK', on_fast=lambda codes: None)
+        gateway.lane({'type': 'lanes', 'fast': True, 'capacity': 2, 'codes': []}, None)
+        gateway.publish(batches[0], _line_of(batches[0]))
+        live = brisk.Live()
+        live.subscribe('XTKS.BRISK', 'mbp-10', symbols=['7203', '6758', '167A'])
+        live.start()
+        wait_for(lambda: gateway._clients and gateway._clients[0].lane == 'slow')
+    gateway.close()
+
+
+def test_a_session_of_a_thousand_symbols_reads_only_the_lines_that_name_one_of_them():
+    codes = [f'{1301 + n}' for n in range(1500)]
+    live = brisk.Live()
+    live._wanted = frozenset(c.encode() for c in codes)
+    mentions = lambda line: any(code in live._wanted for code in _gateway._CODE.findall(line))  # noqa: E731
+    wire = lambda value: json.dumps(value, separators=(',', ':')).encode()   # noqa: E731 - as the host writes a line
+    assert mentions(wire({'type': 'quotes', 'quotes': [{'code': '9999'}, {'code': '1500'}]}))
+    assert not mentions(wire({'type': 'quotes', 'quotes': [{'code': '9999'}, {'code': '8001'}], 'trades': []}))
+    assert mentions(wire({'type': 'history', 'trades': [{'code': '2000'}]}))
+
+
 def test_the_tenths_of_a_yen_arrow_rounds_down_are_those_the_records_say():
     import numpy as np
     import pyarrow.compute as pc

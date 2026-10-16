@@ -157,3 +157,9 @@ def test_saves_are_quiet_unless_brisk_live_runs(monkeypatch):
     assert cli.SAVE_EVERY is None and cli.saving(LABEL)._every is None
     monkeypatch.setattr(cli, 'SAVE_EVERY', 5)
     assert cli.saving(LABEL)._every == 5
+
+
+def test_a_piece_the_stream_sent_no_update_to_is_told_to_have_nothing_to_save():
+    save, clock, out = saving('sbi 2026-03-11 from 11:45:00')
+    save.empty('12:00:03')
+    assert out.getvalue() == '[brisk] sbi 2026-03-11 from 11:45:00: no update came until 12:00:03; nothing to save\n'

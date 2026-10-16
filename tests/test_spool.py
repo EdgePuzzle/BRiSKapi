@@ -325,6 +325,113 @@ def test_a_day_ships_its_morning_once_a_part_closes_after_noon_and_its_afternoon
     assert spool.ship(tmp_path / 'more', final=True) is None
 
 
+def _reconnection(at):
+    """What a feed's reconnection in the lunch break records before its segment ends: the book, the day's history, no update."""
+    bootstrap, history, end = session()[:2] + session()[-1:]
+    for b in (bootstrap, history, end):
+        b['source_time_us'] += at - OPEN_US
+    end['seq'], end['frames'], end['quote_updates'] = 2, 0, 0
+    return [bootstrap, history, end]
+
+
+def test_a_piece_the_stream_sent_no_update_to_is_not_made(tmp_path):
+    at = 11 * 3600 * 10**6 + 2700 * 10**6   # 11:45
+    spool = spooled(tmp_path, _reconnection(at))
+    assert spool.ship(tmp_path / 'piece', final=True) is None
+    assert not (tmp_path / 'piece').exists(), 'nothing was packaged'
+    assert spool.skipped == [(at, at + 4_100_000)], 'from the book to the end'
+    assert spool.shipped == len(spool.parts()), 'its parts are not tried again'
+    assert spool.ship(tmp_path / 'again', final=True) is None and len(spool.skipped) == 1
+
+
+def test_a_skipped_piece_does_not_stop_the_pieces_after_it_nor_cost_them_what_the_day_held(tmp_path, monkeypatch):
+    monkeypatch.setattr(_spool, 'MAX_PIECE_ROWS', 1)   # the bootstrap's part alone is a piece, and the stream sent it nothing
+    batches = session()
+    spool = spooled(tmp_path, batches)
+    pieces = _pieces(spool, tmp_path)
+    # The bootstrap's part and, last, the end's alone (the segment's end goes with the rest only if some is left).
+    assert [first for first, _ in spool.skipped] == [OPEN_US, OPEN_US + 41 * 100_000] and len(pieces) > 1
+    quotes, trades = {}, []
+    for directory, manifest, _ in pieces:
+        assert _parquet.inspect_package(directory, manifest) == manifest['summary']   # the archive's own checks
+        q, t = _content(directory)
+        quotes.update(q)
+        trades += t
+    (tmp_path / 'events.jsonl').write_bytes(b''.join(lines(batches)))
+    cli.package(tmp_path / 'events.jsonl', tmp_path / 'whole')
+    day_quotes, day_trades = _content(tmp_path / 'whole')
+    assert quotes == day_quotes and sorted(trades) == sorted(day_trades), 'what the stream sent is all there'
+
+
+def _only(batch, codes):
+    """A replayed batch with only these symbols' quotes and trades, or None when a quotes or history batch is left with none."""
+    out = dict(batch)
+    for name in ('quotes', 'trades'):
+        if name in out:
+            out[name] = [item for item in out[name] if item['code'] in codes]
+    if out['type'] in ('quotes', 'history') and not out.get('quotes') and not out.get('trades'):
+        return None
+    return out
+
+
+@pytest.mark.parametrize('count', [1, 5, 17, 30, 10**6])
+@pytest.mark.parametrize('codes', [{'7203'}, {'6758'}, {'7203', '6758'}, {'0000'}])
+def test_a_replay_of_some_symbols_is_the_replay_of_all_of_them_without_the_others(tmp_path, codes, count):
+    batches = session()
+    spool = spooled(tmp_path, batches[:-6])   # a day under way: closed parts, and lines not yet written
+    spool._writer.submit(lambda: None).result()
+    _spool.PART_BYTES = 10**9
+    for b, line in zip(batches[-6:-1], lines(batches[-6:-1])):
+        spool.add(b, line)
+    assert spool.parts() and spool._lines
+    whole = [json.loads(line) for line in spool.replay(count)]
+    some = [json.loads(line) for line in spool.replay(count, codes)]
+    assert all(b['seq'] < count for b in some)
+    kept = [b for b in (_only(b, codes) for b in whole) if b is not None]
+    assert [b for b in (_only(b, codes) for b in some) if b is not None] == kept, 'what these symbols have is all there, in order'
+    closed = spool._parts[-1][2] if spool._parts else 0
+    for b in some:   # what was read from closed parts has no other symbol's rows, and no batch without any
+        if b['seq'] < closed and b['type'] in ('quotes', 'history'):
+            assert {i['code'] for name in ('quotes', 'trades') for i in b.get(name, ())} <= codes
+            assert b.get('quotes') or b.get('trades')
+    if count >= closed and codes == {'0000'}:
+        assert len([b for b in some if b['seq'] < closed]) <= 1, 'only the bootstrap of a day nobody asked about'
+
+
+def test_a_replay_of_a_few_symbols_reads_the_rows_of_those_alone(tmp_path, monkeypatch):
+    batches = session()
+    spool = spooled(tmp_path, batches[:-1])
+    spool._writer.submit(lambda: None).result()
+    seen = []
+    real = pq.read_table
+
+    def spy(path, *args, **kwargs):
+        seen.append((str(path).split('/parts/', 1)[-1].split('/', 1)[-1], kwargs.get('filters')))
+        return real(path, *args, **kwargs)
+    monkeypatch.setattr(_parquet.pq, 'read_table', spy)
+    list(spool.replay(10**6, {'7203'}))
+    ids = {m['issue_id'] for m in spool.master if m['code'] == '7203'}
+    rows = [f for name, f in seen if name in (_parquet.DEPTHS, _parquet.TRADES)]
+    assert rows and all(f == [('issue_id', 'in', sorted(ids))] for f in rows), 'a part\'s other issues are not read'
+
+
+def test_a_recordings_bootstrap_is_read_without_decoding_its_batches(tmp_path, monkeypatch):
+    # A day has millions of batches: decoding them all into dicts to look at the first took seconds and gigabytes of the feed's.
+    (tmp_path / 'events.jsonl').write_bytes(b''.join(lines(session())))
+    cli.package(tmp_path / 'events.jsonl', tmp_path / 'whole')
+    wanted = _parquet.bootstrap_row(tmp_path / 'whole')
+    assert wanted['type'] == 'bootstrap' and wanted['trading_date'] == '20260311' and wanted['input_transport']['kind']
+    decoded, real = [], _parquet._decode_batches
+    monkeypatch.setattr(_parquet, '_decode_batches', lambda table, midnight=None: decoded.append(table.num_rows) or real(table, midnight))
+    assert _parquet.bootstrap_row(tmp_path / 'whole') == wanted
+    assert decoded == [1], 'one row'
+    empty = tmp_path / 'empty'
+    (empty / _parquet.BATCHES).parent.mkdir(parents=True)
+    pq.write_table(_parquet.BATCH_SCHEMA.empty_table(), empty / _parquet.BATCHES)
+    with pytest.raises(Exception, match='no bootstrap'):
+        _parquet.bootstrap_row(empty)
+
+
 def test_a_crashed_spool_ships_what_is_left_from_where_it_was(tmp_path, monkeypatch):
     monkeypatch.setattr(_spool, 'MAX_PIECE_ROWS', 8)
     batches = session()[:30]   # cut short: no end

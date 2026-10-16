@@ -504,9 +504,10 @@ class Columns:
         order, t_order = np.argsort(self.q['seq'], kind='stable'), np.argsort(self.t['seq'], kind='stable')
         return order, t_order, self.q['seq'][order], self.t['seq'][t_order]
 
-    def iter_batches(self, start=0, stop=None, by_batch=None):
+    def iter_batches(self, start=0, stop=None, by_batch=None, rows_only=False):
         """The decoder's batches in order (those from `start` to `stop`): quotes sorted by issue, and trades by
-        issue then in the decoder's order, as in the canonical stream."""
+        issue then in the decoder's order, as in the canonical stream. With `rows_only`, a quotes or history batch
+        with no row here (Columns of some issues only) is left out."""
         order, t_order, seqs, t_seqs = by_batch or self._by_batch()
         batches = self.batches[start:stop]
         at = t_at = 0
@@ -516,6 +517,8 @@ class Columns:
             end, t_end = int(np.searchsorted(seqs, b['seq'], 'right')), int(np.searchsorted(t_seqs, b['seq'], 'right'))
             require(int(np.searchsorted(seqs, b['seq'], 'left')) == at
                     and int(np.searchsorted(t_seqs, b['seq'], 'left')) == t_at, 'Quotes or trades outside their batches')
+            if rows_only and b['type'] in ('quotes', 'history') and end == at and t_end == t_at:
+                continue
             batch = dict(b)
             if b['type'] == 'bootstrap':
                 batch['master'] = self.master
@@ -763,12 +766,14 @@ def stream_tables(batches, carry=None, depths=True, trades=True):
             columns._trades(midnight, slice(None)) if trades else None)
 
 
-def _part_columns(part, midnight, master):
-    """A spool part's rows as Columns, in the part's order."""
+def _part_columns(part, midnight, master, issues=None):
+    """A spool part's rows (those of `issues` only, if given: a part's depth and trade rows are in row groups of a few
+    issues, with their range in the statistics) as Columns, in the part's order."""
+    filters = None if issues is None else [('issue_id', 'in', sorted(issues))]
     batches = _decode_batches(pq.read_table(part / BATCHES), midnight)
-    q = _decode_depths(pq.read_table(part / DEPTHS), midnight)
+    q = _decode_depths(pq.read_table(part / DEPTHS, filters=filters), midnight)
     books = {side: (np.concatenate([[0], np.cumsum(q.pop(f'{side}.counts'))]), q.pop(f'{side}.levels')) for side in BOOKS}
-    t, t_code = _decode_trades(pq.read_table(part / TRADES), midnight)
+    t, t_code = _decode_trades(pq.read_table(part / TRADES, filters=filters), midnight)
     return Columns({k: q[k] for k in INTS}, q['code'], books, master, batches, t, t_code)
 
 
@@ -882,25 +887,35 @@ def state(directory, limit=None) -> dict[int, dict]:
 
 
 def bootstrap_row(part):
-    """The batch row of the bootstrap that starts a spool's first part."""
-    first = _decode_batches(pq.read_table(Path(part) / BATCHES))[0]
-    require(first['type'] == 'bootstrap', 'Recording has no bootstrap')
-    return first
+    """The batch row of the bootstrap that starts a spool's first part, or a recording. Only that first row is read:
+    a day's batches are millions, and decoding them all into dicts to look at one took seconds and gigabytes."""
+    with pq.ParquetFile(Path(part) / BATCHES) as file:
+        first = next(file.iter_batches(batch_size=1), None)
+    require(first is not None, 'Recording has no bootstrap')
+    row = _decode_batches(pa.Table.from_batches([first]))[0]
+    require(row['type'] == 'bootstrap', 'Recording has no bootstrap')
+    return row
 
 
 def part_index(part, midnight):
     """What choosing where to cut a spool needs of a part, from its batch table and metadata: its quote rows,
-    whether it holds the end, and its first and last batch's clock."""
+    whether it holds the end, how many of its batches the stream sent (quote updates: the bootstrap's and the catch-up's
+    history are of the book and the day so far), and its first and last batch's clock."""
     part = Path(part)
     batches = pq.read_table(part / BATCHES, columns=['kind', 'ts_event'])
     clocks = (_numbers(batches.column('ts_event')) - midnight) // 1000
-    return {'rows': pq.read_metadata(part / DEPTHS).num_rows, 'end': batches.column('kind')[-1].as_py() == 'end',
+    kinds = batches.column('kind')
+    return {'rows': pq.read_metadata(part / DEPTHS).num_rows, 'end': kinds[-1].as_py() == 'end',
+            'updates': int(np.count_nonzero(kinds.to_numpy(zero_copy_only=False) == 'quotes')),
             'first': int(clocks[0]), 'last': int(clocks[-1])}
 
 
-def part_batches(part, header, master):
-    """A spool part's decoder batches, in order (quotes by issue within a batch, as the canonical stream has them)."""
-    return _part_columns(Path(part), midnight_ns(header['trading_date']), master).iter_batches()
+def part_batches(part, header, master, issues=None):
+    """A spool part's decoder batches, in order (quotes by issue within a batch, as the canonical stream has them). With
+    `issues` (a set of issue ids), only their quotes and trades, and only the batches that have any (and the bootstrap and
+    the end): the part's row groups of other issues are not read."""
+    columns = _part_columns(Path(part), midnight_ns(header['trading_date']), master, issues)
+    return columns.iter_batches(rows_only=issues is not None)
 
 
 def equity_table(bootstrap):

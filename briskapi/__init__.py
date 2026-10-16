@@ -27,7 +27,7 @@ from briskapi._live import Feed, connect as _connect, record as _record, stream
 from briskapi._market import Market, Ticker
 from briskapi._recording import JST, BriskError, NotFoundError, Recording, Table
 
-__version__ = '1.6.2'
+__version__ = '1.6.3'
 __all__ = ['JST', 'Archive', 'BriskError', 'Feed', 'Historical', 'Live', 'Market', 'NotFoundError', 'Record', 'Recording',
            'Table', 'Ticker', 'connect', 'consent', 'current', 'load', 'login', 'logout', 'pull', 'record', 'recordings',
            'stream']
@@ -49,13 +49,13 @@ def current() -> Recording | Feed:
 
 
 _DEMO_ONLY = {'cache': None, 'speed': 1, 'limit_frames': None}
-_BROKER_ONLY = {'trace_protocol': False, 'profile': None, 'upload_market_data': None}
+_BROKER_ONLY = {'trace_protocol': False, 'profile': None, 'upload_market_data': None, 'fast_symbols': None}
 SITES = ('demo', *_brisk.SITES)   # the demo, then the brokers' BRiSK
 
 
 def connect(*, site=None, codes=None, history=False, upload=None, output=None, on_day=None, gateway=False, timeout=None,
             node='node', cache=None, speed=1, limit_frames=None, trace_protocol=False, profile=None,
-            upload_market_data=None) -> Feed:
+            upload_market_data=None, fast_symbols=None) -> Feed:
     """Start a live feed and make it the default for Ticker and Market, as `brisk live --site SITE` does:
 
     - site="demo": the public BRiSK Next demo. Not a live connection: a recording of 27 September 2021
@@ -63,7 +63,11 @@ def connect(*, site=None, codes=None, history=False, upload=None, output=None, o
       and replayed at its recorded pace (`speed`; `limit_frames` stops early).
     - site="sbi", "e-shiten", "matsui", "monex" or "smbcnikko": your broker's live BRiSK (Matsui's, Monex's
       and SMBC Nikko's are the same app, not yet tried live), signing in as login(site) does
-      unless login already did (`trace_protocol`, `profile`, `upload_market_data`).
+      unless login already did (`trace_protocol`, `profile`, `upload_market_data`, `fast_symbols`).
+
+    With gateway=True a broker feed reads some symbols' quotes for Live sessions ahead of the recording, on a fast lane
+    of its own: by default 500 to 1,000 symbols, by the cores; `fast_symbols=1500` gives it workers for that many (the
+    recording's get the rest of them: set BRISK_WORKERS for more in all).
 
     The feed records each trading day and uploads it to your private archive unless you opt out
     (upload=False), a broker's in two recordings, its morning and afternoon sessions; `output`
@@ -77,7 +81,7 @@ def connect(*, site=None, codes=None, history=False, upload=None, output=None, o
         raise ValueError(f'Choose a site: {", ".join(map(repr, SITES))} (got {site!r})')
     common = dict(codes=codes, history=history, upload=upload, output=output, on_day=on_day, gateway=gateway, node=node)
     given = dict(cache=cache, speed=speed, limit_frames=limit_frames, trace_protocol=trace_protocol, profile=profile,
-                 upload_market_data=upload_market_data)
+                 upload_market_data=upload_market_data, fast_symbols=fast_symbols)
     demo = site == 'demo'
     wrong = [name for name, default in (_BROKER_ONLY if demo else _DEMO_ONLY).items() if given[name] != default]
     if wrong:
@@ -85,7 +89,7 @@ def connect(*, site=None, codes=None, history=False, upload=None, output=None, o
     if demo:
         return load(_connect(cache=cache, speed=speed, limit_frames=limit_frames, timeout=timeout or 60, **common))
     return load(_brisk._connect(site, timeout=timeout or 120, trace_protocol=trace_protocol, profile=profile,
-                                upload_market_data=upload_market_data, **common))
+                                upload_market_data=upload_market_data, fast_symbols=fast_symbols, **common))
 
 
 def login(site='sbi', *, cookies=None, remember=False) -> _brisk.Client:

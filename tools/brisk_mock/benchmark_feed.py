@@ -6,15 +6,36 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from briskapi._live import Feed
 from briskapi import Live
+from briskapi._recording import BriskError
+
+
+lane_lag_ms = []   # how old each fast-lane line was when the feed passed it to the gateway (BENCH_LANE_LAG=1)
+
+
+def _watch_lane():
+    from briskapi import _gateway
+    real = _gateway.Gateway.lane
+
+    def lane(self, batch, line):
+        if batch.get('lane') == 'fast' and batch.get('type') == 'quotes' and batch.get('received_unix_ms'):
+            lane_lag_ms.append(time.time() * 1000 - batch['received_unix_ms'])
+        return real(self, batch, line)
+    _gateway.Gateway.lane = lane
+
+
+if os.environ.get('BENCH_LANE_LAG'):
+    _watch_lane()
 
 
 class MeasuredFeed(Feed):
+    _lane_split = not os.environ.get('BENCH_ONE_THREAD')   # BENCH_ONE_THREAD=1: the feed thread passes the lane's lines too, in turn
     def __init__(self, *args, **kwargs):
         self.lag_ms = []
         self.quotes_applied = 0
@@ -48,13 +69,35 @@ def _finish(consumer):
     return result['lag'], [None] * result['errors']
 
 
-def run(workers, speed, frames, cache, fast_symbols=(), separate=False):
+def _poll(live, stop, took, newest, rows):
+    """Ask Live.latest() every 20 ms: how long the call took, how old its newest quote was when it came back, and how many
+    quotes it held."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    while not stop.is_set():
+        began = time.perf_counter()
+        try:
+            table = live.latest()
+        except BriskError:   # the feed has ended
+            return
+        took.append((time.perf_counter() - began) * 1000)
+        if table.num_rows:
+            age = time.time() * 1000 - pc.max(pc.cast(table.column('ts_recv'), pa.int64())).as_py() / 1e6
+            if age < 3_600_000:   # a quote this feed received (before the first, ts_recv is the demo's clock of 2021)
+                newest.append(age)
+            rows.append(table.num_rows)
+        stop.wait(0.02)
+
+
+def run(workers, speed, frames, cache, fast_symbols=(), separate=False, latest=False, sized=False):
     with tempfile.TemporaryDirectory(prefix='bench-', dir=ROOT / 'cache') as folder:
         folder = Path(folder)
         environment = {**os.environ, 'BRISK_WORKERS': str(workers), 'BENCH_SPEED': str(speed), 'BENCH_FRAMES': str(frames),
                        'BRISK_MOCK_CACHE': str(cache), 'BENCH_STATS': str(folder / 'host.json'),
                        'BRISK_UPLOAD': '0', 'BRISK_IDENTITY_STORE': 'file',
                        'XDG_CONFIG_HOME': str(folder / 'config'), 'XDG_DATA_HOME': str(folder / 'data')}
+        if sized and fast_symbols:   # the fast lane's workers sized for these symbols, as `brisk live --fast-symbols N` does
+            environment['BRISK_FAST_SYMBOLS'] = str(len(fast_symbols))
         for name in ('XDG_CONFIG_HOME', 'XDG_DATA_HOME'):
             os.environ[name] = environment[name]
         startup = time.perf_counter()
@@ -62,8 +105,14 @@ def run(workers, speed, frames, cache, fast_symbols=(), separate=False):
                             upload=False, output=folder / 'recording', gateway=True)
         consumer = None
         fast_lag, fast_errors = [], []
+        polling, polled, newest, held = threading.Event(), [], [], []
         try:
             feed.ready(timeout=90)
+            if os.environ.get('BENCH_SLOW_CALLBACK_MS'):
+                # A program in this process that is slow with its quotes (backpressure on the feed thread, by design) while a Live
+                # session asks for others: the lane must not wait for it.
+                slow = float(os.environ['BENCH_SLOW_CALLBACK_MS']) / 1000
+                feed.on_quote(lambda quote: time.sleep(slow), codes=list(fast_symbols)[:int(os.environ.get('BENCH_SLOW_CALLBACK_SYMBOLS', 20))])
             ready_s = time.perf_counter() - startup
             consumer_ready_s = None
             if fast_symbols and separate:
@@ -81,7 +130,7 @@ def run(workers, speed, frames, cache, fast_symbols=(), separate=False):
             elif fast_symbols:
                 consumer_began = time.perf_counter()
                 consumer = Live()
-                consumer.subscribe('XTKS.BRISK', 'mbp-10', symbols=fast_symbols)
+                consumer.subscribe('XTKS.BRISK', 'mbp-10', symbols=fast_symbols, stream=not latest)
                 def received(record):
                     if record.get('ts_recv') is not None:
                         fast_lag.append(time.time_ns() / 1e6 - record['ts_recv'].timestamp() * 1000)
@@ -96,12 +145,20 @@ def run(workers, speed, frames, cache, fast_symbols=(), separate=False):
                     time.sleep(.01)
                 consumer_ready_s = round(time.perf_counter() - consumer_began, 3)
             began = time.perf_counter()
+            if latest and consumer and not separate:
+                poller = threading.Thread(target=_poll, args=(consumer, polling, polled, newest, held), daemon=True)
+                poller.start()
             with feed._lanes_lock:
                 feed._process.stdin.write(b'{"benchmark_start":true}\n')
                 feed._process.stdin.flush()
             feed.wait(timeout=300)
             finished = time.perf_counter()
-            if consumer and separate:
+            if latest and consumer and not separate:
+                polling.set()
+                poller.join()
+                consumer.stop()
+                assert polled and newest, 'latest() answered'
+            elif consumer and separate:
                 fast_lag, fast_errors = _finish(consumer)
                 assert fast_lag and not fast_errors
             elif consumer:
@@ -120,7 +177,13 @@ def run(workers, speed, frames, cache, fast_symbols=(), separate=False):
                       'recording_finalization_s': round(finished - feed.end_applied, 3),
                       'peak_node_rss_mib': round(host['peak_node_rss_mib']),
                       'gateway': True, 'recording': True, 'upload': False}
-            if fast_symbols:
+            if lane_lag_ms:
+                result['lane_line_age_at_gateway_ms'] = distribution(lane_lag_ms)
+                lane_lag_ms.clear()
+            if fast_symbols and latest:
+                result.update(fast_symbols=len(fast_symbols), latest_calls=len(polled), latest_quotes=max(held),
+                              latest_call_ms=distribution(polled), latest_newest_quote_age_ms=distribution(newest))
+            elif fast_symbols:
                 result.update(fast_symbols=fast_symbols, fast_records=len(fast_lag),
                               consumer_ready_s=consumer_ready_s,
                               receive_to_live_callback_ms=distribution(fast_lag))
@@ -130,7 +193,7 @@ def run(workers, speed, frames, cache, fast_symbols=(), separate=False):
             feed.close()
             if consumer and separate:
                 consumer.kill()
-            elif consumer:
+            elif consumer and not latest:
                 consumer.stop()
 
 
@@ -143,6 +206,9 @@ def main():
     parser.add_argument('--frames', type=int, default=600)
     parser.add_argument('--fast-symbols', nargs='+', default=[])
     parser.add_argument('--consumer-process', action='store_true', help='Run the Live consumer in a process of its own')
+    parser.add_argument('--latest', action='store_true',
+                        help='Keep the symbols fresh with subscribe(stream=False) and ask Live.latest() every 20 ms instead of streaming')
+    parser.add_argument('--size-fast-lane', action='store_true', help='Give the fast lane workers for the symbols (BRISK_FAST_SYMBOLS)')
     parser.add_argument('--output', type=Path, default=ROOT / 'cache/benchmark-feed.json')
     args = parser.parse_args()
     if args.frames < 4 or any(w < 0 for w in args.workers):
@@ -157,7 +223,8 @@ def main():
     rows = []
     for workers in args.workers:
         for speed in args.speeds or [args.speed]:
-            rows.append(run(workers, speed, args.frames, args.cache.resolve(), args.fast_symbols, args.consumer_process))
+            rows.append(run(workers, speed, args.frames, args.cache.resolve(), args.fast_symbols, args.consumer_process,
+                            args.latest, args.size_fast_lane))
             args.output.write_text(json.dumps(rows, indent=2), encoding='utf-8')
 
 

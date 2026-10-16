@@ -294,13 +294,61 @@ def _default() -> Client:
     return _client
 
 
+# Seconds to wait before each try to sign in again, the first at once, then further apart (a broker's login can be down
+# at 05:00, and signing in over and over is no way to treat an account).
+RELOGIN_WAITS = (0, 600, 1800, 3600)
+
+
+def _saved_cookies(site) -> str | None:
+    try:
+        return cookies_path(site).read_text()
+    except OSError:
+        return None
+
+
+def _sign_in_again(site, closed, node='node', waits=RELOGIN_WAITS, tell=None) -> bool:
+    """The feed's session expired while it waited for the next trading day (brokers end their sessions at 05:00): sign
+    in as `brisk login` does, with the passkey saved for this broker, and keep the cookies; the host reads them within
+    a minute. A person who needs to know is told on stderr (`tell`): there is no passkey for this site (a saved one is
+    one broker's), or every try failed. Returns whether it signed in. `closed` (a threading.Event) ends the tries, and so
+    do cookies saved meanwhile, by someone else."""
+    from briskapi import passkey
+    name = SITES[site].name
+    tell = tell or (lambda text: print(f'[brisk] {name}: {text}', file=sys.stderr, flush=True))
+    try:
+        record = passkey._load_record(passkey.default_store())
+    except passkey.PasskeyError as error:
+        tell(f'the session has expired and your passkey cannot be used ({error}); sign in again yourself')
+        return False
+    if record is None or record['site'] != site:
+        tell(f'the session has expired and no passkey is saved for {site}' + ('' if record is None else
+             f' (the saved one is for {record["site"]})') + ': sign in again yourself (`brisk login`, or `briskapi.login('
+             f'site={site!r}, cookies=..., remember=True)`) and the feed takes the new cookies up within a minute')
+        return False
+    before = _saved_cookies(site)
+    for number, wait in enumerate(waits, 1):
+        if closed.wait(wait) or _saved_cookies(site) != before:
+            return False   # the feed is closed, or somebody signed in already
+        tell('the session has expired; signing in again with your saved passkey (Chrome opens)')
+        try:
+            passkey.login(remember=True, node=node)
+        except Exception as error:  # noqa: BLE001 - whatever stopped it, the next try or the person goes on
+            later = waits[number] if number < len(waits) else None
+            tell(f'signing in again failed: {error}; ' + (f'trying again in {later // 60} minutes' if later else
+                 'sign in again yourself (`brisk login`) and the feed takes the new cookies up within a minute'))
+            continue
+        tell('signed in again; the feed goes on')
+        return True
+    return False
+
+
 def _check_session(session: Session) -> None:
     """Ask the site whether it still accepts the cookies, so an expired session fails in one line before Node starts."""
     session.get('/api/frontend/boot')
 
 
 def _connect(site, codes=None, history=False, node='node', timeout=120, upload=None, trace_protocol=False, profile=None,
-             upload_market_data=None, output=None, on_day=None, gateway=False):
+             upload_market_data=None, output=None, on_day=None, gateway=False, fast_symbols=None):
     """briskapi.connect(site=...): the live feed of your broker's BRiSK, through the site's own WASM
     decoder under Node, never Chrome. It uses the session briskapi.login made for `site`, or signs in as
     login(site) does.
@@ -348,11 +396,18 @@ def _connect(site, codes=None, history=False, node='node', timeout=120, upload=N
     if trace_protocol:
         command.append('--trace-protocol')
     # Cookies and the profile travel in the environment, never on the command line (visible to other users).
-    env = {**os.environ, SITES[session.site].cookies_env: json.dumps(session.cookies), 'BRISK_SITE': session.site}
+    # The saved cookies' file too, where a feed waiting for the next day finds those of a login made after the site ended its session.
+    env = {**os.environ, SITES[session.site].cookies_env: json.dumps(session.cookies), 'BRISK_SITE': session.site,
+           'BRISK_COOKIES_FILE': str(cookies_path(session.site))}
     if profile:
         env['BRISK_PROFILE'] = json.dumps(profile)
+    if fast_symbols is not None:
+        if type(fast_symbols) is not int or fast_symbols < 1:
+            raise ValueError('fast_symbols is the number of symbols Live sessions will want on the fast lane (a whole number above 0)')
+        env['BRISK_FAST_SYMBOLS'] = str(fast_symbols)
     feed = Feed(command=command, env=env, history=history, upload=upload, timing=session.site,
-                upload_market_data=upload_market_data, output=output, on_day=on_day, gateway=gateway)
+                upload_market_data=upload_market_data, output=output, on_day=on_day, gateway=gateway,
+                relogin=lambda closed: _sign_in_again(session.site, closed, node=node))
     try:
         return feed.ready(timeout)
     except BaseException:

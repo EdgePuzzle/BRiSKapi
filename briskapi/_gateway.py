@@ -41,6 +41,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import secrets
 import socket
 import threading
@@ -111,6 +112,7 @@ class Gateway:
         self._on_fast = on_fast         # tells the host which symbols the fast lane reads; None: no fast lane
         self._lanes = None              # the host's, said before each session's bootstrap: {'fast', 'capacity'}
         self._fast_quotes = {}          # issue_id -> its latest quote on the fast lane
+        self._fast_received = {}        # issue_id -> when the feed received that quote (unix ms), where it said
         self._fast_seq = -1             # the batch the fast lane's quotes are at
         self._fast_codes = set()        # the symbols the host was last told
         self._fast_read = set()         # those it says it reads
@@ -121,6 +123,9 @@ class Gateway:
         self._clients: list[_Client] = []
         self._bootstrap = None   # the trading day's bootstrap batch, without quotes and trades
         self._quotes = {}        # issue_id -> its latest quote
+        self._received = {}      # issue_id -> when the feed received it (unix ms), where it said
+        self._code_ids = {}      # code -> issue_id, from the day's master
+        self._table_day = None   # the day as latest()'s tables need it (its equity table), made at the first request
         self._day = None         # [the feed's spool of the day's batches, how many it has published] while the day runs
         self._closed = None      # the last line, once the feed has ended
         self.path = gateway_path(dataset)
@@ -171,10 +176,15 @@ class Gateway:
                 self._bootstrap = {k: v for k, v in batch.items() if k not in ('quotes', 'trades')}
                 self._quotes, self._day = {}, [spool, 0] if spool else None
                 self._fast_quotes, self._fast_seq = {q['issue_id']: q for q in batch.get('quotes', ())}, batch['seq']
+                self._received, self._fast_received = {}, {}
+                self._code_ids = {m['code']: m['issue_id'] for m in batch.get('master', ())}
+                self._table_day = None
             if self._day:
                 self._day[1] += 1
+            received = batch.get('received_unix_ms')
             for quote in batch.get('quotes', ()):
                 self._quotes[quote['issue_id']] = quote
+                self._received[quote['issue_id']] = received
             if batch['type'] == 'end':
                 self._day = None   # the feed packages and removes the day's spool
             for client in self._clients:
@@ -205,8 +215,10 @@ class Gateway:
                         self._fall_back(client, new_session=True)
                 self._tell_host()
                 return
+            received = batch.get('received_unix_ms')
             for quote in batch.get('quotes', ()):
                 self._fast_quotes[quote['issue_id']] = quote
+                self._fast_received[quote['issue_id']] = received
             self._fast_seq = batch['seq']
             if batch['type'] == 'join':
                 self._fast_read |= set(batch['codes'])
@@ -218,6 +230,33 @@ class Gateway:
                 if client.lane in ('fast', 'joining') and client.fast_codes:
                     client.send_fast(batch)
                     client.fast_seq = batch['seq']
+
+    def _latest(self, codes, id, schema):
+        """The freshest quote the feed holds of each of these symbols (None: all): the fast lane's where it reads the
+        symbol, else the recording's, with when the feed received it, as `schema`'s table. The quotes are taken under the
+        lock; the table is made on the session's thread, as it writes it out."""
+        names = self._code_ids if codes is None else {c: self._code_ids[c] for c in codes if c in self._code_ids}
+        quotes, received = [], []
+        for code, issue in names.items():
+            fast = code in self._fast_read
+            quote = (self._fast_quotes if fast else self._quotes).get(issue)
+            if quote is not None:
+                quotes.append(quote)
+                received.append((self._fast_received if fast else self._received).get(issue))
+        return _Latest(self, id, schema, quotes, received)
+
+    def table_day(self):
+        """The day, for making latest()'s tables (built once a day, at the first request)."""
+        with self._lock:
+            bootstrap, day = self._bootstrap, self._table_day
+        if bootstrap is None:
+            return None
+        if day is None or day[0] is not bootstrap:
+            day = (bootstrap, _Day(bootstrap))
+            with self._lock:
+                if self._bootstrap is bootstrap:
+                    self._table_day = day
+        return day[1]
 
     def _fast_union(self, extra=frozenset()):
         return set().union(*(c.codes for c in self._clients if c.lane in ('pending', 'fast', 'joining')), extra)
@@ -332,6 +371,23 @@ class Gateway:
         try:
             while True:
                 message = _read_line(reader, MAX_REQUEST)
+                if isinstance(message, dict) and 'latest' in message:   # the freshest quotes of these symbols, now
+                    try:
+                        asked = message['latest']
+                        id, codes, schema = asked['id'], records.symbols_of(asked.get('symbols')), asked['schema']
+                        if type(id) is not int:
+                            raise ValueError('the id is a whole number')
+                        if schema not in _QUOTED:
+                            raise ValueError(f'the schema is one of {", ".join(_QUOTED)}')
+                    except (TypeError, ValueError, KeyError, AttributeError) as error:
+                        return client.put(_line({'gateway': 'error', 'error': f'Expected {{"latest": {{"id", "symbols", "schema"}}}} ({error})'}),
+                                          last=True)
+                    with self._lock:
+                        client.put(self._latest(codes, id, schema))
+                    continue
+                if isinstance(message, dict) and message.get('silent'):
+                    client.silent = True   # its symbols are read for latest(), and no record is sent
+                    threading.Thread(target=self.table_day, name='brisk-gateway-day', daemon=True).start()   # not on the first latest()'s time
                 ids = message.get('subscribe') if isinstance(message, dict) else None
                 if not (isinstance(ids, list) and ids and all(type(i) is int for i in ids)):
                     return client.put(_line({'gateway': 'error', 'error': 'Expected {"subscribe": [ids], ...}'}), last=True)
@@ -344,6 +400,13 @@ class Gateway:
                     # session had without these symbols, and before every batch it gets with them.
                     fits = client.lane != 'slow' and not message.get('replay') and \
                         self._fits(None if codes is None else (client.codes or set()) | codes)
+                    if not fits and codes is not None and client.lane != 'slow' and not message.get('replay') \
+                            and self._lanes is not None and self._lanes['fast'] and self._on_fast is not None:
+                        wanted = len(self._fast_union((client.codes or set()) | codes))
+                        warnings.warn(f'A Live session wants {wanted} symbols on the fast lane, which reads {self._lanes["capacity"]} '
+                                      'at most: it is given the whole market\'s recording instead, which falls behind at an opening '
+                                      f'burst. Start the feed with --fast-symbols {wanted} (briskapi.connect(fast_symbols=...)).',
+                                      stacklevel=2)
                     if fits and self._lanes is not None and self._lanes['fast'] and client.lane != 'pending':
                         client.widen(codes)
                         client.lane = 'joining'
@@ -362,7 +425,7 @@ class Gateway:
                     bootstrap = self._bootstrap if client.known is not self._bootstrap else None
                     client.known = self._bootstrap
                     quotes = list(self._quotes.values()) if message.get('snapshot') and self._bootstrap else None
-                    replay = (self._day[0].replay(self._day[1])) if message.get('replay') and self._day else None
+                    replay = (self._day[0].replay(self._day[1], codes)) if message.get('replay') and self._day else None
                     client.put(_Subscribed(ids, codes, bootstrap, quotes, replay, without=client.old_codes))
         except (OSError, ValueError):
             client.end()
@@ -413,6 +476,47 @@ class _Subscribed:
             self.replay.close()
 
 
+class _Latest:
+    """The gateway's answer to a latest() request, made and written out on the session's thread: the control line, then the
+    table as an Arrow IPC stream of that many bytes."""
+
+    def __init__(self, gateway, id, schema, quotes, received):
+        self.gateway, self.id, self.schema, self.quotes, self.received = gateway, id, schema, quotes, received
+
+    def send(self, sock):
+        day = self.gateway.table_day()
+        table = latest_table(self.gateway.dataset, self.schema, self.quotes, self.received, day)
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        data = sink.getvalue()
+        sock.sendall(_line({'gateway': 'latest', 'id': self.id, 'bytes': len(data)}) + data.to_pybytes())
+
+    def close(self):
+        pass
+
+
+def latest_table(dataset, schema, quotes, received, day):
+    """`schema`'s records of these quotes (as a pyarrow Table, the quotes by issue), each row's ts_recv when the feed received
+    its quote (the quote's own time where it did not say)."""
+    publisher = records.DATASETS[dataset][0]
+    if day is None:   # no trading day has begun: nothing to read
+        return records.project(schema, _parquet.SCHEMAS[_parquet.DEPTHS].empty_table(), publisher)
+    order = sorted(range(len(quotes)), key=lambda i: quotes[i]['issue_id'])
+    quotes, received = [quotes[i] for i in order], [received[i] for i in order]
+    depths, _ = _parquet.stream_tables([dict(day.header, quotes=quotes, master=[])], None, True, False)
+    table = records.project(schema, depths, publisher, None, day.equity)
+    if dataset == 'XTKS.BRISK' and table.num_rows:
+        # Rows are the quotes' (an imbalance quote may give two, an auction type each, or none): each row's own quote.
+        when = {q['code']: r for q, r in zip(quotes, received) if r is not None}
+        symbols = table.column('symbol').to_pylist()
+        recv = pa.array([None if when.get(c) is None else when[c] * 10**6 for c in symbols], pa.int64()).cast(records.TIME)
+        event = table.column('ts_event')
+        table = table.set_column(table.schema.get_field_index('ts_recv'), table.schema.field('ts_recv'),
+                                 pc.if_else(pc.is_null(recv), event, recv))
+    return table
+
+
 class _Client:
     """One session's outbox: what publish() hands it is sent on the session's own thread."""
 
@@ -425,11 +529,15 @@ class _Client:
         self.fast_until, self.old_codes = None, set()
         self._items, self._behind, self._last = deque(), 0, False
         self._ready = threading.Condition()
+        # A session that asked for latest() alone: its symbols are read and kept, and no record is sent to it.
+        self.silent = False
 
     def widen(self, codes):
         self.codes = None if codes is None or self.codes is None else self.codes | codes
 
     def send(self, batch, line):
+        if self.silent:
+            return
         without = self.old_codes if self.fast_until is not None and batch['type'] == 'quotes' \
             and batch['seq'] <= self.fast_until else None
         data = line if self.codes is None and without is None else _filtered(batch, self.codes, without)
@@ -437,6 +545,8 @@ class _Client:
             self.put(data)
 
     def send_fast(self, batch):
+        if self.silent:
+            return
         data = _filtered(batch, self.fast_codes)
         if data:
             self.put(data)
@@ -504,6 +614,12 @@ class _Client:
 
 # The client
 
+_QUOTED = ('mbp-10', 'imbalance', 'brisk-quotes')   # the schemas read from a quote
+
+# A line's symbols, found in one pass: a scan for each of a session's codes took 34 ms of a 60 KB line for 1,500 of them.
+_CODE = re.compile(rb'"code":"([^"]*)"')
+
+
 class Record(dict):
     """A record: a dict of its fields (as Historical's records), also readable as attributes (record.price),
     with its schema in `record.schema`."""
@@ -525,8 +641,9 @@ class Record(dict):
 
 
 class _Subscription:
-    def __init__(self, id, schema, symbols, start, snapshot):
+    def __init__(self, id, schema, symbols, start, snapshot, silent=False):
         self.id, self.schema, self.symbols, self.start, self.snapshot = id, schema, symbols, start, snapshot
+        self.silent = silent   # kept for latest() only: no record is sent
         self.active = False    # gets the live batches (once the gateway has confirmed it, after any replay)
         self.bars = _Bars(records.BARS[schema]) if schema in records.BARS else None
 
@@ -699,22 +816,25 @@ class Live:
         self._thread = None
         self._error = None
         self._day = None
-        self._needles = ()
+        self._wanted = frozenset()   # the codes (bytes) a line must mention to be read; None: every line is
         self._replay = None              # while one runs: [the subscriptions it is for, its own day]
         self._latency = _Latency()
         self._busy = threading.Lock()    # one batch, or one tick, at a time
         self._write = threading.Lock()
         self._stopping = False
         self._done = threading.Event()
+        self._asked = {}                 # latest() requests waiting: id -> [event, the gateway's answer]
+        self._asks = 0
 
     def __repr__(self):
         state = 'closed' if self._done.is_set() else 'streaming' if self._thread else 'ready'
         return f'Live(dataset={self.dataset!r}, {state})'
 
-    def subscribe(self, dataset, schema, symbols='ALL_SYMBOLS', stype_in='raw_symbol', start=None, snapshot=False):
+    def subscribe(self, dataset, schema, symbols='ALL_SYMBOLS', stype_in='raw_symbol', start=None, snapshot=False, stream=True):
         """Ask for `schema`'s records of `symbols` (JPX codes), before or during the session. `start` (a time, a
         date or UTC ns; 0 for all the feed has) replays from then; `snapshot` starts mbp-10, imbalance or
-        brisk-quotes with the current quotes."""
+        brisk-quotes with the current quotes. With `stream=False` no record is sent: the feed keeps these symbols' quotes
+        fresh for latest(), which reads them all at once when you need them (a session either streams or does this)."""
         if self._done.is_set():
             raise BriskError('This session has ended; start another Live')
         if dataset not in records.DATASETS:
@@ -729,6 +849,10 @@ class Live:
             raise ValueError('Choose start (a replay) or snapshot (the current quotes), not both')
         if snapshot and schema not in ('mbp-10', 'imbalance', 'brisk-quotes'):
             raise ValueError('snapshot applies to mbp-10, imbalance and brisk-quotes')
+        if not stream and (start is not None or snapshot or schema not in ('mbp-10', 'imbalance', 'brisk-quotes')):
+            raise ValueError('stream=False keeps quotes for latest(): mbp-10, imbalance or brisk-quotes, with no start or snapshot')
+        if any(s.silent == stream for s in self._subscriptions):
+            raise ValueError('A session either streams records or keeps quotes for latest(): use another Live for the other')
         info = None if self._key and self._port else _read_file(gateway_path(dataset))
         if info is None and not (self._key and self._port):
             how = '`brisk live --site sbi` (or your broker)' if dataset == 'XTKS.BRISK' else '`brisk live --site demo`'
@@ -737,7 +861,7 @@ class Live:
         self._key, self._port = self._key or info['key'], self._port or info['port']
         self.dataset = dataset
         subscription = _Subscription(len(self._subscriptions), schema, records.symbols_of(symbols),
-                                     None if start is None else records.timestamp(start), bool(snapshot))
+                                     None if start is None else records.timestamp(start), bool(snapshot), not stream)
         self._subscriptions.append(subscription)
         if self._thread:
             self._ask([subscription])
@@ -783,14 +907,15 @@ class Live:
         """Send subscriptions (one request: one replay at most); replayed lines of other symbols are skipped
         unread."""
         wanted = [s.symbols for s in self._subscriptions]
-        self._needles = None if None in wanted else tuple(f'"code":"{c}"'.encode() for c in sorted(set().union(*wanted)))
+        self._wanted = None if None in wanted else frozenset(c.encode() for c in set().union(*wanted))
         symbols = [s.symbols for s in subscriptions]
         try:
             with self._write:
                 self._sock.sendall(_line({'subscribe': [s.id for s in subscriptions],
                                           'symbols': None if None in symbols else sorted(set().union(*symbols)),
                                           'replay': any(s.start is not None for s in subscriptions),
-                                          'snapshot': any(s.snapshot for s in subscriptions)}))
+                                          'snapshot': any(s.snapshot for s in subscriptions),
+                                          **({'silent': True} if subscriptions[0].silent else {})}))
         except OSError:
             raise BriskError('This session has ended; start another Live') from None
 
@@ -831,6 +956,45 @@ class Live:
         if self._error:
             raise self._error
 
+    def latest(self, schema=None, symbols=None, timeout=10.0):
+        """The freshest quote the feed holds of each of `symbols` (default: those this session subscribed to; JPX
+        codes, or ALL_SYMBOLS) as a pyarrow Table of `schema`'s records (default: the session's, else mbp-10; mbp-10,
+        imbalance or brisk-quotes), in one request: no record is made one at a time, which a session of a thousand
+        symbols never keeps up with at an opening burst. Each row's ts_recv is when the feed received that quote, so
+        its age is `now - ts_recv`. The feed's fast lane keeps a symbol fresh once a subscription (streaming or
+        `stream=False`) names it; before that it answers from the recording's state, which can lag at a burst."""
+        if not self._thread:
+            raise BriskError('Start the session first')
+        schemas = {s.schema for s in self._subscriptions if s.schema in _QUOTED}
+        schema = schema or (next(iter(schemas)) if len(schemas) == 1 else 'mbp-10')
+        if schema not in _QUOTED:
+            raise ValueError(f'latest() reads quotes: one of {", ".join(_QUOTED)}')
+        if symbols is None:
+            wanted = [s.symbols for s in self._subscriptions]
+            codes = None if not wanted or None in wanted else set().union(*wanted)
+        else:
+            codes = records.symbols_of(symbols)
+        with self._write:
+            self._asks += 1
+            id = self._asks
+            waiting = self._asked[id] = [threading.Event(), None]
+            try:
+                if self._done.is_set():   # the session's thread has finished: nothing would wake this
+                    raise OSError
+                self._sock.sendall(_line({'latest': {'id': id, 'schema': schema,
+                                                     'symbols': None if codes is None else sorted(codes)}}))
+            except OSError:
+                self._asked.pop(id, None)
+                raise BriskError('This session has ended; start another Live') from None
+        if self._done.is_set():   # it ended while the request went out
+            waiting[0].set()
+        if not waiting[0].wait(timeout):
+            self._asked.pop(id, None)
+            raise BriskError(f'The feed did not answer latest() within {timeout:g} s')
+        if waiting[1] is None:
+            raise self._error or BriskError('This session ended before the feed answered')
+        return pa.ipc.open_stream(waiting[1]).read_all()
+
     # The session's thread
 
     def _run(self):
@@ -845,6 +1009,13 @@ class Live:
                     if control['gateway'] == 'closed':
                         ended = True
                         break
+                    if control['gateway'] == 'latest':
+                        data = self._lines.read(control['bytes'])   # the table, right after its line
+                        waiting = self._asked.pop(control['id'], None)
+                        if waiting:
+                            waiting[1] = data
+                            waiting[0].set()
+                        continue
                     with self._busy:
                         if control['gateway'] == 'subscribed':
                             self._replay = self._subscribed(control)
@@ -853,8 +1024,8 @@ class Live:
                                 s.active = True
                             self._replay = None
                     continue
-                if self._needles and line.startswith((b'{"type":"quotes"', b'{"type":"history"')) \
-                        and not any(needle in line for needle in self._needles):
+                if self._wanted and line.startswith((b'{"type":"quotes"', b'{"type":"history"')) \
+                        and not any(code in self._wanted for code in _CODE.findall(line)):
                     continue
                 with self._busy:
                     self._take(json.loads(line), taken)
@@ -867,6 +1038,8 @@ class Live:
                 self._error = error if isinstance(error, BriskError) else BriskError(f'Live session failed: {error!r}')
         finally:
             self._sock.close()
+            for waiting in list(self._asked.values()):   # a latest() waiting for an answer that will not come
+                waiting[0].set()
             for stream, _, owned in self._streams:
                 if owned:
                     stream.close()
@@ -949,7 +1122,7 @@ class Live:
     def _project(self, batch, takers, day, snapshot=False, replayed=False):
         """One batch's records for these subscriptions, ordered as Historical orders them, and the bars it
         completes."""
-        if self._by_rows and not snapshot and not replayed and batch['type'] in ('quotes', 'history') \
+        if self._by_rows and not snapshot and batch['type'] in ('quotes', 'history') \
                 and all(s.schema in ('mbp-10', 'trades', 'imbalance') for s in self._subscriptions):
             return self._rows(batch, takers, day)
         quoted = ('mbp-10', 'imbalance', 'brisk-quotes')

@@ -200,9 +200,21 @@ for record in live:             # または live.add_callback(fn); live.start();
 - **高速レーン:** 証券会社のフィードは全銘柄を記録するため、遅めのコンピューターでは寄付で
   ストリームから数秒遅れることがあります。`start` を付けずに銘柄を指定したセッションは高速レーンで
   受け取ります。フレームが届くたびに読み、記録より先に、同じレコードを届けます。高速レーンが扱えるのは
-  そのワーカー1つにつき約 500 銘柄です（フィードのワーカーの4分の1）。`ALL_SYMBOLS`、`start` による
-  再生、扱える数を超える銘柄は、記録と同じ速さで届きます。後の購読で収まらなくなったセッションは、
-  レコードを欠かすことも重複させることもなく、そちらに移ります。
+  そのワーカー1つにつき約 500 銘柄です（フィードのワーカーの4分の1なので、既定では 500〜1,000 銘柄）。
+  `ALL_SYMBOLS`、`start` による再生、扱える数を超える銘柄は、記録と同じ速さで届きます（警告で、その旨と
+  必要な数が表示されます）。後の購読で収まらなくなったセッションは、レコードを欠かすことも重複させることも
+  なく、そちらに移ります。1,000 銘柄以上のシステムでは、`brisk live --site sbi --fast-symbols 1500`
+  （`briskapi.connect(fast_symbols=1500)`）でフィードを起動すると、高速レーンにその銘柄数のワーカーが
+  割り当てられます。500 銘柄ごとに記録用のワーカーを 1 つ使うので、コアの少ないコンピューターでは
+  `BRISK_WORKERS` も指定してください。
+- **多数の銘柄の最新の気配を一度に:** 決まった時刻（オークションの数秒前の締め切りなど）に判断するプログラムが
+  必要なのは、その時点の各銘柄の最新の気配であって、途中のすべての更新ではありません。
+  `live.subscribe("XTKS.BRISK", "mbp-10", symbols=codes, stream=False)` は、フィードにそれらの銘柄を高速レーンで
+  新しく保たせ、何も送りません。`live.latest()` は 1 回のリクエストで、それらの最新の気配を pyarrow のテーブルで
+  返します（`mbp-10`、`imbalance`、`brisk-quotes` のレコード。`ts_recv` はフィードがその気配を受け取った時刻なので、
+  その古さは `now - ts_recv` です）。1,500 銘柄で約 18 ms で、ストリームが混んでいても変わりません。
+  1つのセッションは、ストリームを受け取るか、`latest()` のために気配を保つかのどちらかです。
+  `tools/live_age.py` は、ストリームのレコードの古さを、BRiSK 側の遅れと briskapi 自身の分に分けて表示します。
 - **このコンピューターだけ:** フィードは 127.0.0.1 でのみ待ち受け、所有者だけが読めるファイル
   （`~/.config/brisk/gateway/XTKS.BRISK.json`）にポート番号とともに保存したキーを持つセッション
   だけを受け入れます。`Live()` はこのファイルを読みます。配信する内容がこのコンピューターの外に
@@ -279,7 +291,12 @@ toyota.quote()                              # 他のフィードと同じ呼び�
 最後の記録がその日のタイミングの要約とともにパッケージ化・アップロードされ（オプトアウトした場合を除く）、
 フィードは次のセッションを待って、新しいスナップショットから記録を始めます。セッションが開いていないとき（取引終了後や休日）に始めると、
 フィードは次の取引日のセッションを待ちます。`connect()` はその日が始まってから戻ります
-（待っている間の `feed.status` は `"waiting"`）。`output=DIR`
+（待っている間の `feed.status` は `"waiting"`）。証券会社は毎朝 05:00 にセッションを失効させるので、
+一晩待っているフィードはセッションが失効しても待ち続け（`the session has expired; waiting for new cookies` と表示します）、
+その後に行った `brisk login` の Cookie を、再起動なしで使い始めます。その証券会社のパスキーが保存されていれば
+（`brisk enroll`）、フィード自身が `brisk login` と同じようにサインインし直します（Chrome が開きます）。試すのは
+最大4回、1時間40分の間で、それでだめなら人に任せます。保存できるパスキーは1つの証券会社の分だけなので、別の
+証券会社のフィードや、パスキーがない場合は、サインインのしかたを表示します。`output=DIR`
 （`briskapi.connect(output=...)`、`brisk live --output DIR`）を指定すると、
 記録ごとに、`SITE_YYYYMMDD_FROM-TO`（証券会社のサイトと、その最初と最後のソース時刻、日本時間 HHMMSS）という
 名前のフォルダー（例: `sbi_20261013_085800-113000`）が DIR に残ります。どの証券会社の記録も BRiSK の同じ市場データ
@@ -442,7 +459,7 @@ Python では `passkey.enroll(site="matsui")`（e支店では `passkey.enroll(si
 | 呼び出し | 戻り値 |
 | --- | --- |
 | `briskapi.connect(site="demo" \| "sbi" \| "e-shiten" \| "matsui" \| "monex" \| "smbcnikko")` | デモまたは証券会社の BRiSK のライブの `Feed`（既定のデータ源になる。`gateway=True` で `Live` にも配信） |
-| `briskapi.Live()` | このコンピューターのフィードから Databento 風のライブのレコード: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False)` のあと、イテレーション、または `add_callback(fn)` / `add_stream(path)` と `start()`、`block_for_close(timeout)`。`stop()`、`symbology_map`（[上記](#ライブのレコードdatabento-風)） |
+| `briskapi.Live()` | このコンピューターのフィードから Databento 風のライブのレコード: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False, stream=True)`、`latest(schema=None, symbols=None)`（最新の気配のテーブル）のあと、イテレーション、または `add_callback(fn)` / `add_stream(path)` と `start()`、`block_for_close(timeout)`。`stop()`、`symbology_map`（[上記](#ライブのレコードdatabento-風)） |
 | `Ticker(code).info()` | 銘柄名、売買単位、呼値の種別、基準値、値幅制限 |
 | `Ticker(code).quote(at=None)` | 買い・売り気配とその数量・件数、板の各側の上位10本（`bids`、`asks`）と引け条件付き注文の上位10本（`closing_bids`、`closing_asks`）、板全体の注文合計、予想約定価格・数量、成行・引け条件付きの数量、直近の約定、売買代金、銘柄の状態、`special_quote`（特別気配の側・価格・タイマーの終了時刻） |
 | `Ticker(code).auction(at=None, closing=False)` | 板寄せの予想状態、成行注文、板の合計と `market_order_imbalance`（成行の買い数量 − 売り数量）。`closing=True` で引けの板寄せ |
@@ -533,7 +550,8 @@ brisk identity [--recovery-code | --recover CODE]  # 自分の owner ID、復元
 （`session ended; waiting for the next trading day`）。保存の様子は stderr に出ます
 （端末では5秒ごと、ログでは30秒ごと。`--quotes` の標準出力は気配のままです）: どの記録か（`sbi 2026-10-13 from 09:00:00`）、
 段階（準備、バッチ・気配・約定の書き込み、仕上げ）と書き込んだ行数と全体の行数、ディスクに書き終えて初めて
-`saved to PATH in 2m35s`、失敗したときは `Packaging failed after ...` とその理由です。アップロードには別の行があります:
+`saved to PATH in 2m35s`、失敗したときは `Packaging failed after ...` とその理由です
+（昼休みの再接続のように、ストリームから何も来なかった区間は `no update came until 12:00:03; nothing to save`）。アップロードには別の行があります:
 送ったバイト数、アーカイブの確認、`uploaded; the archive stored it`。
 保存に失敗したものは `~/.local/share/brisk/recordings` に残り、同じ形で表示されます（`keeping what was recorded in ...`、
 続いて `saved to ...`。アップロードの失敗なら `brisk upload PATH` で再試行できます）。`brisk record`、`package`、`upload` も

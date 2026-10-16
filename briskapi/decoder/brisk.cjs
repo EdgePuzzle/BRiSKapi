@@ -16,6 +16,8 @@
 // the server answers.
 const crypto = require('node:crypto');
 const { once } = require('node:events');
+const fs = require('node:fs');
+const { monitorEventLoopDelay } = require('node:perf_hooks');
 const { Decoder } = require('./decoder.cjs');
 const { Link, resolveProfile, heartbeatMonitor, staleDataCheck, redact } = require('./engineio.cjs');
 const { QuotePool, workerCount, POOL_MIN_ISSUES } = require('./workers.cjs');
@@ -47,12 +49,24 @@ function site(id = 'sbi') {
   return { id, ...SITES[id] };
 }
 
+const cookieHeader = cookies => Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join('; ');
+
+// The cookies `brisk login` saved in `file` (a JSON object), or null when there are none to read.
+function cookiesIn(file) {
+  try {
+    const cookies = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return cookies && typeof cookies === 'object' && Object.keys(cookies).length ? cookies : null;
+  } catch {
+    return null;
+  }
+}
+
 class Session {
   constructor(cookies, fetchImpl = fetch, where = site()) {
     if (!cookies || typeof cookies !== 'object' || !Object.keys(cookies).length) {
       throw new Error(`Set ${where.cookies} to your ${where.name} session cookies (JSON object)`);
     }
-    this.cookie = Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join('; ');
+    this.cookie = cookieHeader(cookies);
     this.fetch = fetchImpl;
     this.origin = where.origin;
     this.name = where.name;
@@ -61,6 +75,12 @@ class Session {
 
   get(path, kind = 'json') {
     return this.request(path, { kind });
+  }
+
+  // The cookies of a login made since: the API token came with the old ones, so it is asked for again.
+  use(cookies) {
+    this.cookie = cookieHeader(cookies);
+    this.token = null;
   }
 
   async request(path, { method = 'GET', body, contentType, kind = 'json' } = {}) {
@@ -228,20 +248,42 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   protocolVersion, profile: overrides = {}, trace = null, catchUp = null, heartbeatMs = HEARTBEAT_MS,
   staleSeconds = 90, connectTimeoutMs = 15000, catchUpBackoffMs, site: siteId = 'sbi', after = null,
   dayCheckMs = DAY_CHECK_MS, streamCheckMs = STREAM_CHECK_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), onBoot = null,
-  resumable = false, stop = null, log = null, workers = null, lanes = null }) {
+  resumable = false, stop = null, log = null, workers = null, lanes = null, fastSymbols = null, reloadCookies = null, onCookies = null }) {
   const where = site(siteId);
   const profile = resolveProfile(overrides);
   const session = new Session(cookies, fetchImpl, where);
   if (stop) stop.end = null;  // no day to end yet (a failed setup may have left the last one's): a stop just exits (see main)
-  let frontend = await session.get('/api/frontend/boot');
-  session.token = frontend.api_token;
-  let app = await session.get('/api/app/boot');
+  // The cookies of a login made since the ones in use were given (reloadCookies reads them; onCookies tells whoever
+  // starts the next day), taken up when the site no longer accepts the old ones: false when there are none.
+  const newCookies = () => {
+    const fresh = reloadCookies?.();
+    if (!fresh || cookieHeader(fresh) === session.cookie) return false;
+    session.use(fresh);
+    onCookies?.(fresh);
+    trace?.('boot: signed in again; using the new cookies');
+    return true;
+  };
+  let frontend, app;
+  const boot = async () => {
+    frontend = await session.get('/api/frontend/boot');
+    session.token = frontend.api_token;
+    app = await session.get('/api/app/boot');
+  };
+  try {
+    await boot();
+  } catch (error) {
+    if (!/expired/.test(error.message) || !newCookies()) throw error;
+    await boot();
+  }
   // Wait for a session to join. After a day's session the site serves that day until the next one. The vendor
   // app opens the stream only while session_status is "running"; after the close it is "done" (and the boot has
   // no ws_url), and the app reloads a minute after next_date, which the boot gives with its own time (unix
   // seconds), so the wait is taken from the server's clock. Python is told once, outside the days' records.
   // The day is said to have "ended", never to be "recorded": Python saves it minutes later, and says "saved" then.
-  let waiting = false;
+  // The broker ends its sessions at 05:00 each morning, so a feed that waits overnight meets an expired one: it
+  // keeps waiting, asking each minute for the cookies of a new login (`brisk login`, which the Python feed runs itself
+  // when a passkey is saved: it is told with an `expired` line), rather than stop.
+  let waiting = false, expired = false, again = false;
   for (;;) {
     const sameDay = after !== null && String(app.date) <= after;
     if (!sameDay && app.ws_url && (app.session_status ?? 'running') === 'running') break;
@@ -253,14 +295,21 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
       await emit({ type: 'waiting', date: String(app.date), session_status: app.session_status ?? null });
     }
     const due = (Number(app.next_date) - Number(app.time) + 60) * 1000;
-    await sleep(due > 0 ? Math.min(due, dayCheckMs) : sameDay ? dayCheckMs : streamCheckMs);
+    if (!again) await sleep(expired ? streamCheckMs : due > 0 ? Math.min(due, dayCheckMs) : sameDay ? dayCheckMs : streamCheckMs);
+    again = false;
     try {
-      frontend = await session.get('/api/frontend/boot');
-      session.token = frontend.api_token;
-      app = await session.get('/api/app/boot');
+      await boot();
+      expired = false;
     } catch (error) {
-      if (/expired/.test(error.message)) throw error;  // a session that ended needs a new login
-      trace?.(`boot check failed (${error.message}); trying again later`);
+      if (!/expired/.test(error.message)) {
+        trace?.(`boot check failed (${error.message}); trying again later`);
+      } else if (newCookies()) {
+        again = true;   // asked for again at once with them
+      } else if (!expired) {
+        expired = true;
+        log?.(`[brisk] ${where.name}: the session has expired; waiting for new cookies (sign in again with \`brisk login\`)`);
+        await emit({ type: 'expired' });   // for the Python feed, which signs in again if a passkey is saved for this site
+      }
     }
   }
   onBoot?.(String(app.date));
@@ -331,6 +380,10 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
 
   let seq = 0, frames = 0, updates = 0, started = false, starting = false, work = Promise.resolve();
   const start = performance.now();
+  // What a lost connection says of the host's side, when it was not the host that ended it (see `lost` below): how long
+  // the link had been up, since when no frame had come, how late the host's event loop ran and how much memory it held.
+  let connectedAt = null, lastFrameAt = null, lag = 0, lagTimer = null;
+  const loop = monitorEventLoopDelay({ resolution: 20 });
   // The fast lane (with `lanes`, the Python feed's gateway): the symbols Live sessions subscribed to, read by a
   // pool of their own on each frame's arrival and written at once, out of band, ahead of the recording's batch
   // of that frame, which may wait behind the whole market's. `lanes.codes` says which; the feed changes it.
@@ -464,8 +517,20 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     }).catch(fail);
   };
 
+  // How the link looked when it closed, for the log: a connection the other end or the network drops looks one way
+  // (frames until a moment before, the host's loop on time) and a host that was too busy to answer another.
+  const describeDrop = () => {
+    if (connectedAt === null) return '';
+    const now = performance.now(), seconds = Math.round((now - connectedAt) / 1000);
+    const up = seconds >= 3600 ? `${Math.floor(seconds / 3600)}h${String(Math.floor(seconds % 3600 / 60)).padStart(2, '0')}m`
+      : seconds >= 60 ? `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s` : `${seconds}s`;
+    return ` after ${up} (last frame ${((now - lastFrameAt) / 1000).toFixed(1)} s earlier, event loop lag up to `
+      + `${Math.round(Math.max(lag, loop.max / 1e6))} ms, Node ${(process.memoryUsage().rss / 2 ** 30).toFixed(1)} GB)`;
+  };
+
   const onFrame = frame => {
     const received_unix_ms = Date.now();
+    lastFrameAt = performance.now();
     frames++;
     // A frame arriving shows the link is alive. The WASM's heartbeat is seen only once its frame is decoded, and
     // in a burst (the opening auction) frames queue behind the output for longer than the heartbeat allows; the
@@ -493,7 +558,9 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     // that they see every frame the host's decoder does.
     // With lanes, a quarter of them (at least one) make the fast lane's pool, the rest the recording's.
     const budget = workers ?? (ids.size >= POOL_MIN_ISSUES ? workerCount() : 0);
-    const fastCount = lanes && budget > 0 ? Math.max(1, Math.floor(budget / 4)) : 0;
+    // By default a quarter of the workers (at least one); for `fastSymbols` (the symbols Live sessions will want on it), as many
+    // as read them (FAST_SYMBOLS_PER_WORKER each), the recording's taking the rest. A thousand symbols are two workers.
+    const fastCount = lanes && budget > 0 ? Math.max(1, fastSymbols ? Math.ceil(fastSymbols / FAST_SYMBOLS_PER_WORKER) : Math.floor(budget / 4)) : 0;
     const count = budget > 0 ? Math.max(1, budget - fastCount) : 0;
     const options = { protocolVersion, schedule: app.schedule_info ?? null,
       boot: { exceptional_sq: app.exceptional_sq, base_prices: app.base_prices } };
@@ -525,6 +592,9 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     // Origin is what a browser on the site sends.
     const headers = { origin: where.origin };
     if (wsUrl.origin === where.origin.replace(/^https:/, 'wss:')) headers.cookie = session.cookie;
+    loop.enable();
+    lagTimer = setInterval(() => { lag = loop.max / 1e6; loop.reset(); }, 30000);   // the last half minute's worst
+    connectedAt = lastFrameAt = performance.now();
     link = new Link({ WebSocketImpl, url: wsUrl, headers, protocols: STREAM_PROTOCOL, name: where.name, profile, context, trace,
       connectTimeoutMs, onBinary: onFrame,
       onClose: closed => settle(closed), onError: error => { failure = failure || error; settle({ code: -1, reason: '' }); } });
@@ -536,7 +606,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
       await Promise.all([pending, lane]);
     }
     const lost = failure || ((closed.code !== 1000 && !marketFinished && !dayOver) || !started
-      ? new Error(`${where.name} stream closed (${[closed.code, closed.reason].filter(Boolean).join(' ')})`) : null);
+      ? new Error(`${where.name} stream closed (${[closed.code, closed.reason].filter(Boolean).join(' ')})${describeDrop()}`) : null);
     if (lost && (!resumable || !started || fatal(lost))) throw lost;
     // A lost connection ends the segment as cleanly as the day's end would: what came before it is a recording.
     const summary = { type: 'end', seq, source_time_us: decoder.time(), frames, quote_updates: updates,
@@ -547,6 +617,8 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
   } finally {
     clearTimeout(timer);
     clearInterval(dayTimer);
+    clearInterval(lagTimer);
+    loop.disable();
     monitor?.stop();
     link?.close();
     pool?.close();
@@ -566,12 +638,14 @@ const RETRY_MS = [5000, 10000, 30000, 60000, 120000];
 // and those another connection cannot mend (fatal), stop it. `stop.requested` (see main) ends it after the
 // session's day, ended where it was.
 async function record({ days = Infinity, retryMs = RETRY_MS, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
-  log = line => process.stderr.write(`${line}\n`), stop = null, ...options }) {
+  log = line => process.stderr.write(`${line}\n`), stop = null, cookies, ...options }) {
   let after = null, recorded = false, failures = 0;
   for (let day = 0; day < days;) {
     let booted = null;
     try {
-      await live({ ...options, sleep, log, after, stop, resumable: true, onBoot: date => { booted = date; } });
+      // The cookies of a new login, taken up while a day waited, carry to the days after it.
+      await live({ ...options, cookies, sleep, log, after, stop, resumable: true, onBoot: date => { booted = date; },
+        onCookies: fresh => { cookies = fresh; } });
       after = booted; day++; recorded = true; failures = 0;
       if (stop?.requested) return;
       continue;
@@ -640,7 +714,10 @@ async function main(argv, env = process.env) {
   process.on('SIGTERM', onSignal);
   const control = env.BRISK_CONTROL === '1' || env.BRISK_LANES === '1' ? readLanes(process.stdin, onSignal) : null;
   const lanes = env.BRISK_LANES === '1' ? control : null;
-  await record({ cookies: JSON.parse(env[where.cookies] || 'null'), codes, profile, site: where.id, stop, lanes,
+  const fastSymbols = env.BRISK_FAST_SYMBOLS ? Number(env.BRISK_FAST_SYMBOLS) : null;
+  if (fastSymbols !== null && !(Number.isInteger(fastSymbols) && fastSymbols > 0)) throw new Error('BRISK_FAST_SYMBOLS must be a whole number above 0');
+  await record({ cookies: JSON.parse(env[where.cookies] || 'null'), codes, profile, site: where.id, stop, lanes, fastSymbols,
+    reloadCookies: env.BRISK_COOKIES_FILE ? () => cookiesIn(env.BRISK_COOKIES_FILE) : null,
     trace: trace ? line => process.stderr.write(`[brisk protocol] ${line}\n`) : null,
     // A batch whose quotes workers read comes with its line already made.
     emit: async (record, line = JSON.stringify(record)) => {
@@ -648,7 +725,7 @@ async function main(argv, env = process.env) {
     } });
 }
 
-module.exports = { Session, SITES, SOURCE, site, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, readLanes, fetchCatchUp, CATCH_UP_FORMATS, DEFAULT_CATCH_UP,
+module.exports = { Session, SITES, SOURCE, site, cookiesIn, decoderAssets, streamUrl, checkAbi, checkMaster, live, record, main, readLanes, fetchCatchUp, CATCH_UP_FORMATS, DEFAULT_CATCH_UP,
   Interrupted, fatal, RETRY_MS,
   HEARTBEAT_MS,
   PROTOCOL_VERSION, REQUIRED };

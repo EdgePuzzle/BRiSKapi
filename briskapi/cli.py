@@ -529,6 +529,8 @@ def _warnings_on_stderr():
 def _live(args):
     from briskapi import connect, login  # The API package builds on this module.
     codes = args.codes.split(',') if args.codes else None
+    if args.site == 'demo' and args.fast_symbols is not None:
+        raise BriskError("--fast-symbols applies to a broker's site")
     if args.site != 'demo':
         login(args.site)  # Missing cookies fail before the notice, questions or decoder startup.
     consented(args.upload)
@@ -537,7 +539,8 @@ def _live(args):
         signal.signal(signal.SIGTERM, _interrupt)
     report = lambda day: print(json.dumps({'day': day}), file=sys.stderr, flush=True)  # noqa: E731
     source = (dict(cache=args.cache, speed=args.speed, limit_frames=args.limit_frames) if args.site == 'demo' else
-              dict(trace_protocol=args.trace_protocol, upload_market_data=args.upload_market_data))
+              dict(trace_protocol=args.trace_protocol, upload_market_data=args.upload_market_data,
+                   fast_symbols=args.fast_symbols))
     try:
         # With no session to join (after the close, on a holiday), a broker feed waits here for the next one's.
         feed = connect(site=args.site, codes=codes, upload=args.upload, output=args.output, on_day=report,
@@ -665,6 +668,11 @@ class Saving:
         """The recording is on disk at `path`: only now is it saved."""
         self._say(f'saved to {path} in {_duration(self._clock() - self._began)}' + (f'; {hint}' if hint else ''), final=True)
 
+    def empty(self, until):
+        """The piece was empty: the stream sent no update until `until`, so there is nothing to save (what it held, the book
+        and the day's history, the recording before it has)."""
+        self._say(f'no update came until {until}; nothing to save', stage='empty', final=True)
+
     def keeping(self, where):
         """A save that failed is being kept in `where` instead: told afresh, timed from here."""
         self._began, self._last, self._said, self._rows = self._clock(), None, set(), {}
@@ -789,6 +797,10 @@ def _main(argv):
                         "e-shiten (Tachibana e-shiten's BRiSK Next), matsui, monex, smbcnikko: the same with their own "
                         "variable (BRISK_ESHITEN_COOKIES, BRISK_MATSUI_COOKIES, ...) and briskapi.login('matsui', remember=True); "
                         "Matsui's, Monex's and SMBC Nikko's not yet tried live")
+    p.add_argument('--fast-symbols', type=int, metavar='N',
+                   help="With a broker's site: how many symbols Live sessions will want on the fast lane (default: 500 to 1,000, by "
+                        'the cores); each 500 takes a worker from the recording, so also set BRISK_WORKERS for a system of '
+                        'a thousand or more')
     p.add_argument('--trace-protocol', action='store_true',
                    help="With a broker's site: print the connection steps to stderr, every token redacted (wire details in BRISK_PROFILE)")
     p.add_argument('--upload', action=argparse.BooleanOptionalAction, default=None,

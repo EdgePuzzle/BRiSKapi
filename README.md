@@ -205,9 +205,18 @@ for record in live:             # or live.add_callback(fn); live.start(); live.b
   fall seconds behind the stream on a slower computer. A session that subscribes to its own
   symbols, without `start`, gets them on the fast lane: read as each frame arrives, ahead of the
   recording, with the same records. The lane takes about 500 symbols per worker it has (a
-  quarter of the feed's). `ALL_SYMBOLS`, a `start` replay, or symbols beyond what it takes come at
-  the recording's pace instead; a session whose later subscription no longer fits moves there
-  without missing or repeating a record.
+  quarter of the feed's, so 500 to 1,000 by default). `ALL_SYMBOLS`, a `start` replay, or symbols beyond what it takes come at
+  the recording's pace instead (a warning says so and how many it would take); a session whose later subscription no longer
+  fits moves there without missing or repeating a record. For a system of a thousand symbols or more, start the feed with
+  `brisk live --site sbi --fast-symbols 1500` (`briskapi.connect(fast_symbols=1500)`), which gives the lane workers for them: each
+  500 takes one from the recording, so on a computer with fewer cores also set `BRISK_WORKERS`.
+- **The latest quotes of many symbols, at once:** a program that decides at a moment (a cut a few seconds before an auction) wants
+  each symbol's freshest quote then, not every update on the way. `live.subscribe("XTKS.BRISK", "mbp-10", symbols=codes,
+  stream=False)` has the feed keep those symbols fresh on its fast lane and send nothing; `live.latest()` then returns, in
+  one request, a pyarrow table of their last quotes (`mbp-10`, `imbalance` or `brisk-quotes` records, `ts_recv` the moment the feed
+  received each, so its age is `now - ts_recv`): some 18 ms for 1,500 symbols, however busy the stream. A session either streams
+  or keeps quotes for `latest()`. `tools/live_age.py` prints how old a stream's records are, split into BRiSK's delay
+  and briskapi's own.
 - **Only this computer:** the feed listens on 127.0.0.1 and admits a session only with the key
   it keeps, with its port, in an owner-only file (`~/.config/brisk/gateway/XTKS.BRISK.json`),
   which `Live()` reads. Nothing it serves leaves your computer. A session that falls more than
@@ -283,7 +292,12 @@ closes the stream after the market, the day ends: its last recording is packaged
 the day's timing summary (unless you opt out), while the feed waits for the next session and records
 it from a fresh snapshot. Started when no session is running
 (after the close, on a holiday), the feed waits for the next trading day's: `connect()` returns
-once that day has begun (`feed.status` is `"waiting"` meanwhile). `output=DIR` (`briskapi.connect(output=...)`, `brisk live --output DIR`)
+once that day has begun (`feed.status` is `"waiting"` meanwhile). Brokers end their sessions at 05:00 each morning, so a
+feed that waits overnight keeps waiting once its session has expired (it says `the session has expired; waiting for
+new cookies`) and takes up the cookies of a `brisk login` you make after, with no restart. If a passkey is saved
+for that broker (`brisk enroll`), the feed signs in again itself, as `brisk login` does (Chrome opens): up to four tries
+over the next hour and forty minutes, then it leaves it to you. A saved passkey is one broker's, so a feed for
+another broker, or with no passkey, says how to sign in. `output=DIR` (`briskapi.connect(output=...)`, `brisk live --output DIR`)
 also keeps each recording in DIR, in a folder named
 `SITE_YYYYMMDD_FROM-TO` (its broker's site and its first and last source clock, JST HHMMSS), such as
 `sbi_20261013_085800-113000`; every broker's recordings are the same source, `brisk_live`, as all carry BRiSK's
@@ -444,7 +458,7 @@ How it works inside: [ARCHITECTURE.md](https://github.com/honvl/BRiSKapi/blob/ma
 | Call | Returns |
 | --- | --- |
 | `briskapi.connect(site="demo" \| "sbi" \| "e-shiten" \| "matsui" \| "monex" \| "smbcnikko")` | Live `Feed` of the demo or your broker's BRiSK; becomes the default source (`gateway=True` also serves it to `Live`) |
-| `briskapi.Live()` | Databento-style live records from the feed on this computer: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False)`, then iteration or `add_callback(fn)` / `add_stream(path)` with `start()` and `block_for_close(timeout)`; `stop()`, `symbology_map` ([above](#live-records-databento-style)) |
+| `briskapi.Live()` | Databento-style live records from the feed on this computer: `subscribe(dataset, schema, symbols='ALL_SYMBOLS', start=None, snapshot=False, stream=True)`, `latest(schema=None, symbols=None)` (a table of the freshest quotes), then iteration or `add_callback(fn)` / `add_stream(path)` with `start()` and `block_for_close(timeout)`; `stop()`, `symbology_map` ([above](#live-records-databento-style)) |
 | `Ticker(code).info()` | Name, lot size, tick type, base price and daily limits |
 | `Ticker(code).quote(at=None)` | Bid/ask with their quantities and orders, the ten best book levels per side (`bids`, `asks`) and of the closing-condition orders (`closing_bids`, `closing_asks`), the board's order totals, indicative price/volume, market-order and closing quantities, last trade, turnover, issue status and `special_quote` (side, price, when its timer ends) |
 | `Ticker(code).auction(at=None, closing=False)` | The auction's indicative state, market orders and board totals with `market_order_imbalance` (market buy minus sell); `closing=True` for the closing auction |
@@ -534,7 +548,8 @@ Saving a recording takes minutes, and shows. When a session ends, `brisk live` s
 (`session ended; waiting for the next trading day`) while the recording is still being saved. Saving
 reports on stderr (every 5 s on a terminal, 30 s in a log; stdout stays the quotes of `--quotes`): which recording
 (`sbi 2026-10-13 from 09:00:00`), its stage (preparing, writing batches, quotes and trades, finalizing) with the rows
-written of the total, then `saved to PATH in 2m35s` only once it is on disk, or `Packaging failed after ...` and why. The upload
+written of the total, then `saved to PATH in 2m35s` only once it is on disk, or `Packaging failed after ...` and why (`no update came
+until 12:00:03; nothing to save` for a stretch in which the stream sent nothing, such as a reconnection in the lunch break). The upload
 has lines of its own: bytes sent, the archive's checks, and `uploaded; the archive stored it`. A save that fails is kept in
 `~/.local/share/brisk/recordings` and says so the same way (`keeping what was recorded in ...`, then `saved to ...`, with
 `brisk upload PATH` to retry an upload that failed). `brisk record`, `package` and `upload` tell their packaging and upload on

@@ -41,14 +41,24 @@ def _stored(result):
     return bool(result['uploaded']) and result['uploaded'].get('status') == 'stored'
 
 
-def _saving_label(spool):
+def _hms(us):
+    """A source clock (microseconds after JST midnight) as HH:MM:SS."""
+    return f'{us // 3_600_000_000:02d}:{us // 60_000_000 % 60:02d}:{us // 1_000_000 % 60:02d}'
+
+
+def _saving_label(spool, start=None):
     """Which recording a spool is saving, for `brisk live`'s lines: its site (or source), its trading date and where its piece
-    begins (a day is saved in pieces)."""
+    (the one last tried, or the one beginning at `start`) begins (a day is saved in pieces)."""
     header = spool.header or _parquet.bootstrap_row(spool.parts()[0])
     site = schema.site_of(header.get('input_transport')) or header['source']
-    date, start = header['trading_date'], spool.piece_start
-    return (f'{site} {date[:4]}-{date[4:6]}-{date[6:]}'
-            + ('' if start is None else f' from {start // 3_600_000_000:02d}:{start // 60_000_000 % 60:02d}:{start // 1_000_000 % 60:02d}'))
+    date = header['trading_date']
+    start = spool.piece_start if start is None else start
+    return f'{site} {date[:4]}-{date[4:6]}-{date[6:]}' + ('' if start is None else f' from {_hms(start)}')
+
+
+def _made(result):
+    """Whether a result is of a recording that was made (or that failed to be): not of a segment the stream sent no update to."""
+    return any(result[key] is not None for key in ('name', 'path', 'error'))
 
 
 def _stop(process):
@@ -121,10 +131,11 @@ class Feed:
 
     manifest = None
     gateway = None
+    _lane_split = True   # the fast lane's lines go to the gateway on a thread of their own (_lane_loop); the benchmark turns it off to compare
 
     def __init__(self, cache=None, codes=None, speed=1, limit_frames=None, upload=None,
                  history=False, node='node', *, command=None, env=None, timing=None, upload_market_data=None, output=None,
-                 on_day=None, gateway=False):
+                 on_day=None, gateway=False, relogin=None):
         # A broker session uploads its timing summary and its market recording; upload_market_data=False keeps
         # the market recording local.
         if upload_market_data is not None and (command is None or timing not in schema.BROKER_TRANSPORTS):
@@ -155,6 +166,15 @@ class Feed:
         self._listeners: list = []
         self._changed = threading.Condition()
         self._closing = False
+        # relogin(closed): signs in again when the host says its session expired while it waited (see _expired); `closed`
+        # is set when the feed is closed.
+        self._relogin, self._closed = relogin, threading.Event()
+        # With the GIL off, the fast lane's lines go to the gateway on a thread of their own (_lane_loop) instead of waiting in the
+        # feed thread behind each batch of the recording's before them. Each thread counts the host's lines, and each says how far it
+        # has read, so the few lines that must keep their order between the two (a session's lanes line, its bootstrap and its end)
+        # do: see _lane_loop and _run.
+        self._lane_thread, self._lane_alive, self._lane_failure = False, False, None
+        self._lane_pos = self._run_pos = 0
         self.status, self.error, self.seq, self.uploaded = 'starting', None, -1, None
         # A broker host with no session to join says so (date, session_status) and waits for the next trading day's.
         self.waiting: dict | None = None
@@ -322,6 +342,7 @@ class Feed:
         seconds is killed and its recording repaired and finalized as the session requested. A demo replay
         stops at once (a partial replay is never uploaded). Returns once the days are kept and uploaded."""
         self._closing = True
+        self._closed.set()
         if self._process.poll() is None and self._broker:
             # A control message works on Windows too, where terminate() cannot run the host's SIGTERM handler.
             with self._lanes_lock:
@@ -376,8 +397,11 @@ class Feed:
             return
         chunks: queue.Queue = queue.Queue(maxsize=64)   # at most 64 MB read ahead
         stop = threading.Event()
+        tap = queue.Queue() if self.gateway and self._lane_split else None   # the same chunks, for the lane thread
 
         def put(item):   # never stuck on a full queue once the feed has stopped reading
+            if tap is not None:
+                tap.put(item)
             while not stop.is_set():
                 try:
                     return chunks.put(item, timeout=0.1)
@@ -405,6 +429,9 @@ class Feed:
                 put(None)
 
         with ThreadPoolExecutor(PARSERS, thread_name_prefix='brisk-parse') as pool:
+            if tap is not None:
+                self._lane_thread = self._lane_alive = True
+                threading.Thread(target=self._lane_loop, args=(tap, stop), name='brisk-lane', daemon=True).start()
             threading.Thread(target=read, args=(pool,), name='brisk-read', daemon=True).start()
             try:
                 while (chunk := chunks.get()) is not None:
@@ -414,13 +441,70 @@ class Feed:
             finally:
                 stop.set()
 
+    def _lane_loop(self, tap, stop):
+        """Pass the fast lane's lines (and a session's lanes line) to the gateway as they are read, whatever the feed thread is
+        busy with: the recording's batches of a burst used to be passed first, and a quote on the lane was as old as that backlog.
+        Three kinds of line keep their place against the feed thread's: a lanes line comes after every line before it has been
+        passed on (sessions are moved between lanes as the earlier ones ended), a bootstrap after the feed thread published it
+        (the lane's quotes build on its state), and the feed thread waits at a bootstrap and an end for the quotes before them."""
+        index = 0
+
+        def until(done):
+            while not (done() or stop.is_set()):
+                time.sleep(0.0005)
+        try:
+            while not stop.is_set():
+                try:
+                    chunk = tap.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if chunk is None or isinstance(chunk, BaseException):
+                    return
+                for batch, line in chunk.result():
+                    kind = batch.get('type')
+                    if kind == 'lanes':
+                        self._lane_pos = index
+                        until(lambda at=index: self._run_pos >= at)
+                        self.gateway.lane(batch, line)
+                    elif batch.get('lane') == 'fast':
+                        self.gateway.lane(batch, line)
+                    elif kind == 'bootstrap':
+                        self._lane_pos = index
+                        until(lambda at=index: self._run_pos > at)
+                    index += 1
+                    self._lane_pos = index
+        except BaseException as error:  # noqa: BLE001 - the feed thread raises it
+            self._lane_failure = error
+        finally:
+            self._lane_alive = False
+
+    def _wait_lane(self, at):
+        """Until the lane thread has passed on every line before line `at`."""
+        while self._lane_pos < at and self._lane_alive:
+            time.sleep(0.0005)
+        if self._lane_failure:
+            raise self._lane_failure
+
     def _run(self):
-        spool, days, ended = None, 0, False
+        spool, days, ended, index = None, 0, False, 0
         try:
             for batch, line in self._lines():
-                if batch.get('lane') == 'fast' or batch.get('type') == 'lanes':  # out of band: the gateway's
+                at, index = index, index + 1
+                if self._lane_thread:   # the lane's lines are the lane thread's (_lane_loop)
+                    if self._lane_failure:
+                        raise self._lane_failure
+                    if batch.get('lane') == 'fast' or batch.get('type') == 'lanes':
+                        if batch.get('type') == 'lanes':
+                            self._run_pos = at + 1   # every line before it has been taken
+                        continue
+                    if batch.get('type') in ('bootstrap', 'end'):
+                        self._wait_lane(at)   # the lane's quotes before it first
+                elif batch.get('lane') == 'fast' or batch.get('type') == 'lanes':  # out of band: the gateway's
                     if self.gateway:
                         self.gateway.lane(batch, line)
+                    continue
+                if batch.get('type') == 'expired':   # out of band: the session ended while the host waited for the next day
+                    self._expired()
                     continue
                 if batch.get('type') == 'waiting':  # out of band, not a day's record: kept nowhere
                     with self._changed:
@@ -448,6 +532,8 @@ class Feed:
                 self._apply(batch, new_day=first and days > 1)
                 if self.gateway:
                     self.gateway.publish(batch, line, spool)
+                if first:
+                    self._run_pos = at + 1   # published: the lane's quotes of this session may follow
                 if ended:
                     self._worker.submit(self._finish_day, spool, self._stats)
                     spool, self._stats = None, None
@@ -473,6 +559,20 @@ class Feed:
             if self._stats and self.status in {'completed', 'closed'}:
                 self.timing_uploaded = self._upload_timing(self._stats)
             self._worker.shutdown(wait=True)  # finished recordings are still kept and uploaded
+
+    def _expired(self):
+        """The host's session expired while it waited for the next trading day (the brokers end their sessions at 05:00):
+        sign in again where that can be done without a person (`relogin`), on a thread of its own: the host reads the
+        cookies it saves, and goes on."""
+        if self._relogin is None or self._closing:
+            return
+
+        def run():
+            try:
+                self._relogin(self._closed)
+            except Exception as error:  # noqa: BLE001 - the host goes on waiting for cookies whatever happens here
+                print(f'[brisk] signing in again failed: {error}', file=sys.stderr, flush=True)
+        threading.Thread(target=run, name='brisk-login', daemon=True).start()
 
     def _apply(self, batch, new_day=False):
         quotes = batch.get('quotes', ())
@@ -548,6 +648,8 @@ class Feed:
                 spool.remove()
                 continue
             for result in self._finish_segment(spool, None, upload=upload, output=output, repair=True):
+                if not _made(result):   # no update had come: there was nothing to repair
+                    continue
                 where = ('uploaded' if _stored(result) else 'not uploaded') + (f', kept in {result["path"]}' if result['path'] else '')
                 warnings.warn(f'A feed that stopped unexpectedly left {result["name"] or spool.path} behind: '
                               + ('repaired with its end and ' if result['repaired'] else '') + where)
@@ -562,6 +664,8 @@ class Feed:
         for result in results:
             self._report(result)
         last = results[-1]
+        if not _made(last):   # no update had come: there was nothing to repair
+            return
         warnings.warn(f'The day ended early without its end: {last["name"] or spool.path} was repaired with one'
                       + (' and uploaded' if _stored(last) else ''))
 
@@ -623,7 +727,10 @@ class Feed:
         save = cli.saving(lambda: _saving_label(spool))   # says nothing until a piece is being packaged
         shutil.rmtree(package, ignore_errors=True)
         try:
+            left = len(spool.skipped)
             shipped = spool.ship(package, final=final, repair=repair, progress=save.packaging)
+            for first, last in spool.skipped[left:]:   # a piece the stream sent no update to: there is nothing to save
+                cli.saving(lambda first=first: _saving_label(spool, first)).empty(_hms(last))
             if shipped is None:
                 return None
             m, result['repaired'] = shipped
