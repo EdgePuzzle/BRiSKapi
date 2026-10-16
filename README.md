@@ -296,8 +296,8 @@ once that day has begun (`feed.status` is `"waiting"` meanwhile). Brokers end th
 feed that waits overnight keeps waiting once its session has expired (it says `the session has expired; waiting for
 new cookies`) and takes up the cookies of a `brisk login` you make after, with no restart. If a passkey is saved
 for that broker (`brisk enroll`), the feed signs in again itself, as `brisk login` does (Chrome opens): up to four tries
-over the next hour and forty minutes, then it leaves it to you. A saved passkey is one broker's, so a feed for
-another broker, or with no passkey, says how to sign in. `output=DIR` (`briskapi.connect(output=...)`, `brisk live --output DIR`)
+over the next hour and forty minutes, then it leaves it to you. Each broker has a passkey of its own, so with two
+brokers' feeds each signs in with its own; a feed whose broker has none says how to sign in. `output=DIR` (`briskapi.connect(output=...)`, `brisk live --output DIR`)
 also keeps each recording in DIR, in a folder named
 `SITE_YYYYMMDD_FROM-TO` (its broker's site and its first and last source clock, JST HHMMSS), such as
 `sbi_20261013_085800-113000`; every broker's recordings are the same source, `brisk_live`, as all carry BRiSK's
@@ -395,8 +395,8 @@ without asking. The broker's site cannot tell the difference.
    page (a temporary profile, not your everyday Chrome). Sign in as you normally would, then
    register a new passkey in the broker's security settings, just as you would for a new phone.
    The virtual authenticator receives it. When the site says it is registered, press Enter in
-   the terminal: `briskapi` saves the passkey and your broker choice in the macOS Keychain or Windows Credential
-   Manager, and Chrome closes.
+   the terminal: `briskapi` saves the passkey, under that broker's name, in the macOS Keychain or Windows Credential
+   Manager, and Chrome closes. (A single passkey saved by an earlier version is moved to its broker's name the first time it is read.)
    At e-shiten, `enroll` first asks for your user ID, because its passkey form wants the ID before
    the passkey; it is saved with the passkey. The window opens at e-shiten's usual sign-in (user ID,
    PIN and phone-number authentication), and the passkey is registered on the screen shown after
@@ -418,8 +418,8 @@ lists one more passkey, which you can delete in its security settings.
   further check. It is kept only in the Keychain or Credential Manager (`BRISK_PASSKEY_STORE=file` keeps it in an
   owner-only file instead, which is weaker; on Windows that file's privacy comes from your user
   profile folder, which only you and administrators can read), never leaves your machine and is never shown in a
-  log. For e-shiten your user ID is kept with it, in the same place. `brisk forget` deletes it here; remove
-  it at the broker too.
+  log. For e-shiten your user ID is kept with it, in the same place. `brisk forget` deletes it here (with
+  several saved, `--site` says which); remove it at the broker too.
 - **It is experimental.** Each broker's login page, passkey button text and BRiSK launch come from
   its public pages, and none has been tried against a live account. Override them with
   `--login-url`, `--passkey-button` and `--launch-url`, or in `sites.json` below, and please report
@@ -431,14 +431,18 @@ lists one more passkey, which you can delete in its security settings.
 
 ```sh
 brisk sites                    # the brokers you can pick, and where their BRiSK lives
-brisk enroll [--site matsui]   # once; you are asked to choose a broker if you don't say
-brisk login                    # each session; the broker is the one you enrolled with
-brisk forget                   # delete the saved passkey
+brisk enroll [--site matsui]   # once for each broker; you are asked to choose one if you don't say
+brisk login [--site matsui]    # each session; --site when passkeys are saved for more than one broker
+brisk forget [--site matsui]   # delete a saved passkey
 ```
 
+Each broker keeps its own passkey, so enrolling a second broker leaves the first alone (`--replace` is for
+enrolling the same broker again). With only one enrolled, `brisk login` and `brisk forget` need no `--site`.
+
 From Python: `passkey.enroll(site="matsui")` (for e-shiten, `passkey.enroll(site="e-shiten", user_id="...")`)
-and `signin = passkey.login()`, where `signin.cookies` are the BRiSK cookies and `signin.client` is the data
-client for sites that have one.
+and `signin = passkey.login()` (`passkey.login(site="matsui")` when several are saved), where `signin.cookies` are the
+BRiSK cookies and `signin.client` is the data client for sites that have one. Two sign-ins at once (two feeds meeting their
+expired sessions together) go one after the other, each with its own Chrome.
 
 To add a broker, or correct a built-in one, edit `~/.config/brisk/sites.json`:
 

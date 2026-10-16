@@ -273,9 +273,17 @@ def helper(tmp_path, monkeypatch):
     return scenario
 
 
+def keeper(tmp_path):
+    """Passkeys that keep each broker's login in a file of its own in tmp_path (<site>.json; passkey.json, the place before each had its own)."""
+    return passkey.Passkeys(lambda site: passkey.FileStore(tmp_path / (f'{site}.json' if site else 'passkey.json')))
+
+
 def saved(tmp_path, record=RECORD):
-    store = passkey.FileStore(tmp_path / 'store.json')
-    store.save(record)
+    store = keeper(tmp_path)
+    if isinstance(record, dict) and isinstance(record.get('site'), str) and isinstance(record.get('credential'), dict):
+        store.save(record['site'], record)
+    else:   # no broker to keep it for: as the old single place had it
+        passkey.FileStore(tmp_path / 'passkey.json').save(record)
     return store
 
 
@@ -304,7 +312,7 @@ def test_login_signs_in_saves_the_advanced_passkey_and_uses_the_cookies(tmp_path
     store = saved(tmp_path)
     signin = passkey.login(store=store, login_url='https://x.example/login', launch_url='https://x.example/brisk',
                            passkey_button='Passkey', headless=True, chrome=Path('/opt/chrome'), profile_dir=tmp_path / 'profile')
-    assert store.load() == {'site': 'sbi', 'credential': {**PASSKEY, 'signCount': 5}}, 'the sign counter must be saved'
+    assert store.load('sbi') == {'site': 'sbi', 'credential': {**PASSKEY, 'signCount': 5}}, 'the sign counter must be saved'
     assert signin.site.id == 'sbi' and signin.cookies == {'session_x': 'cookie-value', 'other': 'o'}
     assert signin.client.session.cookies == signin.cookies and brisk._default() is signin.client
     seen = json.loads(log.read_text(encoding='utf-8'))
@@ -331,7 +339,7 @@ def test_the_site_supplies_the_defaults_and_the_chosen_site_is_remembered(tmp_pa
     assert (request['loginUrl'], request['cookieHost'], request['passkeyButton'], request['cookiePrefix']) == (
         matsui.login_url, 'matsui.brisk.jp', 'パスキーでログイン', '')
     assert 'launchUrl' not in request and 'chrome' not in request and 'headless' not in request
-    assert store.load()['site'] == 'matsui'
+    assert store.load('matsui')['site'] == 'matsui'
 
 
 def test_a_site_without_a_data_client_keeps_its_cookies_in_a_file_and_leaves_the_sbi_client_alone(tmp_path, helper):
@@ -366,7 +374,7 @@ def test_cookies_of_another_site_are_never_given_to_the_sbi_client(tmp_path, hel
         with pytest.raises(passkey.PasskeyError, match=r'never given to the SBI BRiSK client, which only talks to sbi\.brisk\.jp'):
             passkey.login(store=store, sites_file=edited)
     assert not log.exists(), 'the refusal must come before Chrome is started'
-    assert store.load() == RECORD, 'no sign-in happened, so the counter is unchanged'
+    assert store.load('sbi') == RECORD, 'no sign-in happened, so the counter is unchanged'
     assert brisk._client is None
 
 
@@ -382,7 +390,7 @@ def test_e_shiten_signs_in_with_the_saved_user_id_and_its_data_client_gets_the_c
     assert (request['loginUrl'], request['passkeyButton'], request['userField'], request['userId'], request['cookieHost'],
             request['cookiePrefix']) == (eshiten.login_url, 'パスキーを使う', 'input[name="kokyakuUserId"]', 'abc123',
                                          'next.e-shiten.brisk.jp', 'session_')
-    assert store.load() == {**ESHITEN, 'credential': {**PASSKEY, 'signCount': 5}}, 'saving the counter must keep the user ID'
+    assert store.load('e-shiten') == {**ESHITEN, 'credential': {**PASSKEY, 'signCount': 5}}, 'saving the counter must keep the user ID'
     assert signin.client.site == 'e-shiten' and signin.client.session.origin == 'https://next.e-shiten.brisk.jp'
     assert brisk._default() is signin.client
     assert signin.saved_to == brisk.cookies_path('e-shiten') and not brisk.cookies_path('sbi').exists()
@@ -397,11 +405,13 @@ def test_a_site_without_a_user_id_box_is_sent_none_and_a_missing_user_id_stops_b
     assert 'userField' not in request and 'userId' not in request
     log.unlink()
     store = saved(tmp_path, {'site': 'e-shiten', 'credential': PASSKEY})
-    with pytest.raises(passkey.PasskeyError, match=r"Tachibana e-shiten's passkey sign-in asks for your user ID.*brisk enroll --replace"):
-        passkey.login(store=store)
+    with pytest.raises(passkey.PasskeyError, match=r'Passkeys are saved for sbi, e-shiten: choose one with --site'):
+        passkey.login(store=store)   # two brokers have one: which is for the person to say
+    with pytest.raises(passkey.PasskeyError, match=r"Tachibana e-shiten's passkey sign-in asks for your user ID.*brisk enroll --site e-shiten --replace"):
+        passkey.login(store=store, site='e-shiten')
     assert not log.exists()
     with pytest.raises(passkey.PasskeyError, match='unknown format'):
-        passkey.login(store=saved(tmp_path, {**ESHITEN, 'user_id': 123}))
+        passkey.login(store=saved(tmp_path / 'odd', {**ESHITEN, 'user_id': 123}))
 
 
 def test_cookies_of_another_site_are_never_given_to_the_e_shiten_client(tmp_path, helper):
@@ -413,7 +423,7 @@ def test_cookies_of_another_site_are_never_given_to_the_e_shiten_client(tmp_path
         with pytest.raises(passkey.PasskeyError,
                            match=r'never given to the e-shiten BRiSK Next client, which only talks to next\.e-shiten\.brisk\.jp'):
             passkey.login(store=store, sites_file=edited)
-    assert not log.exists() and store.load() == ESHITEN and brisk._client is None
+    assert not log.exists() and store.load('e-shiten') == ESHITEN and brisk._client is None
 
 
 def test_non_ascii_text_from_the_helper_is_read_as_utf_8_whatever_the_system_code_page(tmp_path, helper):
@@ -421,7 +431,7 @@ def test_non_ascii_text_from_the_helper_is_read_as_utf_8_whatever_the_system_cod
     helper('japanese')
     store = saved(tmp_path)
     passkey.login(store=store, remember=False)
-    assert store.load()['credential']['userName'] == '取引 太郎'
+    assert store.load('sbi')['credential']['userName'] == '取引 太郎'
 
 
 def test_stray_helper_output_is_ignored(tmp_path, helper):
@@ -434,7 +444,7 @@ def test_a_refused_login_is_an_error_but_the_passkey_counter_is_still_saved(tmp_
     store = saved(tmp_path)
     with pytest.raises(passkey.PasskeyError, match='The login was refused'):
         passkey.login(store=store)
-    assert store.load()['credential']['signCount'] == 5
+    assert store.load('sbi')['credential']['signCount'] == 5
     assert brisk._client is None
 
 
@@ -443,7 +453,7 @@ def test_a_helper_that_dies_is_reported_and_its_last_passkey_is_kept(tmp_path, h
     store = saved(tmp_path)
     with pytest.raises(passkey.PasskeyError, match=r'stopped unexpectedly \(exit 3\)'):
         passkey.login(store=store)
-    assert store.load()['credential']['signCount'] == 5
+    assert store.load('sbi')['credential']['signCount'] == 5
     helper('early-exit')
     with pytest.raises(passkey.PasskeyError, match=r'stopped unexpectedly \(exit 4\)'):
         passkey.login(store=store)
@@ -453,10 +463,13 @@ def test_if_the_passkey_cannot_be_saved_the_helper_is_stopped(helper):
     log = helper('hang')
 
     class Broken:
-        def load(self):
+        def enrolled(self, sites_file=None):
+            return ['sbi']
+
+        def load(self, site):
             return RECORD
 
-        def save(self, record):
+        def save(self, site, record):
             raise passkey.PasskeyError('Keychain is locked')
 
     with pytest.raises(passkey.PasskeyError, match='Keychain is locked'):
@@ -468,10 +481,13 @@ def test_a_helper_that_understands_a_closed_stdin_is_stopped_gracefully(helper):
     log = helper('eof-aware')
 
     class Broken:
-        def load(self):
+        def enrolled(self, sites_file=None):
+            return ['sbi']
+
+        def load(self, site):
             return RECORD
 
-        def save(self, record):
+        def save(self, site, record):
             raise passkey.PasskeyError('Keychain is locked')
 
     with pytest.raises(passkey.PasskeyError, match='Keychain is locked'):
@@ -482,71 +498,76 @@ def test_a_helper_that_understands_a_closed_stdin_is_stopped_gracefully(helper):
 
 def test_login_needs_a_usable_saved_login_and_node(tmp_path, helper):
     with pytest.raises(passkey.PasskeyError, match='Run `brisk enroll` first'):
-        passkey.login(store=passkey.FileStore(tmp_path / 'none.json'))
-    for odd in ({'credential': PASSKEY}, {'site': 'sbi'}, PASSKEY, ['x']):
+        passkey.login(store=keeper(tmp_path))
+    for number, odd in enumerate(({'credential': PASSKEY}, {'site': 'sbi'}, PASSKEY, ['x'])):
         with pytest.raises(passkey.PasskeyError, match=r'unknown format; run `brisk enroll --replace`'):
-            passkey.login(store=saved(tmp_path, odd))
+            passkey.login(store=saved(tmp_path / f'odd{number}', odd))
+    with pytest.raises(passkey.PasskeyError, match='No passkey is saved for monex. Run `brisk enroll --site monex` first'):
+        passkey.login(store=saved(tmp_path), site='monex')
     with pytest.raises(sites.SiteError, match="Unknown site 'gone'"):
-        passkey.login(store=saved(tmp_path, {'site': 'gone', 'credential': PASSKEY}))
+        passkey.login(store=saved(tmp_path / 'gone', {'site': 'gone', 'credential': PASSKEY}), site='gone')
     for call in (lambda: passkey.login(store=saved(tmp_path), node=str(tmp_path / 'missing')),
-                 lambda: passkey.enroll(site='sbi', store=passkey.FileStore(tmp_path / 'e.json'), node=str(tmp_path / 'missing'))):
+                 lambda: passkey.enroll(site='sbi', store=keeper(tmp_path / 'e'), node=str(tmp_path / 'missing'))):
         with pytest.raises(briskapi.BriskError, match='not found'):
             call()
 
 
 def test_enroll_saves_the_chosen_site_with_the_final_passkey_after_the_user_confirms(tmp_path, helper):
     log = helper('enroll-ok')
-    store = passkey.FileStore(tmp_path / 'store.json')
+    store = keeper(tmp_path)
     confirmed = []
     summary = passkey.enroll(site='matsui', store=store, confirm=lambda: confirmed.append(True))
     assert confirmed == [True]
     assert Path(str(log) + '.done').exists(), 'the helper must be told when to close Chrome'
-    record = store.load()
+    record = store.load('matsui')
     assert record['site'] == 'matsui' and record['credential']['signCount'] == 2 and record['credential']['privateKey'] == 'PRIV-NEW'
-    assert summary == {'site': 'matsui', 'rp_id': 'sbisec.co.jp', 'user_name': 'trader', 'stored_in': str(store.path)}
+    assert summary == {'site': 'matsui', 'rp_id': 'sbisec.co.jp', 'user_name': 'trader', 'stored_in': str(tmp_path / 'matsui.json')}
     assert 'PRIV' not in json.dumps(summary)
     seen = json.loads(log.read_text(encoding='utf-8'))
     assert seen['argv'] == ['enroll'] and seen['request']['loginUrl'] == sites.BUILTIN['matsui'].login_url
-    passkey.enroll(site='sbi', store=store, confirm=lambda: None, replace=True, login_url='https://x.example/start')
+    passkey.enroll(site='sbi', store=store, confirm=lambda: None, login_url='https://x.example/start')
     assert json.loads(log.read_text(encoding='utf-8'))['request']['loginUrl'] == 'https://x.example/start'
+    assert store.enrolled() == ['sbi', 'matsui'], 'each broker keeps its own: enrolling another leaves matsui\'s alone'
+    passkey.enroll(site='matsui', store=store, confirm=lambda: None, replace=True, login_url='https://x.example/again')
+    assert json.loads(log.read_text(encoding='utf-8'))['request']['loginUrl'] == 'https://x.example/again'
 
 
 def test_enroll_asks_which_broker_when_no_site_is_given(tmp_path, helper):
     log = helper('enroll-ok')
-    store = passkey.FileStore(tmp_path / 'store.json')
+    store = keeper(tmp_path)
     asked = []
     passkey.enroll(store=store, confirm=lambda: None, choose=lambda found: asked.append(list(found)) or 'smbcnikko')
-    assert asked == [['sbi', 'matsui', 'monex', 'smbcnikko', 'e-shiten']] and store.load()['site'] == 'smbcnikko'
-    store.delete()
+    assert asked == [['sbi', 'matsui', 'monex', 'smbcnikko', 'e-shiten']] and store.load('smbcnikko')['site'] == 'smbcnikko'
+    store.delete('smbcnikko')
     log.unlink()
     with pytest.raises(passkey.PasskeyError, match=r'Choose your broker with --site \(see `brisk sites`\)'):
         passkey.enroll(store=store)  # no terminal in the tests, so it cannot ask
     with pytest.raises(sites.SiteError, match="Unknown site 'nowhere'"):
         passkey.enroll(site='nowhere', store=store)
-    assert not log.exists() and store.load() is None
+    assert not log.exists() and store.enrolled() == []
 
 
 def test_enroll_at_e_shiten_starts_at_its_first_sign_in_and_keeps_the_user_id_with_the_passkey(tmp_path, helper):
     log = helper('enroll-ok')
-    store = passkey.FileStore(tmp_path / 'store.json')
+    store = keeper(tmp_path)
     summary = passkey.enroll(site='e-shiten', store=store, confirm=lambda: None, user_id=' abc123 ')
-    record = store.load()
+    record = store.load('e-shiten')
     assert record == {'site': 'e-shiten', 'user_id': 'abc123', 'credential': {**record['credential'], 'signCount': 2}}
     assert 'abc123' not in json.dumps(summary)
     request = json.loads(log.read_text(encoding='utf-8'))['request']
     assert request['loginUrl'] == 'https://tr2.e-shiten.jp/e-shiten' and 'userId' not in request, 'enrolling is done by hand'
     passkey.enroll(site='e-shiten', store=store, confirm=lambda: None, user_id='abc123', replace=True, login_url='https://x.example/')
     assert json.loads(log.read_text(encoding='utf-8'))['request']['loginUrl'] == 'https://x.example/'
-    store.delete()
+    store.delete('e-shiten')
     log.unlink()
     for bad in ('', '  ', 'a\nb', 'x' * 101):
         with pytest.raises(passkey.PasskeyError, match='one line of text'):
             passkey.enroll(site='e-shiten', store=store, confirm=lambda: None, user_id=bad)
     with pytest.raises(passkey.PasskeyError, match=r"asks for your user ID: pass user_id= or enroll from a terminal"):
         passkey.enroll(site='e-shiten', store=store, confirm=lambda: None)  # no terminal in the tests, so it cannot ask
-    assert not log.exists() and store.load() is None, 'nothing starts without the user ID'
+    assert not log.exists() and store.load('e-shiten') is None, 'nothing starts without the user ID'
     passkey.enroll(site='sbi', store=store, confirm=lambda: None, user_id='ignored')
-    assert 'user_id' not in store.load(), 'a site without a user ID box keeps none'
+    assert 'user_id' not in store.load('sbi'), 'a site without a user ID box keeps none'
 
 
 def test_the_user_id_is_asked_on_stderr(monkeypatch, capsys):
@@ -571,26 +592,28 @@ def test_enroll_does_not_replace_a_working_passkey_unless_asked_or_until_it_succ
     store = saved(tmp_path)
     with pytest.raises(passkey.PasskeyError, match=r'A passkey for sbi is already saved. Use --replace'):
         passkey.enroll(site='sbi', store=store, confirm=lambda: None)
-    assert store.load() == RECORD
+    assert store.load('sbi') == RECORD
     helper('enroll-refused')
     with pytest.raises(passkey.PasskeyError, match='No registration happened'):
         passkey.enroll(site='sbi', store=store, confirm=lambda: None, replace=True)
-    assert store.load() == RECORD, 'a failed enrollment must leave the old passkey alone'
+    assert store.load('sbi') == RECORD, 'a failed enrollment must leave the old passkey alone'
     helper('enroll-empty')
     with pytest.raises(passkey.PasskeyError, match='No passkey was captured'):
         passkey.enroll(site='sbi', store=store, confirm=lambda: None, replace=True)
     helper('enroll-ok')
-    passkey.enroll(site='monex', store=store, confirm=lambda: None, replace=True)
-    assert store.load()['site'] == 'monex' and store.load()['credential']['privateKey'] == 'PRIV-NEW'
+    passkey.enroll(site='sbi', store=store, confirm=lambda: None, replace=True)
+    assert store.load('sbi')['credential']['privateKey'] == 'PRIV-NEW'
+    passkey.enroll(site='monex', store=store, confirm=lambda: None)   # another broker needs no replace, and leaves sbi's alone
+    assert store.load('monex')['site'] == 'monex' and store.load('sbi')['credential']['privateKey'] == 'PRIV-NEW'
 
 
 def test_enroll_waits_for_a_person_and_stops_chrome_when_there_is_none(tmp_path, helper, monkeypatch):
     log = helper('enroll-ok')
-    store = passkey.FileStore(tmp_path / 'store.json')
+    store = keeper(tmp_path)
     monkeypatch.setattr(passkey.sys, 'stdin', type('NoTty', (), {'isatty': lambda self: False})())
     with pytest.raises(passkey.PasskeyError, match='needs an interactive terminal'):
         passkey.enroll(site='sbi', store=store)
-    assert store.load() is None
+    assert store.load('sbi') is None
     wait_gone(json.loads(log.read_text(encoding='utf-8'))['pid'])
 
 
@@ -604,8 +627,144 @@ def test_confirm_prompts_on_stderr_and_waits_for_enter(monkeypatch, capsys):
 
 def test_forget_deletes_the_saved_login(tmp_path):
     store = saved(tmp_path)
-    passkey.forget(store)
-    assert store.load() is None
+    assert passkey.forget(store=store) == 'sbi'
+    assert store.load('sbi') is None and passkey.forget(store=store) is None
+
+
+def test_each_broker_has_a_store_of_its_own_on_every_platform(monkeypatch, tmp_path):
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+    monkeypatch.delenv('BRISK_PASSKEY_STORE', raising=False)
+    monkeypatch.setattr(passkey.sys, 'platform', 'darwin')
+    sbi, eshiten, old = passkey.default_store('sbi'), passkey.default_store('e-shiten'), passkey.default_store()
+    assert [(s.service, s.account) for s in (sbi, eshiten, old)] == [(passkey.SERVICE, 'sbi'), (passkey.SERVICE, 'e-shiten'),
+                                                                     (passkey.SERVICE, 'default')]
+    monkeypatch.setattr(passkey.sys, 'platform', 'win32')
+    assert passkey.default_store('sbi').target == 'briskapi-brisk-passkey-sbi' and passkey.default_store().target == 'briskapi-brisk-passkey'
+    monkeypatch.setenv('BRISK_PASSKEY_STORE', 'file')
+    assert passkey.default_store('sbi').path == tmp_path / 'brisk' / 'passkey-sbi.json'
+    assert passkey.default_store().path == tmp_path / 'brisk' / 'passkey.json'
+    for bad in ('../x', 'SBI', '', 'a b', 'x/y'):
+        with pytest.raises(passkey.PasskeyError, match='Not a broker id'):
+            passkey.default_store(bad)
+        with pytest.raises(passkey.PasskeyError, match='Not a broker id'):
+            passkey.Passkeys(lambda site: passkey.FileStore(tmp_path / 'x.json')).load(bad)
+
+
+def test_passkeys_of_several_brokers_sit_side_by_side_and_each_is_found_by_its_site(tmp_path):
+    store = keeper(tmp_path)
+    assert store.enrolled() == [] and store.load('sbi') is None
+    store.save('monex', {**RECORD, 'site': 'monex'})
+    store.save('sbi', RECORD)
+    assert store.enrolled() == ['sbi', 'monex'], 'in the order `brisk sites` lists them'
+    assert store.load('sbi') == RECORD and store.load('monex')['site'] == 'monex'
+    assert store.description('sbi') == str(tmp_path / 'sbi.json')
+    store.delete('sbi')
+    assert store.enrolled() == ['monex'] and store.load('sbi') is None
+    with pytest.raises(passkey.PasskeyError, match='unknown format'):
+        passkey.FileStore(tmp_path / 'matsui.json').save({'site': 'matsui'})
+        store.load('matsui')
+
+
+def test_a_login_saved_before_each_broker_had_its_own_moves_to_its_broker(tmp_path):
+    passkey.FileStore(tmp_path / 'passkey.json').save({'site': 'matsui', 'credential': PASSKEY})
+    store = keeper(tmp_path)
+    assert store.enrolled() == ['matsui']
+    assert store.load('matsui') == {'site': 'matsui', 'credential': PASSKEY}
+    assert not (tmp_path / 'passkey.json').exists() and (tmp_path / 'matsui.json').exists()
+    store.save('sbi', RECORD)
+    assert keeper(tmp_path).enrolled() == ['sbi', 'matsui'], 'and it stays moved'
+
+
+def test_an_old_login_for_a_broker_that_has_its_own_is_dropped_and_one_that_cannot_move_is_still_read(tmp_path):
+    passkey.FileStore(tmp_path / 'passkey.json').save({'site': 'sbi', 'credential': {**PASSKEY, 'signCount': 1}})
+    passkey.FileStore(tmp_path / 'sbi.json').save({'site': 'sbi', 'credential': {**PASSKEY, 'signCount': 9}})
+    assert keeper(tmp_path).load('sbi')['credential']['signCount'] == 9, 'the broker\'s own is the newer'
+    assert not (tmp_path / 'passkey.json').exists()
+
+    class CannotSave(passkey.FileStore):
+        def save(self, record):
+            raise passkey.PasskeyError('Keychain is locked')
+    other = tmp_path / 'other'
+    passkey.FileStore(other / 'passkey.json').save({'site': 'monex', 'credential': PASSKEY})
+    stuck = passkey.Passkeys(lambda site: CannotSave(other / (f'{site}.json' if site else 'passkey.json')))
+    assert stuck.load('monex') == {'site': 'monex', 'credential': PASSKEY} and stuck.enrolled() == ['monex']
+    assert (other / 'passkey.json').exists(), 'it stays where it was'
+    assert keeper(other).enrolled() == ['monex'] and not (other / 'passkey.json').exists(), 'and moves when it can'
+    # saving the broker's own login replaces an old one that could not be moved
+    again = tmp_path / 'again'
+    passkey.FileStore(again / 'passkey.json').save({'site': 'monex', 'credential': PASSKEY})
+    half = passkey.Passkeys(lambda site: passkey.FileStore(again / (f'{site}.json' if site else 'passkey.json')))
+    half._migrated, half._legacy = True, {'site': 'monex', 'credential': PASSKEY}   # as after a move that failed
+    half.save('monex', {'site': 'monex', 'credential': {**PASSKEY, 'signCount': 3}})
+    assert not (again / 'passkey.json').exists() and half.load('monex')['credential']['signCount'] == 3
+    half._legacy = {'site': 'monex', 'credential': PASSKEY}
+    passkey.FileStore(again / 'passkey.json').save({'site': 'monex', 'credential': PASSKEY})
+    half.delete('monex')
+    assert not (again / 'passkey.json').exists() and half.load('monex') is None
+
+
+def test_login_and_forget_say_which_broker_when_more_than_one_has_a_passkey(tmp_path, helper):
+    helper('login-ok')
+    store = saved(tmp_path)
+    store.save('monex', {**RECORD, 'site': 'monex'})
+    with pytest.raises(passkey.PasskeyError, match='Passkeys are saved for sbi, monex: choose one with --site'):
+        passkey.login(store=store)
+    with pytest.raises(passkey.PasskeyError, match='Passkeys are saved for sbi, monex: choose one with --site'):
+        passkey.forget(store=store)
+    assert passkey.forget(site='monex', store=store) == 'monex' and store.enrolled() == ['sbi']
+    assert passkey.login(store=store, remember=False).site.id == 'sbi', 'with one left, it is the one'
+    assert passkey.login(store=store, remember=False, site='sbi').site.id == 'sbi'
+
+
+def test_signing_in_takes_this_computers_passkey_lock_and_gives_it_back(tmp_path, helper, monkeypatch):
+    helper('login-ok')
+    held = []
+
+    @passkey.contextmanager
+    def spy(path=None, poll=0.2):
+        held.append('taken')
+        try:
+            yield
+        finally:
+            held.append('given back')
+    monkeypatch.setattr(passkey, '_one_at_a_time', spy)
+    passkey.login(store=saved(tmp_path), remember=False)
+    assert held == ['taken', 'given back']
+
+
+def test_two_sign_ins_go_one_after_the_other(tmp_path):
+    import threading
+    import time
+    lock, order, inside, release = tmp_path / 'config' / 'passkey.lock', [], threading.Event(), threading.Event()
+
+    def first():
+        with passkey._one_at_a_time(lock, poll=0.01):
+            order.append('first in')
+            inside.set()
+            release.wait(10)
+            order.append('first out')
+
+    def second():
+        inside.wait(10)
+        with passkey._one_at_a_time(lock, poll=0.01):
+            order.append('second in')
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for thread in threads:
+        thread.start()
+    inside.wait(10)
+    time.sleep(0.3)
+    assert order == ['first in'], 'the second waits'
+    release.set()
+    for thread in threads:
+        thread.join(10)
+    assert order == ['first in', 'first out', 'second in']
+    with passkey._one_at_a_time(lock):   # given back, though the first left by the door
+        pass
+    with pytest.raises(RuntimeError):
+        with passkey._one_at_a_time(lock):
+            raise RuntimeError('a sign-in that failed')
+    with passkey._one_at_a_time(lock):
+        pass
 
 
 def test_nothing_in_the_brisk_module_is_about_passkeys():
@@ -631,7 +790,8 @@ def test_cli_sites_lists_the_built_ins_and_your_own(tmp_path, capsys):
 def test_cli_enroll_login_and_forget(monkeypatch, capsys):
     calls = []
     sbi_site, matsui_site = sites.BUILTIN['sbi'], sites.BUILTIN['matsui']
-    results = iter([passkey.SignIn(sbi_site, {}, object(), Path('/c/sbi-cookies.json')), passkey.SignIn(matsui_site, {}, None, None)])
+    results = iter([passkey.SignIn(sbi_site, {}, object(), Path('/c/sbi-cookies.json')), passkey.SignIn(matsui_site, {}, None, None),
+                    passkey.SignIn(matsui_site, {}, None, None)])
     monkeypatch.setattr(passkey, 'enroll', lambda **kw: calls.append(('enroll', kw)) or {'site': 'matsui', 'stored_in': 'kc'})
     monkeypatch.setattr(passkey, 'login', lambda **kw: calls.append(('login', kw)) or next(results))
     monkeypatch.setattr(passkey, 'forget', lambda **kw: calls.append(('forget', kw)))
@@ -643,16 +803,23 @@ def test_cli_enroll_login_and_forget(monkeypatch, capsys):
     capsys.readouterr()
     cli.main(['login'])
     assert calls[-1] == ('login', {'remember': True, 'login_url': None, 'launch_url': None, 'passkey_button': None, 'chrome': None,
-                                   'profile_dir': None, 'headless': False})
+                                   'profile_dir': None, 'headless': False, 'site': None})
     err = capsys.readouterr().err
     assert f'Signed in to SBI Securities; session cookies saved to {Path("/c/sbi-cookies.json")}.' in err and 'no data client' not in err
     cli.main(['login', '--no-remember', '--headless', '--launch-url', 'https://b/', '--passkey-button', 'Passkey'])
     assert calls[-1][1]['remember'] is False and calls[-1][1]['headless'] is True and calls[-1][1]['launch_url'] == 'https://b/'
     err = capsys.readouterr().err
     assert 'Signed in to Matsui Securities; session cookies not saved.' in err and 'no data client for this site yet' in err
+    cli.main(['login', '--site', 'e-shiten'])
+    assert calls[-1][1]['site'] == 'e-shiten'
+    capsys.readouterr()
     cli.main(['forget'])
-    assert calls[-1] == ('forget', {})
+    assert calls[-1] == ('forget', {'site': None})
     assert 'stays registered at your broker' in capsys.readouterr().err
+    monkeypatch.setattr(passkey, 'forget', lambda **kw: calls.append(('forget', kw)) or kw['site'])
+    cli.main(['forget', '--site', 'sbi'])
+    assert calls[-1] == ('forget', {'site': 'sbi'})
+    assert 'Passkey for sbi deleted here' in capsys.readouterr().err
 
 
 def test_no_command_names_a_broker(capsys):
@@ -719,10 +886,10 @@ def test_full_stack_a_site_you_define_enroll_then_login(tmp_path):
         main = broker.origins['mainOrigin']
         define(tmp_path, {'id': 'fake', 'name': 'Fake Broker', 'login_url': main + '/login', 'cookie_host': 'brisk.localhost',
                           'passkey_button': 'パスキー認証でログイン', 'cookie_prefix': 'session_'})
-        store = passkey.FileStore(tmp_path / 'passkey.json')
+        store = keeper(tmp_path)
         summary = passkey.enroll(site='fake', store=store, login_url=main + '/enroll', headless=True, confirm=broker.registered)
         assert summary['site'] == 'fake' and summary['rp_id'] == 'main.localhost'
-        enrolled = store.load()['credential']
+        enrolled = store.load('fake')['credential']
         assert enrolled['privateKey'] and enrolled['isResidentCredential'] is True
 
         signin = passkey.login(store=store, headless=True)
@@ -731,8 +898,8 @@ def test_full_stack_a_site_you_define_enroll_then_login(tmp_path):
         assert signin.cookies['session_fake'] == seen['briskCookieValue'] and 'main_session' not in signin.cookies
         assert json.loads(signin.saved_to.read_text(encoding='utf-8')) == signin.cookies and signin.saved_to.name == 'fake.json'
         assert seen['accepted'] == 1
-        assert store.load()['credential']['signCount'] > enrolled['signCount']
-        assert store.load()['credential']['signCount'] == seen['counter'], 'the saved counter must be the one the site last saw'
+        assert store.load('fake')['credential']['signCount'] > enrolled['signCount']
+        assert store.load('fake')['credential']['signCount'] == seen['counter'], 'the saved counter must be the one the site last saw'
 
         again = passkey.login(store=store, headless=True, remember=False)
         assert broker.state()['accepted'] == 2 and again.cookies['session_fake'] == broker.state()['briskCookieValue']
@@ -744,7 +911,7 @@ def test_full_stack_sbi_signs_in_and_its_data_client_gets_the_cookies(tmp_path, 
     with FakeBroker() as broker:
         main = broker.origins['mainOrigin']
         define(tmp_path, {'id': 'sbi', 'login_url': main + '/login', 'cookie_host': 'brisk.localhost'})
-        store = passkey.FileStore(tmp_path / 'passkey.json')
+        store = keeper(tmp_path)
         passkey.enroll(site='sbi', store=store, login_url=main + '/enroll', headless=True, confirm=broker.registered)
         signin = passkey.login(store=store, headless=True)
         assert signin.site.id == 'sbi' and brisk._default() is signin.client
@@ -759,7 +926,7 @@ def test_full_stack_e_shiten_types_the_user_id_signs_in_through_its_popup_and_it
         main = broker.origins['mainOrigin']
         define(tmp_path, {'id': 'e-shiten', 'login_url': main + '/eshiten/login', 'enroll_url': main + '/enroll',
                           'cookie_host': 'brisk.localhost'})
-        store = passkey.FileStore(tmp_path / 'passkey.json')
+        store = keeper(tmp_path)
         passkey.enroll(site='e-shiten', store=store, headless=True, confirm=broker.registered, user_id='abc123')
         signin = passkey.login(store=store, headless=True)
         seen = broker.state()
@@ -767,4 +934,4 @@ def test_full_stack_e_shiten_types_the_user_id_signs_in_through_its_popup_and_it
         assert signin.site.id == 'e-shiten' and signin.client.site == 'e-shiten' and brisk._default() is signin.client
         assert signin.client.session.cookies['session_fake'] == seen['briskCookieValue']
         assert signin.saved_to == brisk.cookies_path('e-shiten')
-        assert store.load()['credential']['signCount'] == seen['counter'] and store.load()['user_id'] == 'abc123'
+        assert store.load('e-shiten')['credential']['signCount'] == seen['counter'] and store.load('e-shiten')['user_id'] == 'abc123'

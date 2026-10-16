@@ -924,12 +924,13 @@ def eshiten_host(tmp_path, monkeypatch):
     return sent
 
 
-class _Store:
-    def __init__(self, record):
-        self.record = record
+class _Passkeys:
+    """passkey.Passkeys with the saved logins in `state['saved']`, by broker."""
+    def __init__(self, state):
+        self.state = state
 
-    def load(self):
-        return self.record
+    def load(self, site):
+        return self.state['saved'].get(site)
 
 
 class _Closed:
@@ -949,8 +950,8 @@ def passkey_login(monkeypatch, tmp_path):
     """briskapi.passkey with a saved passkey for `sbi` (record in `state`), and a `login` that fails as often as `failures` says."""
     from briskapi import passkey
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
-    state = {'record': {'site': 'sbi', 'credential': {}}, 'failures': 0, 'logins': []}
-    monkeypatch.setattr(passkey, 'default_store', lambda: _Store(state['record']))
+    state = {'saved': {'sbi': {'site': 'sbi', 'credential': {}}}, 'failures': 0, 'logins': []}
+    monkeypatch.setattr(passkey, 'Passkeys', lambda: _Passkeys(state))
 
     def login(**options):
         state['logins'].append(options)
@@ -965,7 +966,7 @@ def passkey_login(monkeypatch, tmp_path):
 def test_a_feed_whose_session_expired_signs_in_again_with_the_saved_passkey(passkey_login):
     told, closed = [], _Closed()
     assert brisk._sign_in_again('sbi', closed, tell=told.append) is True
-    assert passkey_login['logins'] == [{'remember': True, 'node': 'node'}] and closed.waits == [0]
+    assert passkey_login['logins'] == [{'remember': True, 'node': 'node', 'site': 'sbi'}] and closed.waits == [0]
     assert told == ['the session has expired; signing in again with your saved passkey (Chrome opens)',
                     'signed in again; the feed goes on']
     assert json.loads(brisk.cookies_path('sbi').read_text()) == {'session_bfaf77a2': 'new'}, 'where the host reads them'
@@ -984,11 +985,11 @@ def test_signing_in_again_is_tried_a_few_times_further_apart_and_then_left_to_th
 
 
 def test_a_feed_without_a_passkey_for_its_site_tells_how_to_sign_in_and_does_not_try(passkey_login):
-    for record, said in ((None, 'no passkey is saved for sbi: sign in again yourself'),
-                         ({'site': 'e-shiten', 'credential': {}}, 'no passkey is saved for sbi (the saved one is for e-shiten)')):
-        passkey_login['record'], told = record, []
+    for saved, said in (({}, 'no passkey is saved for sbi'),
+                        ({'e-shiten': {'site': 'e-shiten', 'credential': {}}}, 'no passkey is saved for sbi')):   # another broker's is not its
+        passkey_login['saved'], told = saved, []
         assert brisk._sign_in_again('sbi', _Closed(), tell=told.append) is False
-        assert said in told[0] and "briskapi.login(site='sbi', cookies=..., remember=True)" in told[0]
+        assert said in told[0] and "briskapi.login(site='sbi', cookies=..., remember=True)" in told[0] and 'brisk enroll --site sbi' in told[0]
     assert passkey_login['logins'] == [], 'another broker\'s passkey is never used'
 
 
@@ -1002,7 +1003,7 @@ def test_signing_in_again_stops_when_the_feed_closes_or_somebody_else_has_signed
 
 def test_a_saved_passkey_that_cannot_be_read_is_told_not_raised(monkeypatch):
     from briskapi import passkey
-    monkeypatch.setattr(passkey, 'default_store', lambda: (_ for _ in ()).throw(passkey.PasskeyError('no secure place')))
+    monkeypatch.setattr(passkey, 'default_store', lambda site=None: (_ for _ in ()).throw(passkey.PasskeyError('no secure place')))
     told = []
     assert brisk._sign_in_again('sbi', _Closed(), tell=told.append) is False
     assert 'no secure place' in told[0]

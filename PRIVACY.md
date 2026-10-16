@@ -154,7 +154,7 @@ Monex and `smbcnikko` for SMBC Nikko) uses session cookies from your own browser
   in the macOS Keychain or Windows Credential Manager (or, if you set `BRISK_PASSKEY_STORE=file`, in
   an owner-only file under `~/.config/brisk/`, which on Windows is protected by your user profile
   folder), is passed to the sign-in helper over stdin and never on a command line,
-  and is never logged, uploaded or included in any recording. `brisk forget` deletes it here;
+  and is never logged, uploaded or included in any recording. Each broker has its own saved passkey; `brisk forget` deletes one here;
   remove it at the broker as well. The user ID is typed into the broker's login page and is never
   logged either. The five brokers' cookies are saved as described above; those of a broker you
   add, which has no data client, are kept in an owner-only file under `~/.config/brisk/cookies/`. The Chrome profile used for sign-in is

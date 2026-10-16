@@ -739,15 +739,15 @@ def passkey_command(args):
     elif args.command == 'login':
         signin = passkey.login(remember=args.remember, login_url=args.login_url, launch_url=args.launch_url,
                                passkey_button=args.passkey_button, chrome=args.chrome, profile_dir=args.profile_dir,
-                               headless=args.headless)
+                               headless=args.headless, site=args.site)
         saved = f'saved to {signin.saved_to}' if signin.saved_to else 'not saved'
         print(f'Signed in to {signin.site.name}; session cookies {saved}.', file=sys.stderr)
         if signin.client is None:
             print('briskapi has no data client for this site yet: the cookies are for your own use.', file=sys.stderr)
     else:
-        passkey.forget()
-        print('Passkey deleted here. It stays registered at your broker until you remove it in its security settings.',
-              file=sys.stderr)
+        site = passkey.forget(site=args.site)
+        print(f'Passkey {"for " + site + " " if site else ""}deleted here. It stays registered at your broker until you remove '
+              'it in its security settings.', file=sys.stderr)
 
 def main(argv=None):
     try:
@@ -816,14 +816,16 @@ def _main(argv):
         p.add_argument('--profile-dir', type=Path, help='Keep Chrome\'s profile here instead of a temporary one deleted afterwards')
         if name == 'enroll':
             p.add_argument('--site', help='Your broker (see `brisk sites`); asked interactively if omitted')
-            p.add_argument('--replace', action='store_true', help='Replace the passkey already saved')
+            p.add_argument('--replace', action='store_true', help="Enroll this broker's passkey again, replacing the saved one")
         else:
+            p.add_argument('--site', help='Which broker, when passkeys are saved for more than one (see `brisk sites`)')
             p.add_argument('--launch-url', help='Open this BRiSK address after signing in (otherwise open BRiSK from the broker\'s site yourself)')
             p.add_argument('--passkey-button', help='Text of the passkey sign-in control on the login page')
             p.add_argument('--headless', action='store_true', help='No Chrome window: needs --launch-url and a login page that works unattended')
             p.add_argument('--remember', action=argparse.BooleanOptionalAction, default=True,
                            help='Save the cookies (default: yes; owner-only file); `brisk live --site` with that broker reads them')
-    sub.add_parser('forget', help='Delete the saved passkey (it stays registered at your broker until you remove it there)')
+    p = sub.add_parser('forget', help='Delete a saved passkey (it stays registered at your broker until you remove it there)')
+    p.add_argument('--site', help='Which broker, when passkeys are saved for more than one')
     p = sub.add_parser('upload', help='Upload a prepared package to your private archive'); p.add_argument('directory', type=Path)
     p = sub.add_parser('list', help='List your archived recordings (or timing reports)')
     p.add_argument('--date'); p.add_argument('--source', choices=sorted(SOURCES))

@@ -316,14 +316,14 @@ def _sign_in_again(site, closed, node='node', waits=RELOGIN_WAITS, tell=None) ->
     name = SITES[site].name
     tell = tell or (lambda text: print(f'[brisk] {name}: {text}', file=sys.stderr, flush=True))
     try:
-        record = passkey._load_record(passkey.default_store())
+        record = passkey.Passkeys().load(site)
     except passkey.PasskeyError as error:
         tell(f'the session has expired and your passkey cannot be used ({error}); sign in again yourself')
         return False
-    if record is None or record['site'] != site:
-        tell(f'the session has expired and no passkey is saved for {site}' + ('' if record is None else
-             f' (the saved one is for {record["site"]})') + ': sign in again yourself (`brisk login`, or `briskapi.login('
-             f'site={site!r}, cookies=..., remember=True)`) and the feed takes the new cookies up within a minute')
+    if record is None:
+        tell(f'the session has expired and no passkey is saved for {site}: sign in again yourself (`brisk login`, or `briskapi.login('
+             f'site={site!r}, cookies=..., remember=True)`; `brisk enroll --site {site}` saves a passkey, for next time) and the feed '
+             'takes the new cookies up within a minute')
         return False
     before = _saved_cookies(site)
     for number, wait in enumerate(waits, 1):
@@ -331,7 +331,7 @@ def _sign_in_again(site, closed, node='node', waits=RELOGIN_WAITS, tell=None) ->
             return False   # the feed is closed, or somebody signed in already
         tell('the session has expired; signing in again with your saved passkey (Chrome opens)')
         try:
-            passkey.login(remember=True, node=node)
+            passkey.login(remember=True, node=node, site=site)
         except Exception as error:  # noqa: BLE001 - whatever stopped it, the next try or the person goes on
             later = waits[number] if number < len(waits) else None
             tell(f'signing in again failed: {error}; ' + (f'trying again in {later // 60} minutes' if later else

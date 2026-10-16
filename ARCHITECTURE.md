@@ -855,7 +855,7 @@ recording. The wait is plain HTTP. A request that fails is asked again at the ne
 meanwhile does not end the wait: the brokers end their sessions at 05:00 each morning, which a feed waiting
 overnight meets. The host says so once (`the session has expired; waiting for new cookies`) and to Python as an
 out-of-band `{"type": "expired"}` line, whereupon the feed signs in again on a thread of its own (`Feed._expired`,
-`brisk._sign_in_again`: `brisk login`'s `passkey.login(remember=True)` with the saved passkey, only if it is this site's, at
+`brisk._sign_in_again`: `brisk login`'s `passkey.login(remember=True, site=...)` with this site's own saved passkey, at
 once and then after 10, 30 and 60 minutes, stopping when the feed closes or somebody else has saved cookies; with no passkey
 or after the last try it says what to do instead). The host asks every minute
 (`STREAM_CHECK_MS`) with the cookies in `BRISK_COOKIES_FILE` when they differ from those it has, and carries
@@ -918,9 +918,17 @@ a *site* (`briskapi/sites.py`) says where the login page is, what its passkey bu
 the BRiSK cookies belong to. SBI, Matsui, Monex and SMBC Nikko are built in (each runs BRiSK on its own
 `<broker>.brisk.jp`, found by checking the hosts and the brokers' own pages; none is verified against a
 live account), and so is Tachibana e-shiten (BRiSK Next on `next.e-shiten.brisk.jp`, its sign-in mapped
-from its public login page). `~/.config/brisk/sites.json` adds or edits entries. A person normally has one
-brokerage, so the saved login is a single record, `{site, credential}`, and `login` needs no site argument.
-A site with a `user_field` (e-shiten) also keeps the `user_id` that `enroll` asked for.
+from its public login page). `~/.config/brisk/sites.json` adds or edits entries. Each broker has a saved login of its own,
+`{site, credential}`, in a store of its own (`Passkeys`, over `default_store(site)`: the Keychain item's account, the Credential
+Manager entry's name or the file `passkey-<site>.json` carries the site id), so a person with two brokers, as a tester
+recording SBI and e-shiten at once has, enrolls both and one does not replace the other. `login` and `forget` take `--site`, and
+without it use the only broker that has one. A site with a `user_field` (e-shiten) also keeps the `user_id` that `enroll` asked for.
+Before that the saved login was a single record for whichever broker was enrolled (a person normally has one brokerage), at
+`ACCOUNT`/`passkey.json`: the first read of any login moves it to its broker's store (`Passkeys._migrate`), and one that cannot be
+moved yet is read from where it is. Which brokers have a passkey is found by asking each known site's store, so nothing keeps an
+index to go stale. A `login` takes a lock on this computer (`config/passkey.lock`, `flock` or `msvcrt.locking`, taken by polling so
+that it is given back however the process ends), so two feeds whose sessions ended at 05:00 sign in one after the other, each in a
+Chrome of its own.
 
 ### How a passkey sign-in works, and why Chrome can stand in
 
@@ -971,8 +979,8 @@ the login URL, button text, cookie host and any user ID box and user ID come in 
 4. **Enrolling** attaches an empty authenticator, opens the site's `enroll_url` (or its login page) and waits for
    `WebAuthn.credentialAdded` while the person registers a passkey. The captured credential is
    kept in memory and saved, with the chosen site, only after the person confirms, so a failed
-   enrollment never replaces a passkey that still works. `enroll` refuses to overwrite without
-   `--replace`, and with no `--site` it asks which broker (or fails, without a terminal).
+   enrollment never replaces a passkey that still works. `enroll` refuses to overwrite a broker's passkey without
+   `--replace` (another broker's is never touched), and with no `--site` it asks which broker (or fails, without a terminal).
 5. **Signing in** imports the saved credential, opens the login page, types the saved user ID into
    the site's `user_field` when it has one (`Input.insertText`, falling back to the value setter and
    `input`/`change` events; without the box nothing is pressed), clicks the control whose
@@ -998,10 +1006,10 @@ counter that would no longer match.
 
 Secrets move only over stdin and stdout, never on a command line or in a log message (logs
 name origins, never paths or queries, and the helper refuses to run attached to a terminal).
-The saved login is kept in the macOS Keychain through `security -i`, which reads its command from
+Each broker's saved login is kept in the macOS Keychain through `security -i`, which reads its command from
 stdin: `add-generic-password -w SECRET` would show the secret in the process list. `security`
 exits 0 even when a write fails, so each write is read back and compared. On Windows it is one
-Credential Manager entry for this user on this machine (`CredWriteW` and friends through `ctypes`, no
+Credential Manager entry for this user on this machine, one for each broker (`CredWriteW` and friends through `ctypes`, no
 extra dependency; an entry holds at most 2,560 bytes, which a passkey fits in), also read back after
 each write. Elsewhere it is stored only if `BRISK_PASSKEY_STORE=file` asks for an owner-only
 file, which is weaker (and on Windows a file's privacy comes from its folder's ACL, since `0600` means
