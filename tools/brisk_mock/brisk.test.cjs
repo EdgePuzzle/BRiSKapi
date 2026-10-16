@@ -601,19 +601,26 @@ function reading() {
   return { batches, emit, timeless };
 }
 
-// A server that sends its first `split` frames, and the rest `afterMs` later (after a catch-up; first calling
-// `between`), then closes.
-function laterSocket(chunks, split, afterMs, between = () => {}) {
+// A server that sends its first `split` frames, and the rest after a catch-up: `after` ms later (a number), or as soon as
+// `after()` is true (polled: the catch-up has run, however long this computer takes to get there; a fixed delay is a
+// bet on its speed, and a slow runner loses it); first calling `between`; then it closes.
+function laterSocket(chunks, split, after, between = () => {}) {
   return class extends EventTarget {
     constructor() {
       super();
       const send = list => list.forEach(c => this.dispatchEvent(new MessageEvent('message', { data: c.buffer.slice(c.byteOffset, c.byteOffset + c.length) })));
       setImmediate(() => send(chunks.slice(0, split)));
-      this.timer = setTimeout(() => { between(); send(chunks.slice(split)); setImmediate(() => this.close(1000)); }, afterMs);
+      const rest = () => { between(); send(chunks.slice(split)); setImmediate(() => this.close(1000)); };
+      if (typeof after === 'function') {
+        this.timer = setInterval(() => { if (after()) { clearInterval(this.timer); rest(); } }, 5);
+      } else {
+        this.timer = setTimeout(rest, after);
+      }
     }
     send() {}
     close(code = 1000) {
       clearTimeout(this.timer);
+      clearInterval(this.timer);
       if (this.closed) return;
       this.closed = true;
       this.dispatchEvent(Object.assign(new Event('close'), { code, reason: '' }));
@@ -630,7 +637,7 @@ test('with quote workers a session writes the same batches, its quotes read in p
     const restore = behind ? snapshotBehind(5, () => caught) : () => {};
     try {
       await live({ cookies: { s: 'v' }, emit, protocolVersion: 16000, fetchImpl: server(files).fetchImpl, workers,
-        WebSocketImpl: behind ? laterSocket(chunks, 3, 100) : socketFrom(chunks),
+        WebSocketImpl: behind ? laterSocket(chunks, 3, () => caught) : socketFrom(chunks),
         ...(behind && { catchUp: async () => { caught = true; return Buffer.alloc(0); } }) });
     } finally { restore(); }
     return timeless();
