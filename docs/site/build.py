@@ -45,6 +45,7 @@ SECTIONS = [
     ('guides/broker.md', 'Your broker\'s BRiSK', '証券会社の BRiSK'),
     ('guides/passkey.md', 'Passkey sign-in', 'パスキーでのサインイン'),
     ('guides/api-overview.md', 'API overview', 'API 一覧'),
+    ('guides/repair.md', 'Repairing a recording', '記録の補修'),
     ('guides/cli.md', 'Command line', 'コマンドライン'),
     ('guides/archive.md', 'Your private archive', '自分専用のアーカイブ'),
     ('guides/cloud.md', 'Querying in the cloud', 'クラウドでの照会'),
@@ -514,7 +515,7 @@ def nav_yaml():
         return item(guides[name][1], guides[name][0], depth)
 
     lines = [item('Home', 'index.md', 0), '- "Guides":', '  - "Getting started":']
-    lines += [guide(name, 2) for name in ('which-api', 'install', 'recording', 'live-feed', 'live-records', 'recordings', 'broker', 'passkey')]
+    lines += [guide(name, 2) for name in ('which-api', 'install', 'recording', 'live-feed', 'live-records', 'recordings', 'repair', 'broker', 'passkey')]
     lines += ['  - "Your archive":', guide('archive', 2), guide('cloud', 2)]
     for title, methods in reference.REFERENCE:
         lines.append(f'- {json.dumps(title)}:')

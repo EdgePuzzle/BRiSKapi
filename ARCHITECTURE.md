@@ -1115,6 +1115,68 @@ rust/brisk_quote_ingest/target/release/brisk_recording \
 This rebuilds final state for offline analysis. It does not retimestamp data or
 simulate original exchange delivery.
 
+## Comparing and repairing recordings
+
+Two feeds of one day (two brokers, two computers, a restart) decode the same stream, so an update carries the
+server's frame number whichever of them saw it. `briskapi/_repair.py` identifies a quote update by (security, `frame`)
+and calls two updates the same when a 64-bit hash of everything else they hold agrees (source time, special quote
+time, turnover, prices, counts and each book side's levels in order, but not the batch it came in nor the receipt
+time: a recording's own). A security's trades are compared by frame, the trades of a frame together, as a lost frame
+loses all of its trades. Each row of one recording is then, against the other: SAME; CONFLICT (that frame is there with
+other content); ONLY this one's (the frame is missing from the other though its range, first batch clock to end, covers the
+row's time); OUTSIDE (the row's time is before or after that range); or, with the opening book and restored trades
+(`bootstrap` and `history` batches) left out of the count, SNAPSHOT. The same rows counted in blocks (a security over a
+window of source time, 5 minutes by default) give each block a status: identical, `a_lacks` / `b_lacks` / `each_lacks`
+(ONLY rows on one or both sides), `conflict` or `unshared` (only OUTSIDE rows). `tools/block_overlap.py` prints this
+for measuring how much market data recordings could share. A feed that lost frames shows as ONLY rows in the other, two
+feeds that see different data as CONFLICT.
+
+Both recordings are read a security at a time: their tables are sorted by security, so two row-group streams are
+merged on `issue_id`, and one security's rows are all that is decoded or hashed at once (1.6 million rows a second for both
+together on a laptop, measured on two recordings of 430,000 rows; the time of a broker day is mostly `_decode_batches`, a Python
+dict per batch, 2 s for 400,000).
+
+`brisk repair RECORDING... --from OTHER... [--output DIR]` adds what a recording lacks. Which recordings go together is
+decided by their time alone (`plan`): two recordings of one day that share at least half of the shorter one's stretch
+(`OVERLAP`, from the first batch's clock to the end's) record the same stretch and are partners; recordings with different times,
+as a broker day's morning and afternoon pieces, are consecutive pieces, never partners. Folders of recordings are expanded
+(`recordings_in`), so every target finds its own partners among the others, however many pieces either feed was cut into, and is
+repaired from each in turn (each pass writes its tables in a work folder and the next starts from them). A target also learns
+where the next recording of its day starts: the earliest start, at or after its own end, of any recording given on either
+side that is not its partner. That is as far as a repair may reach (`reach`, a microsecond short of it), so a gap a reconnect
+left between two pieces is closed and the day is never stored twice: copying the rest of the other feed into the first piece
+would give the second piece's time twice. With nothing known to follow, a target is not extended; `--until TIME` (one target)
+goes as far as it says, and is refused if it passes the start of a following recording.
+
+A row of OTHER is added when it is ONLY its own, its batch is a `quotes` batch (not the opening book or the day's restored
+trades, which have no receipt time), and it fits: its batch clock is within the target's range (extended to `reach`) and it
+falls between the rows around it of that security in frame, source time and batch clock, which is what the archive's order
+rules need (`fit`). Each added frame becomes a batch of its own, `quotes` with OTHER's `received_unix_ms` and `decode_ns`,
+put after the last batch of the target that is not later than it, never among the book and history that open a recording
+and never after its end; the batches are renumbered (`renumber`), and the end's `frames`, `quote_updates` and, if frames
+were added past it, clock are brought up to date. What was left out is counted: `misplaced` (does not fit), `after_end`,
+`restored` and `not_recorded` (a security the target does not hold; one it holds but has no trade of is not that). The
+target's own rows are never changed: a conflict stands as the target has it. A target that gains nothing is not written.
+
+The tables are written the way `Columns.write` does, but a security at a time: RECORDING's rows with the added ones merged
+in batch order and their `seq` renumbered, buffered into row groups of exactly `ROW_GROUP` rows, the equity table copied.
+The output is then checked by `brisk-parquet verify` (`_parquet.verify_broker`) and packaged by `cli._package`, which writes
+its manifest and removes the tables if anything fails, so `brisk upload` takes it like a recording of the feed.
+
+A frame number identifies an update only if both feeds number alike. That holds when the server's frame numbers are what the
+decoder gives (as the cloud API's merging of overlapping recordings also assumes), but it has not been confirmed across
+brokers on live data. Repair therefore refuses to write (`frame_numbers_match`) unless most of OTHER's updates that
+RECORDING has a frame of are the same, not other content under that number: a pair numbered differently would otherwise have
+each other's rows added again under other numbers. `tests/test_repair.py` builds feeds that lose frames, start late,
+disagree, record a subset of securities or number differently, are cut into pieces (a reconnect, a morning and an afternoon) and
+repaired from several, and checks each repair against a feed that lost nothing.
+
+Not done: a conflict resolved in OTHER's favour; frames that only OTHER's opening book or restored trades hold (they carry no
+receipt time to give a batch); and a gap before a recording's start (its opening book restates the state, not the updates
+before it). Receipt times of added batches are another computer's clock, so a recording's receipt clock is not steady across
+them (the archive checks only that they stay within a day of the first). Report-only runs (no `--output`) compare each partner with
+the original target, as nothing is written for the next pass to start from, so a frame two partners both hold is counted for each.
+
 ## Private archive
 
 The configuration is [briskapi/archive.json](briskapi/archive.json): bucket
