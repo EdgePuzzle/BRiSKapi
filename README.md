@@ -111,9 +111,10 @@ completed part brings its recording to 80 million quote rows. The demo's replay 
   reconnects by itself, after 5 s, then 10 s, 30 s, a minute and every 2 minutes. What it
   recorded before the drop is a complete recording of its own (`..._085800-101500`), kept and
   uploaded like a day, and the rest of the day is recorded from a fresh snapshot
-  (`..._102000-153512`). Only the gap is missing; the cloud API merges the two. It stops for
-  good when another connection can't help: an expired session, another BRiSK window open on
-  your account, or a site that changed.
+  (`..._102000-153512`). Only the gap is missing; the cloud API merges the two, and if another
+  feed recorded that stretch, `brisk repair` can fill it ([Repairing a recording](#repairing-a-recording-from-another-feed)).
+  It stops for good when another connection can't help: an expired session, another BRiSK window
+  open on your account, or a site that changed.
 - **Stopping** (Ctrl-C, `kill`, shutting the computer down, `feed.close()`) ends the day where
   it is, as the close would: the day so far is a complete recording (`..._085800-121500`), kept
   and uploaded like any day. Start again later and the rest of the day is another recording;
@@ -500,6 +501,42 @@ Tabular results are lists of dicts with `.to_pandas()`. Errors are
 reads a recording's tables into memory (about two seconds for the complete demo);
 one security's history is read on its own.
 
+## Repairing a recording from another feed
+
+Two feeds of one trading day (two computers, or two brokers) record the same market, and a feed that dropped, or
+started late, lacks some of what the other has. `brisk repair` compares recordings of the same day and writes copies of
+yours with what only the other feed holds added:
+
+```sh
+brisk repair recordings/sbi-am --from recordings/eshiten-am     # compare them: prints counts, writes nothing
+brisk repair recordings/sbi-am --from recordings/eshiten-am --output recordings/sbi-am-repaired
+brisk repair days/sbi --from days/eshiten --output days/repaired    # folders of recordings: each is paired by its time
+```
+
+- **Which recordings repair which.** A recording is repaired from the other feed's recordings of its day that cover mostly
+  the same time (at least half of the shorter one's). Recordings with different times, such as a morning's and an
+  afternoon's, are pieces one after the other, not partners: a morning is never repaired from an afternoon. Give folders
+  (a `brisk live --output` folder holds one recording a piece) and each recording finds its own partners, one or several,
+  and is repaired from each in turn.
+- **How updates are matched.** A quote update is identified by its security and BRiSK's frame number (a frame's trades
+  together). The counts say, of each recording's updates, how many are *same* (the other has them, alike), *only*
+  (the other was running and lacks them), *conflict* (the other has that frame with other content) and *outside*
+  (before the other started or after it ended); and of its blocks (a security over `--window` minutes, 5 by default),
+  how many are identical, lack something the other has, are lacking on both sides, or conflict.
+- **What it writes.** Your recording as it is, plus each frame only the other holds, as a batch of its own among yours;
+  checked as the archive checks a broker's recording and packaged, so `brisk upload` takes it. Where the two disagree
+  yours stands. A recording that gains nothing is not written; one recording's goes into `--output`, several into a folder
+  of them by name.
+- **How far it reaches.** Only frames within your recording's own time are added, except where another recording of the
+  day follows it (a piece you gave, in a folder or on the command line): the gap before that one is closed, up to a
+  microsecond before it starts and never into it, so no time is stored twice. A recording nothing is known to follow is not
+  extended; for one such (a feed that stopped early) `--until 15:30:00` (Tokyo's) goes that far, but not into a recording
+  that follows.
+- **Receipt times.** Added frames keep the other recording's receipt time (its computer's clock); yours keep yours.
+- **When it refuses.** If a pair does not number its frames alike (most of the other's updates that yours has a frame
+  of must be the same), no frame says what is missing: it counts and writes nothing. Recordings must be of the same day
+  and in the current format (briskapi 1.5 or later), and the ones repaired must have ended. No recording is ever changed.
+
 ## Command line
 
 ```sh
@@ -517,6 +554,7 @@ brisk delete PREFIX                         # remove one of your uploads from yo
 brisk restore PREFIX                        # bring back an upload deleted in the last 30 days (also a timing report's key)
 brisk prune recordings/s1                   # free disk: remove a local recording your archive holds
 brisk export recordings/s1 --nautilus catalog      # a NautilusTrader v2 catalog, an instrument at a time (or --jsonl FILE, which holds the recording in memory: tens of GB for a broker's session)
+brisk repair recordings/a --from recordings/b --output recordings/a-repaired   # add what only another feed's recordings of the day hold (without --output, only compare; folders of recordings work too)
 brisk query XTKS.BRISK --schema ohlcv-1m --symbols 7203 --start 2026-10-13   # the cloud API: CSV to stdout (--encoding json|parquet, --output FILE, --end, --limit)
 brisk consent [--accept | --revoke]         # show or change automatic uploads (--no-upload: this run only)
 brisk upload recordings/s1                  # retry uploading a recording (stderr: bytes sent, the archive's checks, then stored)
@@ -538,7 +576,7 @@ Each command is the command-line form of a Python call:
 | `brisk pull`, `upload`, `delete`, `restore`, `prune` | `briskapi.pull()`, `Archive().upload()`, `.delete()`, `.restore()`, `.prune()` |
 | `brisk consent` | `briskapi.consent()` |
 | `brisk enroll`, `login`, `forget` | `briskapi.passkey.enroll()`, `.login()`, `.forget()` |
-| `brisk export`, `brisk identity` | Command line only |
+| `brisk export`, `brisk repair`, `brisk identity` | Command line only |
 
 `brisk live --site sbi` (or another broker's site) runs until you stop it, normally keeping each trading
 day's morning and afternoon sessions as separate recordings, with extra splits at 80 million quote rows.

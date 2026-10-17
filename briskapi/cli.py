@@ -21,7 +21,7 @@ import urllib.request
 import uuid
 import warnings
 
-from briskapi import _https, _native, _parquet, identity
+from briskapi import _https, _native, _parquet, _repair, identity
 from briskapi._recording import BriskError, Recording
 from briskapi.schema import (RECORDING_PREFIX, REFERENCES, SCHEMA, SOURCES, MAX_COMPRESSED, TIMING_KEY, canonical_batches,
                              encode, local_name, max_package, owner, recording_name, validate_manifest, validate_timing,
@@ -472,6 +472,29 @@ def export(source, nautilus=None, jsonl=None):
             out.write(encode(batch))
     return {'jsonl': str(jsonl)}
 
+def repair(recordings, others, output=None, until=None, window=5.0):
+    """Repair recordings from other feeds' recordings of the same day (see briskapi._repair.repair); each is a recording's folder
+    or a folder of recordings. With `output`, each recording that gained something is written there, verified as the archive would
+    and packaged for upload: one recording's into `output` itself, several into a folder of them by name. Their entries in the
+    report have the `package`."""
+    recordings, others = [Path(p) for p in recordings], [Path(p) for p in others]
+    if output is None:
+        return _repair.repair(recordings, others, None, until, window)
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    single = len(recordings) == 1 and (recordings[0] / _parquet.DEPTHS).is_file()
+
+    def deliver(recording, tables, entry):
+        destination = output if single else output / recording.directory.name
+
+        def write():
+            for name in _parquet.FILES:
+                (destination / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(tables / name, destination / name)
+            return _parquet.verify_broker(destination)
+        entry['package'] = _package(destination, write)
+    return _repair.repair(recordings, others, deliver, until, window, output.parent)
+
 def record_events(events, cache=None, codes=None, limit_frames=None, speed=1, binary=None, node='node'):
     """Replay the pinned demo (downloaded, or a copy in `cache`) and save its decoded batches.
 
@@ -858,6 +881,17 @@ def _main(argv):
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument('--nautilus', type=Path, metavar='DIR', help='Catalog directory (data/<type>/<CODE>.XTKS/...)')
     group.add_argument('--jsonl', type=Path, metavar='FILE', help='Canonical decoded batches, one per line')
+    p = sub.add_parser('repair', help="Fill recordings' gaps from other feeds' recordings of the same day (or just compare them)")
+    p.add_argument('recordings', nargs='+', type=Path, metavar='RECORDING',
+                   help='Recordings to repair, or folders of them (such as a brisk live --output folder): they are never changed')
+    p.add_argument('--from', dest='others', nargs='+', type=Path, required=True, metavar='OTHER',
+                   help="Another feed's recordings of the same day (another broker's, or another computer's), or folders of them")
+    p.add_argument('--output', type=Path, help='Write what is repaired here, packaged for `brisk upload` (one recording: this folder; '
+                                               'several: a folder of them); without it, only report')
+    p.add_argument('--until', metavar='TIME',
+                   help="For one recording that nothing follows (a feed that stopped early): go past its end to this time (HH:MM:SS, "
+                        "Tokyo's). Where another recording follows, a repair already goes up to where it starts, and no further")
+    p.add_argument('--window', type=float, default=5.0, metavar='MINUTES', help='Length of the blocks the report counts (default: 5)')
     p = sub.add_parser('consent', help='Show or change automatic uploads to your private archive')
     group = p.add_mutually_exclusive_group()
     group.add_argument('--accept', action='store_true')
@@ -952,6 +986,8 @@ def _main(argv):
         print(json.dumps({'owner': owner(value), 'kept_in': identity.where()}))
     elif args.command == 'export':
         print(json.dumps(export(args.recording, args.nautilus, args.jsonl)))
+    elif args.command == 'repair':
+        print(json.dumps(repair(args.recordings, args.others, args.output, args.until, args.window), indent=2))
 
 if __name__ == '__main__':
     main()

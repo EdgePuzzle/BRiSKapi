@@ -246,7 +246,9 @@ OHLCV バー（`ohlcv-1s` 〜 `ohlcv-1d`）は、クラウド API から、ま�
 `ts_event` の1つだけです。briskapi 1.5 より前の記録（形式 `brisk-nautilus-parquet-v2`）にはその写しの `ts_init`
 もあり、Nautilus への書き出しは NautilusTrader のためにそれを書きます。
 `history` のバッチには、セッションのスナップショットがその日の早い時間から復元した約定が入っていて、
-すべて `bootstrap` の時刻になっています。
+すべて `bootstrap` の時刻になっています。`brisk repair` で補修した記録には、ほかのバッチに混じって、別のフィードの
+記録から補ったフレームも、それぞれ独自のバッチとして入ります。それらにはその記録の `received_unix_ms`（別の
+コンピューターの時計）が付くので、受信時刻がそこで連続しているとは限りません。
 
 ### 読み方
 

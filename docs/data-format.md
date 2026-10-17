@@ -243,7 +243,9 @@ Receipt times live in `BriskBatch`: join a row's `seq` to the batch's `received_
 one clock, `ts_event`; recordings made before briskapi 1.5 (format `brisk-nautilus-parquet-v2`) also have
 `ts_init`, a copy of it, and the Nautilus export writes it for NautilusTrader.
 `history` batches hold trades the session's snapshot restored from earlier that day, all at the
-bootstrap's clock.
+bootstrap's clock. A recording repaired with `brisk repair` also holds, each as a batch of its own among the others,
+frames another feed's recording supplied; they carry that recording's `received_unix_ms`, another computer's clock, so
+receipt times need not be steady across them.
 
 ### Reading them
 
