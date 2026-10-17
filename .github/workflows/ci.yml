@@ -4,6 +4,14 @@ on:
   # Not on tags: a release's commit was tested here on main, and the release workflow tests it again.
   push:
     branches: [main]
+  # Windows is run by hand, before a release (Actions, this workflow, Run workflow): its runners take twice Linux's minutes,
+  # and a push to main or a pull request runs Linux only.
+  workflow_dispatch:
+
+# A newer push to a branch makes a run still going on it moot.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -12,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["ubuntu-latest", "windows-latest"]' || '["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     env:
       BRISK_MOCK_CACHE: ${{ github.workspace }}/cache/brisk-mock
