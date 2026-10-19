@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sys
 import threading
 import time
 
@@ -961,3 +962,16 @@ def test_pyarrows_first_conversion_of_python_objects_is_made_before_a_session_ne
             "print(time.perf_counter() - began)")
     after = float(subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, check=True).stdout)
     assert after < 0.2, 'the first conversion after warm() is cheap (cold, it imports pandas: over half a second)'
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='process priority classes are Windows')
+def test_the_host_runs_at_above_normal_priority():
+    import ctypes
+    ABOVE_NORMAL_PRIORITY_CLASS = 0x8000
+    kernel32 = ctypes.WinDLL('kernel32')
+    kernel32.GetPriorityClass.argtypes = [ctypes.c_void_p]
+    feed = _live.Feed(command=['node', '-e', 'setTimeout(() => {}, 5000)'], upload=False)
+    try:
+        assert kernel32.GetPriorityClass(int(feed._process._handle)) == ABOVE_NORMAL_PRIORITY_CLASS
+    finally:
+        feed.close()

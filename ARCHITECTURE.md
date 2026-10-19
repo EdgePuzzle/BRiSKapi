@@ -818,6 +818,11 @@ it all (the host and its workers, the feed recording to disk and serving the gat
 open sends some 130,000. Slower cores take fewer: there the opening can fall a few seconds
 behind, which the status line of `brisk live` shows in its data time.
 
+On Windows the host runs at above-normal priority (`_live.HOST_PRIORITY`, the child's alone). Each frame waits for the slowest of
+its workers, so a worker thread that another program has taken the core from holds up the others; on a desktop with a
+third of its CPU used by other programs that was the largest single cost (the whole feed 24,000 quote updates a second at normal
+priority, 47,000 above; the host alone about 35,000 and 70,000).
+
 The [native Windows/WSL2 comparison](docs/benchmarks/windows-wsl2.md) records a later i5-12600K experiment
 with a reusable full-pipeline harness, processor-count controls and aggregate results. The earlier M5 Pro
 figure above has not been rerun with that harness; those numbers are not a controlled hardware comparison.

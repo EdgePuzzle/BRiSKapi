@@ -21,6 +21,10 @@ from briskapi.timing import TimingStats
 
 DECODER = cli.DECODER
 _END = object()
+# On Windows the decoder host runs at above-normal priority. Its quote workers are one thread each and a frame waits for the slowest, so a
+# worker that another program's thread has taken a core from holds all of them up: on a desktop with 30-45% other CPU load (i5-12600K) the
+# whole feed went from 24k to 47k quote updates a second (4 workers) and from 25k to 45k (8, the default there). The child's priority only.
+HOST_PRIORITY = {'creationflags': subprocess.ABOVE_NORMAL_PRIORITY_CLASS} if sys.platform == 'win32' else {}
 
 
 def _codes(codes):
@@ -34,7 +38,7 @@ def _decoder(cache, codes, speed, limit_frames, node):
         command += ['--codes', _codes(codes)]
     if limit_frames:
         command += ['--limit-frames', str(limit_frames)]
-    return subprocess.Popen(command, stdout=subprocess.PIPE)
+    return subprocess.Popen(command, stdout=subprocess.PIPE, **HOST_PRIORITY)
 
 
 def _stored(result):
@@ -192,7 +196,7 @@ class Feed:
         self._lanes_lock = threading.Lock()
         self._process = (subprocess.Popen(command, stdout=subprocess.PIPE, stdin=subprocess.PIPE,
                                           env={**(env or os.environ), 'BRISK_CONTROL': '1',
-                                               **({'BRISK_LANES': '1'} if lanes else {})}) if command
+                                               **({'BRISK_LANES': '1'} if lanes else {})}, **HOST_PRIORITY) if command
                          else _decoder(cache, codes, speed, limit_frames, node))
         if gateway:
             try:
