@@ -525,7 +525,7 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
     const up = seconds >= 3600 ? `${Math.floor(seconds / 3600)}h${String(Math.floor(seconds % 3600 / 60)).padStart(2, '0')}m`
       : seconds >= 60 ? `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s` : `${seconds}s`;
     return ` after ${up} (last frame ${((now - lastFrameAt) / 1000).toFixed(1)} s earlier, event loop lag up to `
-      + `${Math.round(Math.max(lag, loop.max / 1e6))} ms, Node ${(process.memoryUsage().rss / 2 ** 30).toFixed(1)} GB)`;
+      + `${Math.round(Math.max(lag, loop.max / 1e6))} ms, ${process.versions.bun ? 'Bun' : 'Node'} ${(process.memoryUsage().rss / 2 ** 30).toFixed(1)} GB)`;
   };
 
   const onFrame = frame => {
@@ -629,12 +629,14 @@ async function live({ cookies, codes = [], emit, fetchImpl = fetch, WebSocketImp
 
 const RETRY_MS = [5000, 10000, 30000, 60000, 120000];
 
-// A session's decoder and buffers are garbage once live() has returned, but V8 collects them when it chooses; a session
+// A session's decoder and buffers are garbage once live() has returned, but the engine collects them when it chooses; a session
 // started seconds later (a reconnect) would then have the old one's memory beside its own. So the host collects between
-// sessions. gc() is reached without a command-line flag; a runtime that refuses keeps V8's own schedule.
+// sessions. Bun has its own Bun.gc; under Node gc() is reached without a command-line flag; a runtime that refuses
+// keeps its engine's own schedule.
 let collect = null;
 function collectGarbage() {
   try {
+    if (globalThis.Bun) { Bun.gc(true); return; }
     collect ??= (require('node:v8').setFlagsFromString('--expose-gc'), require('node:vm').runInNewContext('gc'));
     collect();
   } catch { /* V8's own schedule */ }

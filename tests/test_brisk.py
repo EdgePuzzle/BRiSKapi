@@ -451,7 +451,7 @@ def test_sbi_feed_uploads_timing(fake_host, monkeypatch):
 
 
 def test_cli_without_cookies_stops_before_prompt_or_decoder(monkeypatch, capsys):
-    monkeypatch.setattr(cli, 'check_node', lambda *args: pytest.fail('decoder must not start'))
+    monkeypatch.setattr(cli, 'check_runtime', lambda *args: pytest.fail('decoder must not start'))
     monkeypatch.setattr(cli, 'ask_consent', lambda: pytest.fail('do not prompt without cookies'))
     with pytest.raises(SystemExit, match='No SBI BRiSK cookies'):
         cli.main(['live', '--site', 'sbi'])
@@ -976,7 +976,7 @@ def passkey_login(monkeypatch, tmp_path):
 def test_a_feed_whose_session_expired_signs_in_again_with_the_saved_passkey(passkey_login):
     told, closed = [], _Closed()
     assert brisk._sign_in_again('sbi', closed, tell=told.append) is True
-    assert passkey_login['logins'] == [{'remember': True, 'node': 'node', 'site': 'sbi'}] and closed.waits == [0]
+    assert passkey_login['logins'] == [{'remember': True, 'runtime': None, 'site': 'sbi'}] and closed.waits == [0]   # None: the passkey helper chooses its runtime as the host does
     assert told == ['the session has expired; signing in again with your saved passkey (Chrome opens)',
                     'signed in again; the feed goes on']
     assert json.loads(brisk.cookies_path('sbi').read_text()) == {'session_bfaf77a2': 'new'}, 'where the host reads them'
@@ -1025,7 +1025,7 @@ def test_a_host_that_says_its_session_expired_has_the_feed_sign_in_again_and_a_f
                       f'for (const b of {json.dumps(sbi_session())}) console.log(JSON.stringify(b));\n')
     monkeypatch.setattr(brisk, 'DECODER', script)
     asked = []
-    monkeypatch.setattr(brisk, '_sign_in_again', lambda site, closed, node='node': asked.append((site, closed)) or 1 / 0)
+    monkeypatch.setattr(brisk, '_sign_in_again', lambda site, closed, runtime=None: asked.append((site, closed)) or 1 / 0)
     briskapi.login(cookies={'session_bfaf77a2': 'v'})
     feed = briskapi.connect(site='sbi', codes=['7203'], upload=False).wait()
     assert feed.status == 'completed' and briskapi.Ticker('7203').quote()['last_price'] == 10160.0, 'the day was recorded all the same'

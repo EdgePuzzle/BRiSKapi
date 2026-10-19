@@ -306,7 +306,7 @@ def _saved_cookies(site) -> str | None:
         return None
 
 
-def _sign_in_again(site, closed, node='node', waits=RELOGIN_WAITS, tell=None) -> bool:
+def _sign_in_again(site, closed, runtime=None, waits=RELOGIN_WAITS, tell=None) -> bool:
     """The feed's session expired while it waited for the next trading day (brokers end their sessions at 05:00): sign
     in as `brisk login` does, with the passkey saved for this broker, and keep the cookies; the host reads them within
     a minute. A person who needs to know is told on stderr (`tell`): there is no passkey for this site (a saved one is
@@ -331,7 +331,7 @@ def _sign_in_again(site, closed, node='node', waits=RELOGIN_WAITS, tell=None) ->
             return False   # the feed is closed, or somebody signed in already
         tell('the session has expired; signing in again with your saved passkey (Chrome opens)')
         try:
-            passkey.login(remember=True, node=node, site=site)
+            passkey.login(remember=True, runtime=runtime, site=site)
         except Exception as error:  # noqa: BLE001 - whatever stopped it, the next try or the person goes on
             later = waits[number] if number < len(waits) else None
             tell(f'signing in again failed: {error}; ' + (f'trying again in {later // 60} minutes' if later else
@@ -347,7 +347,7 @@ def _check_session(session: Session) -> None:
     session.get('/api/frontend/boot')
 
 
-def _connect(site, codes=None, history=False, node='node', timeout=120, upload=None, trace_protocol=False, profile=None,
+def _connect(site, codes=None, history=False, runtime=None, timeout=120, upload=None, trace_protocol=False, profile=None,
              upload_market_data=None, output=None, on_day=None, gateway=False, fast_symbols=None):
     """briskapi.connect(site=...): the live feed of your broker's BRiSK, through the site's own WASM
     decoder under Node, never Chrome. It uses the session briskapi.login made for `site`, or signs in as
@@ -384,13 +384,14 @@ def _connect(site, codes=None, history=False, node='node', timeout=120, upload=N
     from briskapi import cli
     from briskapi._live import Feed
     session = (_client if _client is not None and _client.site == site else _login(site=site)).session
-    cli.check_node(node)      # local checks first: a missing Node is reported without contacting the site
+    runtime = cli.pick_runtime(runtime)
+    cli.check_runtime(runtime)      # local checks first: a missing runtime is reported without contacting the site
     if sys._is_gil_enabled():
         warnings.warn('This Python has the GIL, so the feed reads the stream and writes the recording in turns, and '
                       'it can fall seconds behind at the opening auction. Use free-threaded Python 3.14 (python3.14t).',
                       stacklevel=3)
     _check_session(session)
-    command = [node, str(DECODER)]
+    command = [runtime, str(DECODER)]
     if codes:
         command += ['--codes', codes if isinstance(codes, str) else ','.join(map(str, codes))]
     if trace_protocol:
@@ -407,7 +408,7 @@ def _connect(site, codes=None, history=False, node='node', timeout=120, upload=N
         env['BRISK_FAST_SYMBOLS'] = str(fast_symbols)
     feed = Feed(command=command, env=env, history=history, upload=upload, timing=session.site,
                 upload_market_data=upload_market_data, output=output, on_day=on_day, gateway=gateway,
-                relogin=lambda closed: _sign_in_again(session.site, closed, node=node))
+                relogin=lambda closed: _sign_in_again(session.site, closed, runtime=runtime))
     try:
         return feed.ready(timeout)
     except BaseException:

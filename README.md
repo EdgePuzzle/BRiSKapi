@@ -48,7 +48,7 @@ maps one to the other. `briskapi.Live` uses the cloud API's names and records.
 
 ## Install
 
-Free-threaded Python 3.14 (`python3.14t`) and Node 22+. The feed records the whole market,
+Free-threaded Python 3.14 (`python3.14t`) and Node 22+ (or Bun 1.4+, which BRiSK uses on a Mac that has it). The feed records the whole market,
 whose opening auction changes thousands of books within seconds, by reading, parsing and
 writing on several cores at once, which Python does only without the GIL (a Python with it
 works, but warns that it can fall behind at the open). BRiSK's own decoder is a WebAssembly
@@ -380,7 +380,7 @@ reusing its data.
 Many brokers now have you sign in with a passkey. If yours does, `briskapi` can do the
 sign-in for you and keep the BRiSK session cookies, instead of you copying them from a
 browser. It works with the BRiSK sites of SBI, Matsui, Monex, SMBC Nikko and Tachibana e-shiten,
-or any broker you add. It needs Chrome, Node 22+ and a safe place for the passkey: the macOS Keychain or Windows
+or any broker you add. It needs Chrome, Node 22+ (or Bun 1.4+) and a safe place for the passkey: the macOS Keychain or Windows
 Credential Manager (on Linux, an owner-only file you opt into). It runs on macOS and Windows (run it
 from PowerShell or `cmd` so it uses Windows' own Chrome and Node, not WSL's) and is also tested on Linux.
 

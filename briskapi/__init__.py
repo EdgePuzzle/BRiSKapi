@@ -54,7 +54,7 @@ SITES = ('demo', *_brisk.SITES)   # the demo, then the brokers' BRiSK
 
 
 def connect(*, site=None, codes=None, history=False, upload=None, output=None, on_day=None, gateway=False, timeout=None,
-            node='node', cache=None, speed=1, limit_frames=None, trace_protocol=False, profile=None,
+            runtime=None, cache=None, speed=1, limit_frames=None, trace_protocol=False, profile=None,
             upload_market_data=None, fast_symbols=None) -> Feed:
     """Start a live feed and make it the default for Ticker and Market, as `brisk live --site SITE` does:
 
@@ -79,7 +79,7 @@ def connect(*, site=None, codes=None, history=False, upload=None, output=None, o
     """
     if site not in SITES:
         raise ValueError(f'Choose a site: {", ".join(map(repr, SITES))} (got {site!r})')
-    common = dict(codes=codes, history=history, upload=upload, output=output, on_day=on_day, gateway=gateway, node=node)
+    common = dict(codes=codes, history=history, upload=upload, output=output, on_day=on_day, gateway=gateway, runtime=runtime)
     given = dict(cache=cache, speed=speed, limit_frames=limit_frames, trace_protocol=trace_protocol, profile=profile,
                  upload_market_data=upload_market_data, fast_symbols=fast_symbols)
     demo = site == 'demo'

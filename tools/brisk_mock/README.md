@@ -14,7 +14,7 @@ rust/brisk_quote_ingest/target/release/brisk_quote_ingest \
   --cache /tmp/brisk-mock-cache --latest /tmp/brisk-latest.json
 ```
 
-Node 22+ and Rust 1.92+ are required. There are no
+Node 22+ (or Bun 1.4+) and Rust 1.92+ are required. There are no
 npm dependencies. Replay runs at its recorded pace by default. Add `--speed 0`
 for an unpaced benchmark, `--codes 7203,6758,8306,9984,6920,5659` for a basket,
 or `--events /tmp/brisk-events.jsonl` for a lossless decoded batch recording.

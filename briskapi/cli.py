@@ -28,9 +28,10 @@ from briskapi.schema import (RECORDING_PREFIX, REFERENCES, SCHEMA, SOURCES, MAX_
                              require)
 
 PACKAGE = Path(__file__).resolve().parent
-# BRiSK's own WASM decoder runs under Node; the package ships only this host and SHA-256 pins.
+# BRiSK's own WASM decoder runs under Node or Bun; the package ships only this host and SHA-256 pins.
 DECODER = PACKAGE / 'decoder' / 'decoder.cjs'
 MIN_NODE = 22
+MIN_BUN = (1, 4)    # the release it was tried on is 1.4.3
 # Bump with any PRIVACY.md change to what is collected; saved choices then lapse.
 POLICY_VERSION = 9
 NOTICE = '''\
@@ -65,15 +66,36 @@ Opt out for one run with --no-upload (or --no-upload-market-data to keep a broke
 capture's market data local), and for good with `brisk consent --revoke` or BRISK_UPLOAD=0.
 '''
 
-def check_node(node='node'):
-    """Fail early, with the fix, when Node is missing or older than the decoder hosts support."""
-    advice = f'Install Node.js {MIN_NODE} or newer from https://nodejs.org, or pass the path to it.'
+def pick_runtime(runtime=None):
+    """The program that runs the decoder host: the one named, else Bun on macOS when it is installed, else Node.
+    On a Mac Bun takes a busy opening about 11% faster than Node; on Windows Node is the faster of the two (ARCHITECTURE.md)."""
+    if runtime:
+        return runtime
+    return (shutil.which('bun') if sys.platform == 'darwin' else None) or 'node'
+
+
+def is_bun(runtime):
+    return Path(str(runtime)).stem.lower() == 'bun'
+
+
+def check_runtime(runtime=None):
+    """Fail early, with the fix, when the host's runtime (Node, or Bun) is missing or older than the decoder hosts support."""
+    runtime = pick_runtime(runtime)
+    bun = is_bun(runtime)
+    advice = (f'Install Bun {MIN_BUN[0]}.{MIN_BUN[1]} or newer from https://bun.sh, or pass the path to it.' if bun
+              else f'Install Node.js {MIN_NODE} or newer from https://nodejs.org, or pass the path to it.')
     try:
-        out = subprocess.run([node, '--version'], capture_output=True, text=True, timeout=30).stdout
+        out = subprocess.run([runtime, '--version'], capture_output=True, text=True, timeout=30).stdout
     except FileNotFoundError:
-        raise BriskError(f'Node.js was not found (looked for {str(node)!r}). BRiSK\'s decoder runs under Node. {advice}') from None
+        raise BriskError(f'Bun was not found (looked for {str(runtime)!r}). {advice}' if bun else
+                         f'Node.js was not found (looked for {str(runtime)!r}). BRiSK\'s decoder runs under Node. {advice}') from None
     except (OSError, subprocess.SubprocessError) as error:
-        raise BriskError(f'Could not run {str(node)!r} --version: {error}. {advice}') from error
+        raise BriskError(f'Could not run {str(runtime)!r} --version: {error}. {advice}') from error
+    if bun:
+        found = re.match(r'(\d+)\.(\d+)', out.strip())
+        if found and (int(found[1]), int(found[2])) < MIN_BUN:
+            raise BriskError(f'Bun {out.strip()} is too old; the decoder hosts need Bun {MIN_BUN[0]}.{MIN_BUN[1]}+. {advice}')
+        return
     found = re.match(r'v(\d+)\.', out.strip())
     if found and int(found[1]) < MIN_NODE:
         raise BriskError(f'Node.js {out.strip()} is too old; the decoder hosts need Node {MIN_NODE}+. {advice}')
@@ -495,13 +517,14 @@ def repair(recordings, others, output=None, until=None, window=5.0):
         entry['package'] = _package(destination, write)
     return _repair.repair(recordings, others, deliver, until, window, output.parent)
 
-def record_events(events, cache=None, codes=None, limit_frames=None, speed=1, binary=None, node='node'):
+def record_events(events, cache=None, codes=None, limit_frames=None, speed=1, binary=None, runtime=None):
     """Replay the pinned demo (downloaded, or a copy in `cache`) and save its decoded batches.
 
-    Needs only Node. A Rust collector binary (`brisk_quote_ingest`) is optional; it
+    Needs only Node (or Bun). A Rust collector binary (`brisk_quote_ingest`) is optional; it
     records the same batches and adds its own state validation and latency display.
     """
-    check_node(node)
+    runtime = pick_runtime(runtime)
+    check_runtime(runtime)
     options = ['--web'] if cache is None else ['--cache', str(cache)]
     options += ['--speed', str(speed)]
     if codes:
@@ -514,7 +537,7 @@ def record_events(events, cache=None, codes=None, limit_frames=None, speed=1, bi
                             '--latest', str(Path(tmp) / 'latest.json'), *options], check=True)
         return
     with open(events, 'wb') as out:
-        subprocess.run([node, str(DECODER), *options], check=True, stdout=out)
+        subprocess.run([runtime, str(DECODER), *options], check=True, stdout=out)
 
 def live(args):
     """Record the feed, reporting how it goes on stderr (with --quotes, print each quote update as one JSON line),

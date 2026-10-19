@@ -109,7 +109,7 @@ test('the BRiSK host bootstraps from boot, master and snapshot, then streams fra
     fetchImpl, WebSocketImpl: socketFrom(chunks), protocolVersion: 16000 });
   assert.equal(String(socketFrom.last.url), 'wss://sbi.brisk.jp/realtime/0?session=abc');
   assert.deepEqual(socketFrom.last.init.headers, { origin: 'https://sbi.brisk.jp', cookie: 'session_x=v' });
-  assert.equal(socketFrom.last.init.protocols, 'flex', 'the stream asks for the vendor client\'s subprotocol');
+  assert.deepEqual(socketFrom.last.init.protocols, ['flex'], 'the stream asks for the vendor client\'s subprotocol');
   assert.ok(requests.filter(r => r.path.startsWith('/api/app')).every(r => r.headers.authorization === 'Bearer token'));
   const [bootstrap, ...rest] = batches;
   assert.equal(bootstrap.source, 'brisk_live');
@@ -318,7 +318,7 @@ test('a connection lost says how the link looked when it closed: its age, its la
   await assert.rejects(live({ cookies: { s: 'v' }, codes: ['7203'], emit: async () => {}, fetchImpl, resumable: true,
     WebSocketImpl: socketFrom(chunks, 1006), protocolVersion: 16000, sleep: async () => {}, log: () => {} }),
   error => error instanceof Interrupted
-    && /^SBI BRiSK stream closed \(1006\) after \d+s \(last frame \d+\.\d s earlier, event loop lag up to \d+ ms, Node \d+\.\d GB\)$/
+    && /^SBI BRiSK stream closed \(1006\) after \d+s \(last frame \d+\.\d s earlier, event loop lag up to \d+ ms, (?:Node|Bun) \d+\.\d GB\)$/
       .test(error.message));
 });
 
@@ -411,7 +411,7 @@ test('e-shiten: its own address, a relative bundle, a templated decoder and the 
   assert.ok(requests.some(r => r.path === '/assets/wasm/fita.test.wasm'), 'the .wasm name follows the loader\'s');
   assert.equal(String(socketFrom.last.url), 'wss://api.brisk.jp/realtime/0?session=abc');
   assert.deepEqual(socketFrom.last.init.headers, { origin: 'https://next.e-shiten.brisk.jp' }, 'no cookies to another host');
-  assert.equal(socketFrom.last.init.protocols, 'flex');
+  assert.deepEqual(socketFrom.last.init.protocols, ['flex']);
   const [bootstrap] = batches;
   assert.equal(bootstrap.source, 'brisk_live');
   assert.equal(bootstrap.input_transport.kind, 'eshiten_websocket');

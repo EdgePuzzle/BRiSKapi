@@ -441,12 +441,13 @@ def _stop(proc):
             proc.kill()
 
 
-def _run(mode, request, node, on_credential, on_registered=None):
+def _run(mode, request, runtime, on_credential, on_registered=None):
     """Run the helper; its progress goes to our stderr, its credentials and result come back as JSON lines."""
     from briskapi import cli
-    cli.check_node(node)
+    runtime = cli.pick_runtime(runtime)
+    cli.check_runtime(runtime)
     # The helper speaks UTF-8 (a passkey's user name may be Japanese); on Windows the default would be the code page.
-    proc = subprocess.Popen([node, str(HELPER), mode], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding='utf-8')
+    proc = subprocess.Popen([runtime, str(HELPER), mode], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding='utf-8')
     result = None
     try:
         _send(proc, json.dumps({'mode': mode, **request}) + '\n')
@@ -528,7 +529,7 @@ def _deliver(site, cookies, remember):
     return SignIn(site, cookies, None, path)
 
 
-def enroll(site=None, login_url=None, chrome=None, profile_dir=None, replace=False, store=None, node='node', confirm=None,
+def enroll(site=None, login_url=None, chrome=None, profile_dir=None, replace=False, store=None, runtime=None, confirm=None,
            headless=False, choose=None, sites_file=None, user_id=None):
     """Capture the passkey your broker registers in a Chrome you drive by hand, and save it as that broker's.
 
@@ -546,7 +547,7 @@ def enroll(site=None, login_url=None, chrome=None, profile_dir=None, replace=Fal
         record['user_id'] = _check_user_id(user_id if user_id is not None else _ask_user_id(chosen))
     latest = []
     _run('enroll', _request(chosen, login_url=login_url or chosen.enroll_url, chrome=chrome, profile_dir=profile_dir,
-                            headless=headless or None), node, on_credential=latest.append, on_registered=confirm or _confirm)
+                            headless=headless or None), runtime, on_credential=latest.append, on_registered=confirm or _confirm)
     if not latest:
         raise PasskeyError('No passkey was captured')
     store.save(chosen.id, {**record, 'credential': latest[-1]})  # Only now: a failed enrollment must not replace a working one.
@@ -555,7 +556,7 @@ def enroll(site=None, login_url=None, chrome=None, profile_dir=None, replace=Fal
 
 
 def login(remember=True, login_url=None, launch_url=None, passkey_button=None, chrome=None, profile_dir=None, headless=False,
-          store=None, node='node', sites_file=None, site=None) -> SignIn:
+          store=None, runtime=None, sites_file=None, site=None) -> SignIn:
     """Sign in to a broker with its saved passkey and keep its BRiSK cookies. `site` says which when more than one broker
     has a passkey; with only one it is that one. Signing in takes this computer's passkey lock, so two sign-ins (two feeds,
     say) go one after the other."""
@@ -572,7 +573,7 @@ def login(remember=True, login_url=None, launch_url=None, passkey_button=None, c
         request.update(userField=site.user_field, userId=record['user_id'])
     kept = {key: record[key] for key in ('site', 'user_id') if key in record}
     with _one_at_a_time():
-        result = _run('login', request, node, on_credential=lambda credential: store.save(site.id, {**kept, 'credential': credential}))
+        result = _run('login', request, runtime, on_credential=lambda credential: store.save(site.id, {**kept, 'credential': credential}))
     return _deliver(site, result['cookies'], remember)
 
 

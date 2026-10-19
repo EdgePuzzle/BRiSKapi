@@ -48,7 +48,8 @@ e支店の BRiSK Next、松井証券、マネックス証券、SMBC日興証券�
 
 ## インストール
 
-フリースレッド版の Python 3.14（`python3.14t`）と Node 22 以上が必要です。フィードは全銘柄を記録します。
+フリースレッド版の Python 3.14（`python3.14t`）と Node 22 以上（または Bun 1.4 以上。Bun が入っている Mac では BRiSK は Bun を使います）が
+必要です。フィードは全銘柄を記録します。
 全銘柄の寄付では数秒のうちに何千もの板が変わるため、読み込み・解析・書き込みを複数のコアで同時に行いますが、
 Python がそうできるのは GIL がない場合だけです（GIL のある Python でも動きますが、寄付で遅れることがあると
 警告します）。BRiSK 自身のデコーダーは Node 上で動く WebAssembly モジュールです。
@@ -379,7 +380,7 @@ feed = briskapi.connect(site="matsui", codes=["7203"])   # ライブ
 近年は、パスキーでのサインインを求める証券会社が増えています。お使いの証券会社がそうなら、
 Cookie をブラウザからコピーする代わりに、`briskapi` がサインインして BRiSK のセッション
 Cookie を保存できます。SBI証券、松井証券、マネックス証券、SMBC日興証券、立花証券 e支店の
-BRiSK に対応し、他の証券会社も追加できます。Chrome、Node 22 以上、そしてパスキーの安全な保管先（macOS のキー
+BRiSK に対応し、他の証券会社も追加できます。Chrome、Node 22 以上（または Bun 1.4 以上）、そしてパスキーの安全な保管先（macOS のキー
 チェーンまたは Windows の資格情報マネージャー。Linux では選択式の本人のみ読み取り可のファイル）が
 必要です。macOS と Windows で動作し（Windows では PowerShell か `cmd` から実行し、WSL ではなく Windows 側の
 Chrome と Node を使います）、Linux でもテストしています。
