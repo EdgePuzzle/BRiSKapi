@@ -27,9 +27,9 @@ def _codes(codes):
     return codes if isinstance(codes, str) else ','.join(map(str, codes))
 
 
-def _decoder(cache, codes, speed, limit_frames, node):
+def _decoder(cache, codes, speed, limit_frames, runtime):
     """The demo's decoder: its files downloaded from BRiSK's demo site, or a copy in `cache`."""
-    command = [cli.runtime(node), str(DECODER), *(['--web'] if cache is None else ['--cache', str(cache)]), '--speed', str(speed)]
+    command = [cli.pick_runtime(runtime), str(DECODER), *(['--web'] if cache is None else ['--cache', str(cache)]), '--speed', str(speed)]
     if codes:
         command += ['--codes', _codes(codes)]
     if limit_frames:
@@ -73,11 +73,11 @@ def _stop(process):
     process.wait()
 
 
-def stream(cache=None, codes=None, speed=1, limit_frames=None, node=None) -> Iterator[dict]:
+def stream(cache=None, codes=None, speed=1, limit_frames=None, runtime=None) -> Iterator[dict]:
     """Yield the demo's raw decoded batches as each frame replays (bootstrap, quote deltas, end): its files
     downloaded from BRiSK's demo site, or a copy downloaded before (`cache`)."""
-    cli.check_node(node)
-    process = _decoder(cache, codes, speed, limit_frames, node)
+    cli.check_runtime(runtime)
+    process = _decoder(cache, codes, speed, limit_frames, runtime)
     try:
         for line in process.stdout:
             yield json.loads(line)
@@ -134,7 +134,7 @@ class Feed:
     _lane_split = True   # the fast lane's lines go to the gateway on a thread of their own (_lane_loop); the benchmark turns it off to compare
 
     def __init__(self, cache=None, codes=None, speed=1, limit_frames=None, upload=None,
-                 history=False, node=None, *, command=None, env=None, timing=None, upload_market_data=None, output=None,
+                 history=False, runtime=None, *, command=None, env=None, timing=None, upload_market_data=None, output=None,
                  on_day=None, gateway=False, relogin=None):
         # A broker session uploads its timing summary and its market recording; upload_market_data=False keeps
         # the market recording local.
@@ -142,7 +142,7 @@ class Feed:
             raise BriskError('upload_market_data applies to a broker live session (a site other than the demo)')
         if upload is False and upload_market_data:
             raise BriskError('upload=False keeps the whole session local; drop upload_market_data=True')
-        cli.check_node(command[0] if command else node)
+        cli.check_runtime(command[0] if command else runtime)
         if command is None:
             self._package, self._timing = _consent(upload, limit_frames)[1], None
         else:
@@ -193,7 +193,7 @@ class Feed:
         self._process = (subprocess.Popen(command, stdout=subprocess.PIPE, stdin=subprocess.PIPE,
                                           env={**(env or os.environ), 'BRISK_CONTROL': '1',
                                                **({'BRISK_LANES': '1'} if lanes else {})}) if command
-                         else _decoder(cache, codes, speed, limit_frames, node))
+                         else _decoder(cache, codes, speed, limit_frames, runtime))
         if gateway:
             try:
                 # A broker's stream is XTKS.BRISK, as its recordings are in the cloud API; the demo's XTKS.BRISKDEMO.
@@ -809,11 +809,11 @@ class Feed:
 
 
 def connect(cache=None, codes=None, speed=1, limit_frames=None, upload=None, history=False,
-            node=None, timeout=60, output=None, on_day=None, gateway=False) -> Feed:
+            runtime=None, timeout=60, output=None, on_day=None, gateway=False) -> Feed:
     """briskapi.connect(site="demo"): start the demo's feed and return once its bootstrap state is available. `output` keeps the finished
     recording there (as SOURCE_YYYYMMDD_FROM-TO); `on_day(result)` is called once it is kept and uploaded.
     gateway=True also serves it to briskapi.Live on this computer."""
-    feed = Feed(cache, codes, speed, limit_frames, upload, history, node, output=output, on_day=on_day,
+    feed = Feed(cache, codes, speed, limit_frames, upload, history, runtime, output=output, on_day=on_day,
                 gateway=gateway)
     try:
         return feed.ready(timeout)

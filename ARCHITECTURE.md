@@ -888,8 +888,8 @@ against a live session.
 
 ### The host's runtime: Node or Bun
 
-The decoder host runs under Node 22+ or Bun 1.4+. `cli.runtime` picks the program: the one the caller names (the
-`node=` parameter keeps its name), else Bun on macOS when it is on the PATH, else Node. The same code and the
+The decoder host runs under Node 22+ or Bun 1.4+. `cli.pick_runtime` picks the program: the one the caller names (the
+`runtime=` parameter, which was `node=` until 1.7), else Bun on macOS when it is on the PATH, else Node. The same code and the
 repo's harness (`tools/brisk_mock/benchmark_feed.py`), the demo's whole day, 2026-10-19:
 
 - **macOS** (Apple silicon), unpaced, 4 and 8 workers: Bun 134,000 and 135,000 quote updates a second against

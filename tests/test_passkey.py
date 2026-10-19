@@ -506,8 +506,8 @@ def test_login_needs_a_usable_saved_login_and_node(tmp_path, helper):
         passkey.login(store=saved(tmp_path), site='monex')
     with pytest.raises(sites.SiteError, match="Unknown site 'gone'"):
         passkey.login(store=saved(tmp_path / 'gone', {'site': 'gone', 'credential': PASSKEY}), site='gone')
-    for call in (lambda: passkey.login(store=saved(tmp_path), node=str(tmp_path / 'missing')),
-                 lambda: passkey.enroll(site='sbi', store=keeper(tmp_path / 'e'), node=str(tmp_path / 'missing'))):
+    for call in (lambda: passkey.login(store=saved(tmp_path), runtime=str(tmp_path / 'missing')),
+                 lambda: passkey.enroll(site='sbi', store=keeper(tmp_path / 'e'), runtime=str(tmp_path / 'missing'))):
         with pytest.raises(briskapi.BriskError, match='not found'):
             call()
 
