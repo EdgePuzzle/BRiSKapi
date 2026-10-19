@@ -67,7 +67,7 @@ function resolveProfile(overrides = {}) {
 }
 
 class Link {
-  // options: WebSocketImpl, url, headers, protocols, name (for errors), profile, context() -> Promise<object>, trace(line),
+  // options: WebSocketImpl, url, headers, protocols (a name or a list), name (for errors), profile, context() -> Promise<object>, trace(line),
   //   onBinary(Buffer), onClose({code, reason}), onError(Error), connectTimeoutMs
   constructor(options) {
     this.o = { connectTimeoutMs: 15000, ...options };
@@ -76,7 +76,8 @@ class Link {
     this.version = null;
     this.finished = false;
     this.timers = new Set();
-    const init = { headers: this.o.headers, ...(this.o.protocols ? { protocols: this.o.protocols } : {}) };
+    // The subprotocols as a list: Node's WebSocket takes a name or a list, Bun's refuses a bare name.
+    const init = { headers: this.o.headers, ...(this.o.protocols ? { protocols: [].concat(this.o.protocols) } : {}) };
     const socket = this.socket = new this.o.WebSocketImpl(this.o.url, init);
     socket.binaryType = 'arraybuffer';
     socket.addEventListener('open', () => this.trace('<', `open (subprotocol ${JSON.stringify(socket.protocol || '')})`));

@@ -296,7 +296,8 @@ test('the heartbeat monitor reports a stale feed even while heartbeats keep comi
 
 test('the socket asks for the subprotocol it is given, names its site in errors and traces what the server agreed', async () => {
   const { seen, socket } = open({ protocols: 'flex', name: 'e-shiten BRiSK Next' });
-  assert.equal(socket.init.protocols, 'flex');
+  assert.deepEqual(socket.init.protocols, ['flex'], 'asked for as a list, which every runtime\'s WebSocket takes');
+  assert.deepEqual(open({ protocols: ['flex', 'other'] }).socket.init.protocols, ['flex', 'other'], 'a list stays one list');
   socket.protocol = 'flex';
   socket.dispatchEvent(new Event('open'));
   assert.ok(seen.trace.some(line => line.includes('open (subprotocol "flex")')), seen.trace.join('\n'));
