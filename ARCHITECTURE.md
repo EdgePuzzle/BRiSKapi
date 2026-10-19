@@ -7,7 +7,7 @@ itself. For usage, see the [README](README.md).
 
 | Component | Where | Role |
 | --- | --- | --- |
-| Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `brisk.cjs` drives a broker's BRiSK decoder (SBI's, e-shiten BRiSK Next's, Matsui's, Monex's or SMBC Nikko's) from an authenticated session, one trading day after another, reading a large selection's quotes with worker threads (`workers.cjs`). Both emit one JSON batch per frame. |
+| Decoder hosts | `briskapi/decoder/` | Run BRiSK's own WASM decoder in Node or Bun, without a browser or Chrome DevTools. `decoder.cjs` replays the public demo, whose assets must match SHA-256 pins in `assets.json`. `brisk.cjs` drives a broker's BRiSK decoder (SBI's, e-shiten BRiSK Next's, Matsui's, Monex's or SMBC Nikko's) from an authenticated session, one trading day after another, reading a large selection's quotes with worker threads (`workers.cjs`). Both emit one JSON batch per frame. |
 | Python API | `briskapi/` | `Recording` (files), `Feed` (live, background thread, with a worker thread that packages and uploads each finished day), `Ticker`/`Market` views and `Archive`. |
 | BRiSK site client | `briskapi/brisk.py` | Cookie login (SBI by default, or another broker with `site=`: `e-shiten`, `matsui`, `monex`, `smbcnikko`), token boot and the REST data behind `Ticker.candles`/`margin` and `Market.turnover`/`lists`/`events`/`schedule`/`watchlist`; `briskapi.connect(site=...)` starts the live host through it (`_connect`). |
 | Archive client | `briskapi/cli.py`, `briskapi/schema.py`, `briskapi/_parquet.py`, `briskapi/identity.py` | The `brisk` CLI, upload consent, your identity, Parquet packaging, upload, verified download, deletion, restore and export. |
@@ -886,6 +886,42 @@ connection that drops mid-session, boots that fail and a session that expires be
 reconnecting). The clock rule has no test, and none of it has run
 against a live session.
 
+### The host's runtime: Node or Bun
+
+The decoder host runs under Node 22+ or Bun 1.4+. `cli.runtime` picks the program: the one the caller names (the
+`node=` parameter keeps its name), else Bun on macOS when it is on the PATH, else Node. The same code and the
+repo's harness (`tools/brisk_mock/benchmark_feed.py`), the demo's whole day, 2026-10-19:
+
+- **macOS** (Apple silicon), unpaced, 4 and 8 workers: Bun 134,000 and 135,000 quote updates a second against
+  Node's 120,000 and 122,000 (+11-12%; runs differ by about ±15%). A replay at the demo's own pace is the same on both
+  (the callback of a Live session on two symbols: median 1.9 ms, 99th percentile 20 ms), and the host's event loop
+  stalls less in a burst under Bun (a 2 ms timer late by 0.6 ms at the 99th percentile, against 2.0 ms).
+- **Windows** (i5-12600K with other programs using 20-40% of it, host at above-normal priority): Node 49,500 and
+  47,700 against Bun's 42,900 and 44,600, so Node is the default there; Bun's median callback at the demo's pace is
+  2.5-2.7 ms against Node's 3.9-4.1 ms, and its 99th percentile is the machine's noise either way.
+- **Memory**: Bun peaks at 1.5-2 times Node in the whole feed (3 times for the host replaying alone). JavaScriptCore counts the vendor WASM's 256 MiB memory as heap, so it lets
+  some 560 MiB of garbage collect later; a forced collection leaves less live than Node does. Starting the host with
+  `BUN_JSC_forceRAMSize=1073741824` cuts a third of it at no cost in speed; BRiSK does not set it.
+- **API calls** do not change: `Live.latest()` over 1,500 symbols takes 17.0 ms at the demo's pace on Node and 16.5 ms on Bun, and the
+  newest quote it returns is about 22 ms old on both (at 12 times the pace Node is ahead by a few milliseconds). That call is
+  the Python feed's work; the runtime only decides how fast the host drains a burst.
+- Deno was tried and is slower than both.
+
+What differs, and what the code does about it:
+
+- Bun's `new WebSocket(url, {protocols})` takes a list, never a bare name (`Value is not a sequence`), where Node takes
+  either. `Link` always passes a list. The unit tests' fake sockets accept anything, so `websocket.test.cjs` runs the
+  link over a real local socket.
+- Bun has no `gc` to reach: `collectGarbage()` calls `Bun.gc(true)` between sessions, as it reaches V8's under Node.
+- Bun sends no `User-Agent` (Node sends `node`); a dropped connection is a close with code 1006 and no `error` event
+  before it (Node raises one first); a refused upgrade is close 1002 "Expected 101 status code" (Node: 1006 and no
+  text). The host treats every close but 1000 alike, so none of it changes what it does.
+- A trap in the WASM carries each engine's own words; the host knows it by `error.name === 'RuntimeError'`.
+- A Bun binary named `node` waits for a console on `node --version`; the file must be called `bun`.
+
+`tools/brisk_mock/*.test.cjs` pass under both (`bun test --timeout 240000 tools/brisk_mock/`: Bun's 5 s per test is too
+short on a loaded machine). CI runs them under Node only.
+
 ### Tachibana e-shiten BRiSK Next
 
 e-shiten's BRiSK Next (`next.e-shiten.brisk.jp`) is the same app. In sessions on
@@ -970,7 +1006,7 @@ Windows itself, using Windows' Chrome, Node and Python; WSL is Linux and would n
 
 ### The helper
 
-`decoder/passkey.cjs` runs under Node and drives a Chrome it starts itself. It holds no site of its own:
+`decoder/passkey.cjs` runs under Node or Bun and drives a Chrome it starts itself. It holds no site of its own:
 the login URL, button text, cookie host and any user ID box and user ID come in the request.
 
 1. **Private pipe, no port.** Chrome is started with `--remote-debugging-pipe` and talked to

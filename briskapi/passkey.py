@@ -444,6 +444,7 @@ def _stop(proc):
 def _run(mode, request, node, on_credential, on_registered=None):
     """Run the helper; its progress goes to our stderr, its credentials and result come back as JSON lines."""
     from briskapi import cli
+    node = cli.runtime(node)
     cli.check_node(node)
     # The helper speaks UTF-8 (a passkey's user name may be Japanese); on Windows the default would be the code page.
     proc = subprocess.Popen([node, str(HELPER), mode], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding='utf-8')
@@ -528,7 +529,7 @@ def _deliver(site, cookies, remember):
     return SignIn(site, cookies, None, path)
 
 
-def enroll(site=None, login_url=None, chrome=None, profile_dir=None, replace=False, store=None, node='node', confirm=None,
+def enroll(site=None, login_url=None, chrome=None, profile_dir=None, replace=False, store=None, node=None, confirm=None,
            headless=False, choose=None, sites_file=None, user_id=None):
     """Capture the passkey your broker registers in a Chrome you drive by hand, and save it as that broker's.
 
@@ -555,7 +556,7 @@ def enroll(site=None, login_url=None, chrome=None, profile_dir=None, replace=Fal
 
 
 def login(remember=True, login_url=None, launch_url=None, passkey_button=None, chrome=None, profile_dir=None, headless=False,
-          store=None, node='node', sites_file=None, site=None) -> SignIn:
+          store=None, node=None, sites_file=None, site=None) -> SignIn:
     """Sign in to a broker with its saved passkey and keep its BRiSK cookies. `site` says which when more than one broker
     has a passkey; with only one it is that one. Signing in takes this computer's passkey lock, so two sign-ins (two feeds,
     say) go one after the other."""

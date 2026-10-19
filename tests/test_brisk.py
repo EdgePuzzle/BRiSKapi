@@ -976,7 +976,7 @@ def passkey_login(monkeypatch, tmp_path):
 def test_a_feed_whose_session_expired_signs_in_again_with_the_saved_passkey(passkey_login):
     told, closed = [], _Closed()
     assert brisk._sign_in_again('sbi', closed, tell=told.append) is True
-    assert passkey_login['logins'] == [{'remember': True, 'node': 'node', 'site': 'sbi'}] and closed.waits == [0]
+    assert passkey_login['logins'] == [{'remember': True, 'node': None, 'site': 'sbi'}] and closed.waits == [0]   # None: the passkey helper chooses its runtime as the host does
     assert told == ['the session has expired; signing in again with your saved passkey (Chrome opens)',
                     'signed in again; the feed goes on']
     assert json.loads(brisk.cookies_path('sbi').read_text()) == {'session_bfaf77a2': 'new'}, 'where the host reads them'

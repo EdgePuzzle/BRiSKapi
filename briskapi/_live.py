@@ -29,7 +29,7 @@ def _codes(codes):
 
 def _decoder(cache, codes, speed, limit_frames, node):
     """The demo's decoder: its files downloaded from BRiSK's demo site, or a copy in `cache`."""
-    command = [node, str(DECODER), *(['--web'] if cache is None else ['--cache', str(cache)]), '--speed', str(speed)]
+    command = [cli.runtime(node), str(DECODER), *(['--web'] if cache is None else ['--cache', str(cache)]), '--speed', str(speed)]
     if codes:
         command += ['--codes', _codes(codes)]
     if limit_frames:
@@ -73,7 +73,7 @@ def _stop(process):
     process.wait()
 
 
-def stream(cache=None, codes=None, speed=1, limit_frames=None, node='node') -> Iterator[dict]:
+def stream(cache=None, codes=None, speed=1, limit_frames=None, node=None) -> Iterator[dict]:
     """Yield the demo's raw decoded batches as each frame replays (bootstrap, quote deltas, end): its files
     downloaded from BRiSK's demo site, or a copy downloaded before (`cache`)."""
     cli.check_node(node)
@@ -134,7 +134,7 @@ class Feed:
     _lane_split = True   # the fast lane's lines go to the gateway on a thread of their own (_lane_loop); the benchmark turns it off to compare
 
     def __init__(self, cache=None, codes=None, speed=1, limit_frames=None, upload=None,
-                 history=False, node='node', *, command=None, env=None, timing=None, upload_market_data=None, output=None,
+                 history=False, node=None, *, command=None, env=None, timing=None, upload_market_data=None, output=None,
                  on_day=None, gateway=False, relogin=None):
         # A broker session uploads its timing summary and its market recording; upload_market_data=False keeps
         # the market recording local.
@@ -809,7 +809,7 @@ class Feed:
 
 
 def connect(cache=None, codes=None, speed=1, limit_frames=None, upload=None, history=False,
-            node='node', timeout=60, output=None, on_day=None, gateway=False) -> Feed:
+            node=None, timeout=60, output=None, on_day=None, gateway=False) -> Feed:
     """briskapi.connect(site="demo"): start the demo's feed and return once its bootstrap state is available. `output` keeps the finished
     recording there (as SOURCE_YYYYMMDD_FROM-TO); `on_day(result)` is called once it is kept and uploaded.
     gateway=True also serves it to briskapi.Live on this computer."""

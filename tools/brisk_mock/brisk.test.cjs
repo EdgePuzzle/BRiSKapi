@@ -318,7 +318,7 @@ test('a connection lost says how the link looked when it closed: its age, its la
   await assert.rejects(live({ cookies: { s: 'v' }, codes: ['7203'], emit: async () => {}, fetchImpl, resumable: true,
     WebSocketImpl: socketFrom(chunks, 1006), protocolVersion: 16000, sleep: async () => {}, log: () => {} }),
   error => error instanceof Interrupted
-    && /^SBI BRiSK stream closed \(1006\) after \d+s \(last frame \d+\.\d s earlier, event loop lag up to \d+ ms, Node \d+\.\d GB\)$/
+    && /^SBI BRiSK stream closed \(1006\) after \d+s \(last frame \d+\.\d s earlier, event loop lag up to \d+ ms, (?:Node|Bun) \d+\.\d GB\)$/
       .test(error.message));
 });
 

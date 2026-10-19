@@ -348,7 +348,8 @@ test('a decoder trap names the issue and leaves the decoder\'s stack where it wa
     decoder.feed(stream.next().value.data);
     for (const id of decoder.changed()) { try { decoder.quote(id); } catch (e) { error = e; break; } }
   }
-  assert.match(error?.message, /^The quote for \d+: the decoder trapped \(float unrepresentable in integer range\); its state is inconsistent/);
+  // The trap's own words are the engine's: V8 says what the conversion did, JavaScriptCore (Bun) which operation failed.
+  assert.match(error?.message, /^The quote for \d+: the decoder trapped \((?:float unrepresentable in integer range|Out of bounds Trunc operation.*)\); its state is inconsistent/);
   assert.equal(decoder.w.stackSave(), stack);
 });
 
