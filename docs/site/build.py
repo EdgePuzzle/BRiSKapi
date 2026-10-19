@@ -279,7 +279,7 @@ HOME = {
 GUIDE_CARDS = [
     ('guides/which-api.md', 'compass-outline', 'Which API should I use?', 'どの API を使うか',
      'A live feed, a recording, the cloud API or your broker\'s BRiSK.', 'ライブフィード、記録、クラウド API、証券会社の BRiSK。'),
-    ('guides/install.md', 'download', 'Install', 'インストール', 'pip, Node and the demo.', 'pip、Node、デモ。'),
+    ('guides/install.md', 'download', 'Install', 'インストール', 'pip, Node or Bun, and the demo.', 'pip、Node か Bun、デモ。'),
     ('guides/recording.md', 'record-circle-outline', 'Recording', '記録する',
      'What brisk live and brisk record keep and upload, and what reads it.', 'brisk live と brisk record が何を残しアップロードし、何で読むか。'),
     ('guides/cli.md', 'console', 'Command line', 'コマンドライン', 'Every brisk command, and the Python call it stands for.',

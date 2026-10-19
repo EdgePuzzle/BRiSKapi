@@ -260,7 +260,7 @@ PYTHON = [
            'briskapi.connect(\n    *,\n    site: str,                              # "demo", or a broker: "sbi", ...\n'
            '    codes: list[str] | None = None,\n    history: bool = False,\n    upload: bool | None = None,\n'
            '    output: str | Path | None = None,\n    on_day: Callable | None = None,\n    gateway: bool = False,\n'
-           '    timeout: float | None = None,\n    node: str = "node",\n    cache: str | Path | None = None,        # the demo\n'
+           '    timeout: float | None = None,\n    runtime: str | None = None,             # Node or Bun: default Bun on a Mac that has it, else Node\n    cache: str | Path | None = None,        # the demo\n'
            '    speed: float = 1,                       # the demo\n'
            '    limit_frames: int | None = None,        # the demo\n    trace_protocol: bool = False,           # a broker\n'
            '    profile: dict | None = None,            # a broker\n    upload_market_data: bool | None = None,  # a broker\n'
@@ -553,7 +553,7 @@ BROKER = [
            {'Python': 'import briskapi\n\nbriskapi.login("e-shiten")   # BRISK_ESHITEN_COOKIES, or cookies saved by `brisk login`'},
            {'Python': '<briskapi.brisk.Client object>'}, illustrative=True),
     Method('python/broker_connect', 'briskapi.connect (your broker)', 'connect: broker',
-           'Your broker\'s live BRiSK feed, decoded by BRiSK\'s own decoder under Node. It records one trading '
+           'Your broker\'s live BRiSK feed, decoded by BRiSK\'s own decoder under Node or Bun. It records one trading '
            'day after another until closed, keeping (`output`) and uploading each day as two recordings, its morning '
            'and afternoon sessions. Without `output`, a recording is kept only in your archive, and with uploads off, nowhere. On the command line: '
            '`brisk live --site sbi` or another broker\'s site (see [Recording](/guides/recording.md)).',

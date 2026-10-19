@@ -439,7 +439,7 @@
   }
  },
  "python/broker_connect": {
-  "text": "お使いの証券会社のライブの BRiSK フィードです。BRiSK 自身のデコーダーを Node 上で動かしてデコードします。閉じるまで取引日を次々に記録し、各日を前場と後場の2つの記録としてディスクに残し（`output`）、アップロードします。`output` を指定しない場合、記録は自分のアーカイブにだけ残り、アップロードもオフならどこにも残りません。コマンドラインでは `brisk live --site sbi`（またはほかの証券会社のサイト）を使います（[記録する](/guides/recording.md)を参照）。",
+  "text": "お使いの証券会社のライブの BRiSK フィードです。BRiSK 自身のデコーダーを Node か Bun 上で動かしてデコードします。閉じるまで取引日を次々に記録し、各日を前場と後場の2つの記録としてディスクに残し（`output`）、アップロードします。`output` を指定しない場合、記録は自分のアーカイブにだけ残り、アップロードもオフならどこにも残りません。コマンドラインでは `brisk live --site sbi`（またはほかの証券会社のサイト）を使います（[記録する](/guides/recording.md)を参照）。",
   "returns": "[`Feed`](/reference/python/feed_quotes.md)。",
   "params": {
    "site": "`\"sbi\"`、`\"e-shiten\"`、`\"matsui\"`、`\"monex\"`、`\"smbcnikko\"`。[`login`](/reference/python/broker_login.md) で作ったセッションを使い、なければ同じ方法でサインインします。",
